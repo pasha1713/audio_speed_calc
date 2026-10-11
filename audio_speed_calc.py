@@ -33,7 +33,7 @@ if sys.platform == 'win32':
     except Exception:
         pass
 
-VERSION = "0.49"
+VERSION = "0.50"
 CONFIG_FILE = "audio_speed_config.json"
 
 DEFAULT_CONFIG = {
@@ -1147,6 +1147,7 @@ class AudioSpeedAnalyzer:
         self._drag_start_frame = None
         # История zoom
         self.zoom_history = []
+        self.zoom_pointer = -1  # <-- Добавьте эту строку. -1 означает, что история пуста.
         self._last_reset_action = None
         # Текстовые поля
         self.tb_x_start = None
@@ -1526,7 +1527,13 @@ class AudioSpeedAnalyzer:
         if self.harm_freqs:
             self.draw_harmonics()
         self.draw_ranges()
+
+        # Сначала сохраняем начальное состояние в историю
+        self._push_history()
+
+        # Теперь рисуем статус, когда в истории уже есть данные
         self.update_status()
+
         self.fig.canvas.draw_idle()
 
         plt.show()
@@ -1638,6 +1645,8 @@ class AudioSpeedAnalyzer:
             ('Сб.част',       '_btn_reset_freq', False, None),
             ('Сброс',         '_btn_reset_all', False, None),
             ('Назад',         '_btn_back', False, None),
+            ('Вперед',        '_step_forward', False, None),
+            ('Сохр.поз.',     '_btn_save_pos', False, None),
             ('Выход',         '_btn_exit', False, None),
         ]
         n_btns = len(btn_labels)
@@ -1739,6 +1748,11 @@ class AudioSpeedAnalyzer:
         self.fig.canvas.mpl_connect('close_event', self._on_close)
 
 
+    def _btn_save_pos(self, _=None):
+        """Сохранить текущее положение в историю как важное (без ограничения лимита)."""
+        self._push_history()  # Используем ту же логику, она теперь защищена от дублей
+        print("Текущее положение сохранено в историю.", file=sys.stderr)
+        self.update_status()
 
     def _patch_textbox(self, tb, idx):
         """Excel-like editing: select-all on click, Tab/Shift+Tab navigation."""
@@ -2005,8 +2019,22 @@ class AudioSpeedAnalyzer:
         self._reset_zoom()
 
     def _btn_back(self, _=None):
-        self._last_reset_action = None
-        self._step_back()
+        """Шаг назад по истории (X + Y). 
+        ВНИМАНИЕ: Больше НЕ сохраняет текущее состояние при нажатии.
+        Сохранение теперь происходит только через кнопку 'Сохр.поз.'.
+        """
+        if self.zoom_history:
+            entry = self.zoom_history.pop()
+            self.ax_spec.set_xlim(entry[0], entry[1])
+            self.analyze_start = entry[2]
+            self.analyze_dur = entry[3]
+            if len(entry) >= 6:
+                self.ax_spec.set_ylim(entry[4], entry[5])
+            self._update_time_span()
+            self._sync_fields()
+            self._redraw_all()
+        else:
+            self._reset_zoom()
 
     def _btn_exit(self, _=None):
         self._on_exit()
@@ -2260,31 +2288,62 @@ class AudioSpeedAnalyzer:
             color='red', alpha=0.15, zorder=5
         )
 
-    def _push_history(self):
-        """Сохранить текущий вид в историю (X + Y)."""
-        xlim = self.ax_spec.get_xlim()
-        ylim = self.ax_spec.get_ylim()
-        entry = (float(xlim[0]), float(xlim[1]),
-                 int(self.analyze_start), int(self.analyze_dur),
-                 float(ylim[0]), float(ylim[1]))
-        self.zoom_history.append(entry)
-        if len(self.zoom_history) > 50:
-            self.zoom_history.pop(0)
+    def _push_history(self):                                                    
+        """Сохранить текущий вид в историю (X + Y) с управлением указателем.""" 
+        xlim = self.ax_spec.get_xlim()                                          
+        ylim = self.ax_spec.get_ylim()                                          
+        entry = (float(xlim[0]), float(xlim[1]),                                
+                 int(self.analyze_start), int(self.analyze_dur),                
+                 float(ylim[0]), float(ylim[1]))                                
+                                                                                
+        # Защита от сохранения дублей текущего состояния                        
+        if self.zoom_history and self.zoom_history[-1] == entry:                
+            return                                                              
+                                                                                
+        # Если мы вернулись назад и делаем новый шаг, удаляем "будущее"         
+        if self.zoom_pointer < len(self.zoom_history) - 1:                      
+            self.zoom_history = self.zoom_history[:self.zoom_pointer + 1]       
+                                                                                
+        # Добавляем новое состояние и перемещаем указатель в конец              
+        self.zoom_history.append(entry)                                         
+        self.zoom_pointer = len(self.zoom_history) - 1                          
+                                                                                
+        # Ограничиваем размер истории (опционально, чтобы не росла бесконечно)  
+        if len(self.zoom_history) > 50:                                         
+            self.zoom_history.pop(0)                                            
+            # ВАЖНО: Если удалили 0-й элемент, указатель должен сдвинуться влево
+            if self.zoom_pointer > 0:                                           
+                self.zoom_pointer -= 1                                          
 
-    def _step_back(self):
-        """Шаг назад по истории (X + Y)."""
-        if self.zoom_history:
-            entry = self.zoom_history.pop()
-            self.ax_spec.set_xlim(entry[0], entry[1])
-            self.analyze_start = entry[2]
-            self.analyze_dur = entry[3]
-            if len(entry) >= 6:
+    def _step_back(self, event=None):                    
+        if self.zoom_pointer > 0:                        
+            self.zoom_pointer -= 1                       
+            entry = self.zoom_history[self.zoom_pointer] 
+                                                         
+            self.ax_spec.set_xlim(entry[0], entry[1])    
+            self.analyze_start = entry[2]                
+            self.analyze_dur = entry[3]                  
+            if len(entry) >= 6:                          
                 self.ax_spec.set_ylim(entry[4], entry[5])
-            self._update_time_span()
-            self._sync_fields()
-            self._redraw_all()
-        else:
-            self._reset_zoom()
+                                                         
+            self._update_time_span()                     
+            self._sync_fields()                          
+            self._redraw_all()                           
+                                                          
+    def _step_forward(self, event=None):                  
+        if self.zoom_pointer < len(self.zoom_history) - 1:
+            self.zoom_pointer += 1                        
+            entry = self.zoom_history[self.zoom_pointer]  
+                                                          
+            self.ax_spec.set_xlim(entry[0], entry[1])     
+            self.analyze_start = entry[2]                 
+            self.analyze_dur = entry[3]                   
+            if len(entry) >= 6:                           
+                self.ax_spec.set_ylim(entry[4], entry[5]) 
+                                                          
+            self._update_time_span()                      
+            self._sync_fields()                           
+            self._redraw_all()                            
 
     def _save_view(self):
         """Сохранить вид в конфиг (включая историю)."""
@@ -2310,31 +2369,57 @@ class AudioSpeedAnalyzer:
 
     def _restore_view(self):
         """Восстановить вид из конфига (включая историю)."""
-        vs = self.cfg.get('view_x_start')
-        ve = self.cfg.get('view_x_end')
-        vymin = self.cfg.get('view_y_min')
-        vymax = self.cfg.get('view_y_max')
-        # Оба режима (time и power): X=кадры, Y=частота
-        if vs is not None and ve is not None and ve > vs:
+        if not os.path.exists(self.config_path):
+            # Файла еще нет, это первый запуск. Ничего не делаем.
+            return
+
+        try:
+            with open(self.config_path, 'r', encoding='utf-8') as f:
+                cfg = json.load(f)
+        except (json.JSONDecodeError, FileNotFoundError):
+            # Файл битый или удален. Ничего не делаем.
+            return
+
+        # --- Восстановление осей ---
+        vs = cfg.get('view_x_start')
+        ve = cfg.get('view_x_end')
+        vymin = cfg.get('view_y_min')
+        vymax = cfg.get('view_y_max')
+
+        # Применяем только если в конфиге есть валидные числа
+        if vs is not None and ve is not None and vs < ve:
             self.ax_spec.set_xlim(vs, ve)
-            self.analyze_start = max(0, int(vs))
-            self.analyze_dur = int(ve - vs)
-            self._update_time_span()
-        if vymin is not None and vymax is not None and vymax > vymin:
+        
+        if vymin is not None and vymax is not None and vymin < vymax:
             self.ax_spec.set_ylim(vymin, vymax)
-        # Восстанавливаем историю zoom из JSON
-        vh = self.cfg.get('view_history', [])
-        self.zoom_history = []
-        for e in vh:
-            if len(e) >= 6:
-                self.zoom_history.append((float(e[0]), float(e[1]),
-                                          int(e[2]), int(e[3]),
-                                          float(e[4]), float(e[5])))
-            elif len(e) >= 4:
-                self.zoom_history.append((float(e[0]), float(e[1]),
-                                          int(e[2]), int(e[3])))
+
+        # --- Восстановление истории ---
+        vh = cfg.get('view_history', [])
+        self.zoom_history = []  # Очищаем старую
+        
+        if vh and isinstance(vh, list) and len(vh) > 0:
+            # Берем только последний (актуальный) элемент истории
+            last_entry = vh[-1]
+            
+            # Применяем лимиты из истории к графику
+            if 'xlim' in last_entry and 'ylim' in last_entry:
+                xlim = last_entry['xlim']
+                ylim = last_entry['ylim']
+                if len(xlim) == 2 and len(ylim) == 2:
+                    self.ax_spec.set_xlim(xlim[0], xlim[1])
+                    self.ax_spec.set_ylim(ylim[0], ylim[1])
+            
+            # Сохраняем эту историю в переменную класса для работы кнопок
+            self.zoom_history = vh
+            self.zoom_pointer = len(vh) - 1  # Указываем на последнюю запись
+
+        # Перерисовываем всё после восстановления
+        self._update_time_span()
         self._sync_fields()
         self.draw_tubes()
+        self.draw_ranges()
+        self.update_status()  # Теперь этот вызов точно нарисует "история: 1/1"
+        self.fig.canvas.draw_idle()
 
     def _on_close(self, event):
         """Сохранить вид при закрытии окна."""
@@ -2342,7 +2427,7 @@ class AudioSpeedAnalyzer:
             return
         self._closing = True
         self._save_view()
-        save_config(self.cfg, self.config_path)
+#        save_config(self.cfg, self.config_path)
 
     def _on_exit(self, _=None):
         """Сохранить вид + конфиг и закрыть окно."""
@@ -2350,7 +2435,7 @@ class AudioSpeedAnalyzer:
             return
         self._closing = True
         self._save_view()
-        save_config(self.cfg, self.config_path)
+#        save_config(self.cfg, self.config_path)
         plt.close(self.fig)
 
     def _on_span(self, xmin, xmax):
@@ -2641,7 +2726,7 @@ class AudioSpeedAnalyzer:
 
         # Сохранить папку в конфиг
         self.cfg['last_png_dir'] = png_dir
-        save_config(self.cfg, self.config_path)
+#        save_config(self.cfg, self.config_path)
 
     def _on_click(self, event):
         if event.xdata is None or event.ydata is None:
@@ -3266,36 +3351,42 @@ class AudioSpeedAnalyzer:
 
     def update_status(self):
         parts = []
+        
+        # Базовое состояние (всегда должно быть)
         if self.phase == self.PHASE_TIME:
-            parts.append(">>> Выделите диапазон кадров (drag мышью)")
+            parts.append(">> Выделите диапазон (drag)")
         elif self.phase == self.PHASE_H5:
-            parts.append(">>> Кликните на спектрограмме: 5-я гармоника")
+            parts.append(">> Клик: 5-я гармоника")
         elif self.phase == self.PHASE_H4:
-            parts.append(">>> Кликните на спектрограмме: 4-я гармоника")
+            parts.append(">> Клик: 4-я гармоника")
         elif self.phase == self.PHASE_DONE:
-            algo_name = ALGO_NAMES.get(self.last_algo, "?")
-            parts.append(f"Готово. Алгоритм {self.last_algo}: {algo_name}. S — сохранить, P — PNG")
-        if self.analyze_dur > 0:
-            fps = self.cfg['target_fps']
-            t0 = self.analyze_start / fps
-            t1 = (self.analyze_start + self.analyze_dur) / fps
-            parts.append(f"кадры: {int(self.analyze_start)}-{int(self.analyze_start + self.analyze_dur)} | время: {t0:.3f}-{t1:.3f}с")
-        if self.h5:
-            parts.append(f"H5={self.h5:.0f}")
-        if self.h4:
-            parts.append(f"H4={self.h4:.0f}")
-        if self.f0:
-            parts.append(f"f0={self.f0:.0f}")
-            parts.append(f"гарм.={self.n_harm}")
-        parts.append(f"цвет={self.color_steps}инд")
-        parts.append(f"алго={ALGO_NAMES.get(self.last_algo, '?')[:6]}")
+            parts.append("Готово. Z — назад, S — сохранить")
+
+        # --- ИСПРАВЛЕННАЯ ИСТОРИЯ ---
+        # Рисуем статус истории, если она вообще существует и в ней есть данные
         if self.zoom_history:
-            parts.append(f"история={len(self.zoom_history)}")
-        if self.h5_min is not None and self.h5_max is not None:
-            parts.append(f"H5: {self.h5_min:.0f}-{self.h5_max:.0f}")
-        if self.h4_min is not None and self.h4_max is not None:
-            parts.append(f"H4: {self.h4_min:.0f}-{self.h4_max:.0f}")
-        self.status.set_text(' | '.join(parts))
+            # Защита от ситуации, когда pointer не успел обновиться
+            if self.zoom_pointer is None or self.zoom_pointer < 0:
+                self.zoom_pointer = 0
+            
+            current_pos = self.zoom_pointer + 1
+            total_count = len(self.zoom_history)
+            
+            # Рисуем только если есть хотя бы один элемент
+            if total_count > 0:
+                parts.append(f"история: {current_pos}/{total_count}")
+
+        # Координаты (для отладки, можно убрать)
+        # xlim = self.ax_spec.get_xlim()
+        # ylim = self.ax_spec.get_ylim()
+        # parts.append(f"X: {xlim[0]:.1f}-{xlim[1]:.1f}")
+
+        # Собираем финальную строку
+        status_text = " | ".join(parts)
+        self.status.set_text(status_text)
+        
+        # Принудительно перерисовываем холст, чтобы текст точно обновился
+        self.fig.canvas.draw_idle()
 
     # ---------- помощь ----------
 
@@ -3393,7 +3484,6 @@ def prompt_car_params(config, config_path):
                 except ValueError:
                     print(f"    Ошибка: оставлено {cur}", file=sys.stderr)
         save_config(config, config_path)
-
 
 def main():
     parser = argparse.ArgumentParser(
