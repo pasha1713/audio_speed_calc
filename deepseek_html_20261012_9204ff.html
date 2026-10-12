@@ -1,0 +1,528 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>audio_speed_calc — расчёт скорости по звуку</title>
+<meta name="description" content="Расчёт скорости автомобиля по звуку двигателя из .ts-видеофрагментов.">
+<style>
+  :root {
+    --bg: #ffffff;
+    --fg: #1f2328;
+    --muted: #656d76;
+    --border: #d0d7de;
+    --card: #f6f8fa;
+    --accent: #0969da;
+    --accent-soft: #ddf4ff;
+    --code-bg: #f6f8fa;
+    --code-fg: #1f2328;
+    --table-alt: #f6f8fa;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0d1117;
+      --fg: #e6edf3;
+      --muted: #8b949e;
+      --border: #30363d;
+      --card: #161b22;
+      --accent: #58a6ff;
+      --accent-soft: #1f2d3d;
+      --code-bg: #161b22;
+      --code-fg: #e6edf3;
+      --table-alt: #161b22;
+    }
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--fg);
+  }
+  .wrap { max-width: 960px; margin: 0 auto; padding: 32px 24px 80px; }
+
+  header { text-align: center; padding: 24px 0 8px; }
+  h1 { margin: 0 0 8px; font-size: 2.2em; letter-spacing: -0.02em; }
+  .subtitle { color: var(--muted); font-size: 1.05em; margin: 0 0 16px; }
+  .badges { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; margin-bottom: 8px; }
+  .badge {
+    display: inline-block; padding: 3px 10px; border-radius: 999px;
+    font-size: 0.8em; font-weight: 600;
+    background: var(--accent-soft); color: var(--accent);
+    border: 1px solid var(--border);
+  }
+
+  h2 {
+    margin: 48px 0 16px; padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+    font-size: 1.5em; letter-spacing: -0.01em;
+  }
+  h2 .anchor { color: var(--muted); text-decoration: none; font-weight: 400;
+               opacity: 0; margin-left: 8px; transition: opacity .15s; }
+  h2:hover .anchor { opacity: 1; }
+  h3 { margin: 28px 0 12px; font-size: 1.15em; }
+
+  p, li { color: var(--fg); }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  nav.toc {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 8px; padding: 16px 24px; margin: 24px 0 8px;
+  }
+  nav.toc h3 { margin: 0 0 8px; font-size: 0.95em;
+               text-transform: uppercase; letter-spacing: 0.05em;
+               color: var(--muted); }
+  nav.toc ul { columns: 2; column-gap: 32px; list-style: none;
+               padding: 0; margin: 0; }
+  nav.toc li { margin: 4px 0; break-inside: avoid; }
+  @media (max-width: 640px) { nav.toc ul { columns: 1; } }
+
+  code {
+    background: var(--code-bg); color: var(--code-fg);
+    padding: 2px 6px; border-radius: 4px;
+    font: 0.88em ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+  pre {
+    background: var(--code-bg); border: 1px solid var(--border);
+    border-radius: 8px; padding: 14px 18px; overflow-x: auto;
+    font: 0.88em ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    line-height: 1.5;
+  }
+  pre code { background: none; padding: 0; font-size: 1em; }
+
+  kbd {
+    display: inline-block; padding: 2px 7px; margin: 0 1px;
+    font: 0.82em ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    background: var(--card); border: 1px solid var(--border);
+    border-bottom-width: 2px; border-radius: 5px;
+    color: var(--fg); line-height: 1;
+  }
+
+  table {
+    border-collapse: collapse; width: 100%; margin: 16px 0;
+    font-size: 0.94em; overflow: hidden; border-radius: 8px;
+    border: 1px solid var(--border);
+  }
+  th, td { padding: 8px 12px; text-align: left;
+           border-bottom: 1px solid var(--border); }
+  thead th { background: var(--card); font-weight: 600; }
+  tbody tr:nth-child(even) { background: var(--table-alt); }
+  tbody tr:last-child td { border-bottom: none; }
+
+  details {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 8px; padding: 12px 18px; margin: 16px 0;
+  }
+  details summary { cursor: pointer; font-weight: 600;
+                    user-select: none; }
+  details[open] summary { margin-bottom: 12px; }
+
+  footer {
+    margin-top: 64px; padding-top: 24px;
+    border-top: 1px solid var(--border);
+    color: var(--muted); font-size: 0.9em;
+    display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px;
+  }
+
+  .grid-cards {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 16px; margin: 16px 0;
+  }
+  .card {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 8px; padding: 16px;
+  }
+  .card h4 { margin: 0 0 8px; font-size: 1em; }
+  .card p { margin: 0; color: var(--muted); font-size: 0.9em; }
+
+  .callout {
+    border-left: 4px solid var(--accent);
+    background: var(--accent-soft);
+    padding: 12px 18px; border-radius: 0 8px 8px 0;
+    margin: 16px 0;
+  }
+  .callout strong { color: var(--accent); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>audio_speed_calc</h1>
+  <p class="subtitle">Расчёт скорости автомобиля по звуку двигателя из .ts-видеофрагментов</p>
+  <div class="badges">
+    <span class="badge">Python 3.8+</span>
+    <span class="badge">MIT License</span>
+    <span class="badge">v0.53.5</span>
+    <span class="badge">Windows · Linux · macOS</span>
+  </div>
+</header>
+
+<p>
+  Скрипт извлекает аудиодорожку из <code>.ts</code>-файла, строит спектрограмму,
+  находит частоты 5-й и 4-й гармоник звука двигателя, переводит их в обороты
+  коленвала и вычисляет скорость через параметры трансмиссии. Дополнительно
+  подтягивает GPS-скорость из телеметрии того же файла — для перекрёстной
+  проверки и калибровки.
+</p>
+
+<nav class="toc">
+  <h3>Содержание</h3>
+  <ul>
+    <li><a href="#features">Возможности</a></li>
+    <li><a href="#how">Как это работает</a></li>
+    <li><a href="#requirements">Требования</a></li>
+    <li><a href="#install">Установка</a></li>
+    <li><a href="#usage">Использование</a></li>
+    <li><a href="#controls">Управление</a></li>
+    <li><a href="#car">Параметры автомобиля</a></li>
+    <li><a href="#algos">Алгоритмы</a></li>
+    <li><a href="#gps">GPS-скорость</a></li>
+    <li><a href="#files">Создаваемые файлы</a></li>
+    <li><a href="#config">Конфигурация</a></li>
+    <li><a href="#changelog">История версий</a></li>
+    <li><a href="#license">Лицензия</a></li>
+  </ul>
+</nav>
+
+<h2 id="features">Возможности <a class="anchor" href="#features">#</a></h2>
+
+<div class="grid-cards">
+  <div class="card">
+    <h4>Спектрограмма</h4>
+    <p>Два режима отображения — <code>time</code> (pcolormesh) и <code>power</code> (contourf).</p>
+  </div>
+  <div class="card">
+    <h4>6 алгоритмов</h4>
+    <p>dB-порог, индекс палитры, относительный от пика, адаптивный от шума, −3 dB, RMS.</p>
+  </div>
+  <div class="card">
+    <h4>Суббинная интерполяция</h4>
+    <p>Точность частоты выше шага БПФ — параболическая подгонка пика.</p>
+  </div>
+  <div class="card">
+    <h4>Автотрекинг гармоник</h4>
+    <p>H5 и H4 отслеживаются по кадрам с адаптивным поиском.</p>
+  </div>
+  <div class="card">
+    <h4>История зума</h4>
+    <p>До 50 состояний, сохраняется в конфиг, восстанавливается при переходах.</p>
+  </div>
+  <div class="card">
+    <h4>GPS-оверлей</h4>
+    <p>Кривые GPS-скорости, откалиброванные через V<sub>ref</sub> выбранных H5/H4.</p>
+  </div>
+  <div class="card">
+    <h4>Подписи пиков</h4>
+    <p>Для всех активных источников — GPS и реальных треков по гармоникам.</p>
+  </div>
+  <div class="card">
+    <h4>Оценка погрешности</h4>
+    <p>±V на каждом шаге и в итоговой сводке.</p>
+  </div>
+  <div class="card">
+    <h4>Отчёт с формулами</h4>
+    <p>Текстовый файл с подстановками всех формул на каждом шаге.</p>
+  </div>
+  <div class="card">
+    <h4>PNG со штампом</h4>
+    <p>MD5 скрипта, дата, имя файла — в левом верхнем углу.</p>
+  </div>
+</div>
+
+<h2 id="how">Как это работает <a class="anchor" href="#how">#</a></h2>
+
+<ol>
+  <li>Двигатель издаёт звук, основная частота которого пропорциональна оборотам коленвала.</li>
+  <li>Обороты коленвала связаны со скоростью через передаточное отношение коробки, главной пары и радиус качения шины.</li>
+</ol>
+
+<p>Формулы, используемые в скрипте:</p>
+
+<pre><code>f0 = (H5 / 5 + H4 / 4) / 2              # среднее фундаментальной частоты
+n  = 60 · f0 · stroke / cylinders        # об/мин коленвала
+Rk = 0.85 · P · H / 100000 + 0.0127 · R  # радиус качения шины, м
+V  = 0.377 · Rk · n / (Io · Ik)          # км/ч</code></pre>
+
+<table>
+  <thead><tr><th>Обозначение</th><th>Что это</th></tr></thead>
+  <tbody>
+    <tr><td><code>H5</code>, <code>H4</code></td><td>частоты 5-й и 4-й гармоник звука, Гц</td></tr>
+    <tr><td><code>stroke</code></td><td>тактность (2 для 4-тактного, 1 для 2-тактного)</td></tr>
+    <tr><td><code>cylinders</code></td><td>число цилиндров</td></tr>
+    <tr><td><code>P</code>, <code>H</code>, <code>R</code></td><td>ширина, профиль и посадочный диаметр шины</td></tr>
+    <tr><td><code>Io</code></td><td>передаточное число главной пары</td></tr>
+    <tr><td><code>Ik</code></td><td>передаточное число текущей передачи КПП</td></tr>
+  </tbody>
+</table>
+
+<details>
+  <summary>Формулы оценки погрешности</summary>
+  <pre><code>df = ((H5max − H5min) / 5 + (H4max − H4min) / 4) / 4
+dn = 60 · df · stroke / cylinders
+dV = 0.377 · Rk · dn / (Io · Ik)</code></pre>
+</details>
+
+<h2 id="requirements">Требования <a class="anchor" href="#requirements">#</a></h2>
+
+<ul>
+  <li><strong>Python 3.8+</strong></li>
+  <li><strong>ffmpeg</strong> и <strong>ffprobe</strong> — обязательны</li>
+  <li><strong>exiftool</strong> — опционально (извлечение GPS через метаданные)</li>
+</ul>
+
+<p>Python-зависимости:</p>
+<pre><code>numpy
+matplotlib</code></pre>
+
+<div class="callout">
+  <strong>Важно:</strong> модуль <code>sys_fingerprint.py</code> должен лежать
+  рядом со скриптом — используется для штампа в PNG и отчётах.
+</div>
+
+<h2 id="install">Установка <a class="anchor" href="#install">#</a></h2>
+
+<pre><code>git clone https://github.com/&lt;ваш-логин&gt;/audio_speed_calc.git
+cd audio_speed_calc
+
+pip install numpy matplotlib</code></pre>
+
+<p><strong>ffmpeg / ffprobe</strong> — один из вариантов:</p>
+<ul>
+  <li>Windows: положить <code>ffmpeg.exe</code> и <code>ffprobe.exe</code> рядом со скриптом или в подпапку <code>bin/</code>.</li>
+  <li>Linux / macOS: <code>sudo apt install ffmpeg</code> / <code>brew install ffmpeg</code> — скрипт найдёт их через <code>PATH</code>.</li>
+</ul>
+
+<p><strong>exiftool</strong> — по желанию, тем же способом.</p>
+
+<h2 id="usage">Использование <a class="anchor" href="#usage">#</a></h2>
+
+<pre><code>python audio_speed_calc.py path/to/fragment.ts</code></pre>
+
+<p>Дополнительно:</p>
+<pre><code>python audio_speed_calc.py fragment.ts --config my_config.json</code></pre>
+
+<p>
+  Если <code>--config</code> не задан, скрипт ищет
+  <code>&lt;base_ts&gt;_config.json</code> рядом с видеофайлом. При первом
+  запуске настройки берутся из <code>audio_speed_config.json</code> (если есть)
+  и копируются в per-file конфиг.
+</p>
+
+<h3>Типичный сценарий</h3>
+<ol>
+  <li><strong>Запустить скрипт</strong> — откроется окно со спектрограммой.</li>
+  <li><strong>Выделить диапазон анализа</strong> — drag по горизонтали.</li>
+  <li>Нажать <strong>«5я гармоника»</strong> и кликнуть по 5-й гармонике в спектре.</li>
+  <li>Нажать <strong>«4я гармоника»</strong> и кликнуть по 4-й гармонике.</li>
+  <li>Выбрать <strong>алгоритм</strong> (1–6) или нажать цифру на клавиатуре.</li>
+  <li>Смотреть результат в статусной строке и в сохранённом отчёте.</li>
+  <li><kbd>P</kbd> — сохранить PNG, <kbd>S</kbd> — сохранить конфиг.</li>
+</ol>
+
+<h2 id="controls">Управление <a class="anchor" href="#controls">#</a></h2>
+
+<h3>Кнопки</h3>
+<table>
+  <thead><tr><th>Кнопка</th><th>Действие</th></tr></thead>
+  <tbody>
+    <tr><td><code>Спектр</code></td><td>переключение time / power</td></tr>
+    <tr><td><code>5я гармоника</code> / <code>4я гармоника</code></td><td>фазы выбора гармоник</td></tr>
+    <tr><td><code>1.dB</code> … <code>6.RMS</code></td><td>запуск алгоритма</td></tr>
+    <tr><td><code>?</code> (рядом с алгоритмом)</td><td>справка по текущему алгоритму</td></tr>
+    <tr><td><code>Прям.</code> / <code>Факт.</code> / <code>Оба</code> / <code>Выкл</code></td><td>режим оверлея</td></tr>
+    <tr><td><code>Сб.время</code> / <code>Сб.част</code> / <code>Сброс</code></td><td>сброс осей / частоты / всего</td></tr>
+    <tr><td><code>Назад</code> / <code>Вперед</code></td><td>навигация по истории зума</td></tr>
+    <tr><td><code>Сохр.поз.</code> / <code>Удалить поз.</code></td><td>управление историей</td></tr>
+    <tr><td><code>Выход</code></td><td>выход с сохранением</td></tr>
+    <tr><td><code>GPS→H5</code> / <code>GPS→H4</code></td><td>кривые GPS-скорости, откалиброванные через V<sub>ref</sub></td></tr>
+    <tr><td><code>Подп.V</code></td><td>подписи пиков и экстремумов скорости</td></tr>
+    <tr><td><code>Все 3</code></td><td>одновременный тумблер трёх верхних GPS-кнопок</td></tr>
+  </tbody>
+</table>
+
+<h3>Горячие клавиши</h3>
+<table>
+  <thead><tr><th>Клавиша</th><th>Действие</th></tr></thead>
+  <tbody>
+    <tr><td><kbd>?</kbd> или <kbd>Shift</kbd>+<kbd>/</kbd></td><td>помощь</td></tr>
+    <tr><td><kbd>Q</kbd></td><td>выход</td></tr>
+    <tr><td><kbd>S</kbd></td><td>сохранить конфиг и PNG</td></tr>
+    <tr><td><kbd>P</kbd></td><td>сохранить PNG со штампом</td></tr>
+    <tr><td><kbd>Z</kbd></td><td>шаг назад по истории</td></tr>
+    <tr><td><kbd>Shift</kbd>+<kbd>Z</kbd></td><td>полный сброс</td></tr>
+    <tr><td><kbd>Esc</kbd></td><td>отмена / фаза TIME</td></tr>
+    <tr><td><kbd>1</kbd> … <kbd>6</kbd></td><td>запуск алгоритма</td></tr>
+    <tr><td><kbd>Tab</kbd> / <kbd>Shift</kbd>+<kbd>Tab</kbd></td><td>переход между полями ввода</td></tr>
+  </tbody>
+</table>
+
+<h3>Мышь</h3>
+<table>
+  <thead><tr><th>Действие</th><th>Что делает</th></tr></thead>
+  <tbody>
+    <tr><td>Drag</td><td>выделение диапазона + зум</td></tr>
+    <tr><td>Клик</td><td>выбор гармоники (в фазах H5 / H4)</td></tr>
+    <tr><td>Наведение</td><td>координаты курсора в углу графика</td></tr>
+  </tbody>
+</table>
+
+<h2 id="car">Параметры автомобиля <a class="anchor" href="#car">#</a></h2>
+
+<p>При запуске скрипт спрашивает подтверждение параметров из конфига. Для ввода новых — ответить <code>n</code> и заполнить поля:</p>
+
+<table>
+  <thead><tr><th>Параметр</th><th>Пример</th><th>Примечание</th></tr></thead>
+  <tbody>
+    <tr><td>Цилиндров</td><td><code>4</code></td><td></td></tr>
+    <tr><td>Тактность</td><td><code>2</code></td><td><code>1</code> = 2-тактный, <code>2</code> = 4-тактный</td></tr>
+    <tr><td>Ширина шины</td><td><code>235</code></td><td>мм</td></tr>
+    <tr><td>Профиль шины</td><td><code>70</code></td><td>% от ширины</td></tr>
+    <tr><td>Диаметр диска</td><td><code>16</code></td><td>дюймы</td></tr>
+    <tr><td>Главная пара</td><td><code>4.875</code></td><td></td></tr>
+    <tr><td>Передача КПП</td><td><code>0.802</code></td><td>текущая передача</td></tr>
+  </tbody>
+</table>
+
+<h2 id="algos">Алгоритмы выделения границ <a class="anchor" href="#algos">#</a></h2>
+
+<table>
+  <thead><tr><th>№</th><th>Название</th><th>Идея</th></tr></thead>
+  <tbody>
+    <tr><td>1</td><td>Абсолютный порог dB</td><td>порог = vmin + (цвет/255)·(vmax−vmin)</td></tr>
+    <tr><td>2</td><td>Индекс палитры</td><td>порог = индекс_центра − цвет</td></tr>
+    <tr><td>3</td><td>Относительный от пика</td><td>порог = dB_пика − цвет</td></tr>
+    <tr><td>4</td><td>Адаптивный от шума</td><td>порог = медиана_шума + цвет·σ</td></tr>
+    <tr><td>5</td><td>Половинная мощность (−3 dB)</td><td>спад на <code>цвет/255·3</code> dB</td></tr>
+    <tr><td>6</td><td>RMS-интегрирование</td><td>накопление доли мощности от центра</td></tr>
+  </tbody>
+</table>
+
+<p>Полная справка по каждому — по кнопке <code>?</code> рядом с алгоритмом.</p>
+
+<h2 id="gps">GPS-скорость <a class="anchor" href="#gps">#</a></h2>
+
+<p>Скрипт пытается извлечь GPS-метки двумя способами (в порядке приоритета):</p>
+<ol>
+  <li><strong>exiftool</strong> — <code>-ee3 -n</code>, учитывается <code>GPSSpeedRef</code> (K / M / N).</li>
+  <li><strong>Прямой бинарный разбор TS</strong> — PID <code>0x0300</code>, поиск PES-заголовка <code>00 00 01 BF</code>.</li>
+</ol>
+
+<p>Найденные метки приводятся к относительному времени (от первой точки) и участвуют в:</p>
+<ul>
+  <li><strong>кросс-корреляции</strong> для оценки запаздывания GPS относительно аудио (диапазон −5…+5 с, шаг 0.1 с);</li>
+  <li><strong>сравнении</strong> V<sub>ср</sub> аудио и V<sub>gps ср</sub>;</li>
+  <li><strong>оверлее</strong> GPS→H5 и GPS→H4 — кривые GPS-скорости, отмасштабированные через V<sub>ref</sub> выбранных гармоник.</li>
+</ul>
+
+<div class="callout">
+  Если корреляция ниже 0.5, скрипт предупреждает о недостоверности и
+  предлагает задать <code>gps_lag_override</code> в конфиге.
+</div>
+
+<h2 id="files">Создаваемые файлы <a class="anchor" href="#files">#</a></h2>
+
+<table>
+  <thead><tr><th>Файл</th><th>Назначение</th></tr></thead>
+  <tbody>
+    <tr><td><code>&lt;base&gt;_config.json</code></td><td>настройки для конкретного видеофайла</td></tr>
+    <tr><td><code>&lt;base&gt;_speed_report_algo&lt;N&gt;.txt</code></td><td>пошаговый отчёт расчёта</td></tr>
+    <tr><td><code>&lt;base&gt;_spec_YYYYMMDD_HHMMSS.png</code></td><td>скриншот спектрограммы со штампом</td></tr>
+    <tr><td><code>history_log.txt</code></td><td>журнал изменений версий</td></tr>
+    <tr><td><code>audio_speed_config.json</code></td><td>глобальный конфиг (шаблон)</td></tr>
+  </tbody>
+</table>
+
+<h2 id="config">Конфигурация <a class="anchor" href="#config">#</a></h2>
+
+<p>Пример ключевых полей конфига:</p>
+
+<pre><code>{
+  "freq_min": 20,
+  "freq_max": 600,
+  "harmonic_5_freq": 285.3,
+  "harmonic_4_freq": 228.2,
+  "color_steps": 10,
+  "time_step": 0.1,
+  "peak_search_hz": 5.0,
+  "algorithm": 2,
+  "sample_rate": 44100,
+  "fft_size": 32768,
+  "target_fps": 30,
+  "cylinders": 4,
+  "stroke": 2,
+  "tire_width": 235,
+  "tire_profile": 70,
+  "rim_diameter": 16,
+  "final_drive": 4.875,
+  "gear_ratio": 0.802,
+  "gps_lag_override": null,
+  "overlay_mode": 0,
+  "spec_mode": "time"
+}</code></pre>
+
+<table>
+  <thead><tr><th>Ключ</th><th>Смысл</th></tr></thead>
+  <tbody>
+    <tr><td><code>fft_size</code></td><td>размер окна БПФ (32768 = хорошее разрешение по частоте)</td></tr>
+    <tr><td><code>target_fps</code></td><td>частота кадров спектрограммы (30)</td></tr>
+    <tr><td><code>time_step</code></td><td>шаг расчёта в секундах</td></tr>
+    <tr><td><code>peak_search_hz</code></td><td>полуширина поиска пика гармоники, Гц</td></tr>
+    <tr><td><code>gps_lag_override</code></td><td>ручное запаздывание GPS в секундах (<code>null</code> = авто)</td></tr>
+    <tr><td><code>spec_mode</code></td><td><code>"time"</code> или <code>"power"</code></td></tr>
+  </tbody>
+</table>
+
+<h2 id="changelog">История версий <a class="anchor" href="#changelog">#</a></h2>
+
+<details open>
+  <summary>0.53.5 — подписи GPS в узких окнах</summary>
+  <p>
+    Подписи GPS-скорости и маркеры V<sub>max</sub>/V<sub>min</sub>
+    больше не пропадают в узких окнах анализа
+    (метод <code>_gps_view_samples</code>).
+  </p>
+</details>
+
+<details>
+  <summary>0.53 — Подп.V, GPS→H5/H4</summary>
+  <p>
+    Кнопка «Подп.V», кнопки GPS→H5 / GPS→H4, калибровка через
+    V<sub>ref</sub>, авто-журнал изменений.
+  </p>
+</details>
+
+<details>
+  <summary>0.52 — средний столбец кнопок</summary>
+  <p>
+    Средний столбец кнопок, per-entry история зума,
+    <code>analyze_start</code> / <code>analyze_dur</code> в JSON.
+  </p>
+</details>
+
+<details>
+  <summary>0.51 — критические исправления</summary>
+  <p>
+    Методы внутри класса, единый формат истории, корректный UTC для GPS.
+  </p>
+</details>
+
+<p>
+  Полная история — в файле <code>history_log.txt</code> и в словаре
+  <code>CHANGELOG</code> внутри скрипта.
+</p>
+
+<h2 id="license">Лицензия <a class="anchor" href="#license">#</a></h2>
+
+<p>MIT — см. файл <code>LICENSE</code> в корне репозитория.</p>
+
+<footer>
+  <span>audio_speed_calc v0.53.5</span>
+  <span>Если нашли баг или есть предложения — открывайте issue или PR.</span>
+</footer>
+
+</div>
+</body>
+</html>
