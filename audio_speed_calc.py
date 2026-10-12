@@ -45,12 +45,26 @@ if sys.platform == 'win32':
     except Exception:
         pass
 
-VERSION = "0.53"
+VERSION = "0.53.5"
 CONFIG_FILE = "audio_speed_config.json"
 HISTORY_LOG_FILE = "history_log.txt"
 
 
 CHANGELOG = {
+    "0.53.5": [
+        "",
+        "v0.53.5",
+        "-" * 64,
+        "",
+        "ИСПРАВЛЕНО",
+        "",
+        "* Подписи GPS-скорости (Подп.V) и маркеры Vmax/Vmin",
+        "  больше не пропадают в узких окнах анализа.",
+        "  При < 3 GPS-точках в видимом диапазоне скорость",
+        "  интерполируется на границах окна и в центре.",
+        "  (метод _gps_view_samples)",
+        "",
+    ],
     "0.53": [
         "",
         "v0.53",
@@ -221,7 +235,7 @@ DEFAULT_CONFIG = {
 }
 
 
-def add_png_footer(fig, y_pos=0.94):
+def add_png_footer(fig, y_pos=0.99):
     """Штамп в левый верхний угол."""
     try:
         script_path = os.path.abspath(__file__)
@@ -1693,8 +1707,10 @@ class AudioSpeedAnalyzer:
             f'{os.path.basename(self.filepath)}',
             fontsize=10, y=0.98
         )
-        # v0.53.1: график придвинут к среднему столбцу кнопок.
-        self.fig.subplots_adjust(left=0.08, right=0.69, top=0.91, bottom=0.22)
+        # v0.53.3: слайдеры убраны, средний столбец слит с правым,
+        # график расширен вправо (до кнопок) и вниз (до статуса).
+        self.fig.subplots_adjust(left=0.08, right=0.83,
+                                 top=0.94, bottom=0.13)
 
         self._draw_spectrogram()
 
@@ -1708,47 +1724,10 @@ class AudioSpeedAnalyzer:
             interactive=True, drag_from_anywhere=False
         )
 
-        sx, sw = 0.10, 0.15
-        self.sl_fmin = Slider(
-            self.fig.add_axes([sx, 0.04, sw, 0.018]),
-            '     Fmin', 20, 600, valinit=self.cfg['freq_min'], valfmt='%d'
-        )
-        self.sl_fmax = Slider(
-            self.fig.add_axes([sx, 0.085, sw, 0.018]),
-            '     Fmax', 20, 600, valinit=self.cfg['freq_max'], valfmt='%d'
-        )
-        wx = sx + sw + 0.05
-        self.sl_width = Slider(
-            self.fig.add_axes([wx, 0.04, 0.07, 0.018]),
-            '     Ширина', 1, 20, valinit=self.line_width, valfmt='%d'
-        )
-        self.sl_step = Slider(
-            self.fig.add_axes([wx, 0.085, 0.07, 0.018]),
-            '     Шаг,с', 0.01, 5.0,
-            valinit=float(self.cfg['time_step']), valfmt='%.3f'
-        )
-        cx = wx + 0.07 + 0.05
-        self.sl_color = Slider(
-            self.fig.add_axes([cx, 0.04, 0.07, 0.018]),
-            '     Цвет,инд', 1, 255, valinit=self.color_steps, valfmt='%d'
-        )
-        px = cx + 0.07 + 0.05
-        self.sl_peak = Slider(
-            self.fig.add_axes([px, 0.04, 0.06, 0.018]),
-            '     Пик,Гц', 1, 30, valinit=self.peak_search_hz, valfmt='%d'
-        )
-
-        self.sl_fmin.on_changed(self._on_freq)
-        self.sl_fmax.on_changed(self._on_freq)
-        self.sl_width.on_changed(self._on_width)
-        self.sl_step.on_changed(self._on_step)
-        self.sl_color.on_changed(self._on_color)
-        self.sl_peak.on_changed(self._on_peak)
-
         btn_x = 0.84
         btn_w = 0.14
-        btn_h = 0.035
-        btn_gap = 0.003
+        btn_h = 0.032
+        btn_gap = 0.002
         btn_help_w = 0.025
         btn_main_w = btn_w - btn_help_w - 0.002
         btn_labels = [
@@ -1775,9 +1754,43 @@ class AudioSpeedAnalyzer:
             ('Выход', '_btn_exit', False, None),
         ]
         n_btns = len(btn_labels)
-        y_top = 0.876
-        for i, (label, handler, is_algo, overlay_num) in enumerate(btn_labels):
+
+        # Верх правого столбца поднят на 2 кнопки (v0.53.3)
+        y_top = 0.876 + 2 * (btn_h + btn_gap)
+
+        # --- 3 кнопки GPS-оверлея вверху правого столбца ---
+        btn_mid_defs = [
+            ('GPS→H5', 'h5'),
+            ('GPS→H4', 'h4'),
+            ('Подп.V', 'labels'),
+        ]
+        for i, (label, which) in enumerate(btn_mid_defs):
             y = y_top - i * (btn_h + btn_gap)
+            ax_btn = self.fig.add_axes([btn_x, y, btn_w, btn_h])
+            b = Button(ax_btn, label)
+            b.label.set_fontsize(8)
+            if which == 'labels':
+                b.on_clicked(lambda _: self._on_toggle_speed_labels())
+            else:
+                b.on_clicked(lambda _, w=which: self._on_speed_overlay(w))
+            setattr(self, f'_btn_mid_{which}', b)
+
+        # --- Сводная кнопка «Все 3» (v0.53.4) ---
+        # Включает / выключает все три верхних GPS-тумблера разом:
+        # если все три уже включены — гасит все, иначе — зажигает все.
+        y_all = y_top - 3 * (btn_h + btn_gap)
+        ax_all = self.fig.add_axes([btn_x, y_all, btn_w, btn_h])
+        self._btn_mid_all = Button(ax_all, 'Все 3')
+        self._btn_mid_all.label.set_fontsize(8)
+        self._btn_mid_all.on_clicked(lambda _: self._on_toggle_all_speed())
+
+        self._update_speed_overlay_buttons()
+
+        # --- Основное меню (под кластером GPS + «Все 3») ---
+        y_main_top = y_top - 4 * (btn_h + btn_gap)
+
+        for i, (label, handler, is_algo, overlay_num) in enumerate(btn_labels):
+            y = y_main_top - i * (btn_h + btn_gap)
             cb = handler if callable(handler) else getattr(self, handler)
             if is_algo:
                 ax_btn = self.fig.add_axes([btn_x, y, btn_main_w, btn_h])
@@ -1803,29 +1816,8 @@ class AudioSpeedAnalyzer:
                 if overlay_num is not None:
                     setattr(self, f'_btn_widget_overlay_{overlay_num}', btn)
 
-        btn_mid_x = 0.70
-        btn_mid_w = 0.12
-        btn_mid_h = 0.035
-        btn_mid_gap = 0.003
-        btn_mid_defs = [
-            ('GPS→H5', 'h5'),
-            ('GPS→H4', 'h4'),
-            ('Подп.V', 'labels'),
-        ]
-        for i, (label, which) in enumerate(btn_mid_defs):
-            y = y_top - i * (btn_mid_h + btn_mid_gap)
-            ax_btn = self.fig.add_axes([btn_mid_x, y, btn_mid_w, btn_mid_h])
-            b = Button(ax_btn, label)
-            b.label.set_fontsize(8)
-            if which == 'labels':
-                b.on_clicked(lambda _: self._on_toggle_speed_labels())
-            else:
-                b.on_clicked(lambda _, w=which: self._on_speed_overlay(w))
-            setattr(self, f'_btn_mid_{which}', b)
-        self._update_speed_overlay_buttons()
-
         self.status = self.fig.text(
-            0.02, 0.135, '', transform=self.fig.transFigure,
+            0.02, 0.055, '', transform=self.fig.transFigure,
             fontsize=9, va='top', ha='left',
             bbox=dict(boxstyle='round', fc='white', alpha=0.85,
                       edgecolor='gray')
@@ -1996,7 +1988,7 @@ class AudioSpeedAnalyzer:
 
         self._cbar = self.fig.colorbar(self.spec_img, ax=self.ax_spec,
                                        label='дБ', pad=0.01)
-        self.ax_spec.set_xlabel('Кадр / Время, с', labelpad=5)
+        self.ax_spec.set_xlabel('Кадр / Время, с', labelpad=0)
         self.ax_spec.set_ylabel('Частота, Гц')
         self.ax_spec.set_ylim(fmin, fmax)
         self.ax_spec.set_xlim(0, self.n_frames)
@@ -2117,6 +2109,29 @@ class AudioSpeedAnalyzer:
         self._draw_speed_labels()
         self._draw_speed_extremes()
 
+    def _on_toggle_all_speed(self):
+        """Сводный тумблер «Все 3»: одновременное включение либо
+        выключение всех трёх верхних кнопок — GPS→H5, GPS→H4, Подп.V.
+
+        Логика:
+          - если все три уже включены → выключаем все три;
+          - в любом другом состоянии   → включаем все три.
+        """
+        if self.speed_overlay_h5 and self.speed_overlay_h4 \
+                and self.speed_labels_on:
+            self.speed_overlay_h5 = False
+            self.speed_overlay_h4 = False
+            self.speed_labels_on = False
+        else:
+            self.speed_overlay_h5 = True
+            self.speed_overlay_h4 = True
+            self.speed_labels_on = True
+
+        self._update_speed_overlay_buttons()
+        self._draw_speed_overlay()
+        self._draw_speed_labels()
+        self._draw_speed_extremes()
+
     def _update_speed_overlay_buttons(self):
         states = [
             ('h5',     self.speed_overlay_h5, '#ffddaa', '#ffcc88'),
@@ -2135,6 +2150,22 @@ class AudioSpeedAnalyzer:
                 w.hovercolor = '0.95'
             w.ax.set_facecolor(w.color)
             w.ax.figure.canvas.draw_idle()
+
+        # Подсветка сводной кнопки «Все 3»: активна, только когда
+        # все три верхних тумблера включены.
+        w_all = getattr(self, '_btn_mid_all', None)
+        if w_all is not None:
+            all_on = (self.speed_overlay_h5
+                      and self.speed_overlay_h4
+                      and self.speed_labels_on)
+            if all_on:
+                w_all.color = '#c8e6ff'
+                w_all.hovercolor = '#a8d6ff'
+            else:
+                w_all.color = '0.85'
+                w_all.hovercolor = '0.95'
+            w_all.ax.set_facecolor(w_all.color)
+            w_all.ax.figure.canvas.draw_idle()
 
     def _draw_speed_overlay(self):
         for ln in self._speed_lines:
@@ -2222,6 +2253,91 @@ class AudioSpeedAnalyzer:
 
         self.fig.canvas.draw_idle()
 
+    def _gps_view_samples(self, x0_view, x1_view):
+        """Возвращает (frames, speeds, dt_med) — выборку GPS-скорости
+        в видимом окне [x0_view, x1_view].
+
+        Если GPS-точек внутри окна меньше 3, добавляются интерполированные
+        значения на границах окна и в центре — чтобы подписи и экстремумы
+        работали и в узких диапазонах.
+        Возвращает (None, None, dt) при отсутствии GPS.
+        """
+        if not self.gps_points or len(self.gps_points) < 2:
+            return None, None, 1.0
+
+        gps_t = np.array([p[0] for p in self.gps_points], dtype=float)
+        gps_v = np.array([p[1] for p in self.gps_points], dtype=float)
+
+        if len(gps_t) >= 2:
+            dt_med = float(np.median(np.diff(gps_t)))
+        else:
+            dt_med = 1.0
+        if dt_med <= 0:
+            dt_med = 1.0
+
+        win_n = max(1, int(round(2.0 / dt_med)))
+        if win_n > 1 and win_n < len(gps_v):
+            kernel = np.ones(win_n, dtype=float) / win_n
+            gps_v_sm = np.convolve(gps_v, kernel, mode='same')
+        else:
+            gps_v_sm = gps_v
+
+        fps = self.cfg['target_fps']
+        lag_used = self.gps_lag
+        _override = self.cfg.get('gps_lag_override')
+        if _override is not None:
+            try:
+                lag_used = float(_override)
+            except (ValueError, TypeError):
+                pass
+        gps_frames = (gps_t - lag_used) * fps
+
+        vis = (gps_frames >= x0_view) & (gps_frames <= x1_view)
+        n_vis = int(vis.sum())
+
+        if n_vis >= 3:
+            return gps_frames[vis], gps_v_sm[vis], dt_med
+
+        # Окно не пересекается с GPS-диапазоном — пусто
+        if gps_frames[-1] < x0_view or gps_frames[0] > x1_view:
+            return np.array([]), np.array([]), dt_med
+
+        t_lo = max(x0_view, float(gps_frames[0]))
+        t_hi = min(x1_view, float(gps_frames[-1]))
+
+        pieces_t = []
+        pieces_v = []
+
+        # Реальные точки, попавшие в окно
+        if n_vis >= 1:
+            pieces_t.append(gps_frames[vis])
+            pieces_v.append(gps_v_sm[vis])
+
+        # Интерполяция на границах окна и в центре
+        if t_hi > t_lo:
+            ts_extra = np.array(
+                [t_lo, (t_lo + t_hi) / 2.0, t_hi], dtype=float)
+        else:
+            ts_extra = np.array([t_lo], dtype=float)
+        vs_extra = np.interp(ts_extra, gps_frames, gps_v_sm)
+        pieces_t.append(ts_extra)
+        pieces_v.append(vs_extra)
+
+        all_t = np.concatenate(pieces_t)
+        all_v = np.concatenate(pieces_v)
+        order = np.argsort(all_t)
+        all_t = all_t[order]
+        all_v = all_v[order]
+
+        # Дедупликация совпадающих по времени
+        keep_t = [all_t[0]]
+        keep_v = [all_v[0]]
+        for tt, vv in zip(all_t[1:], all_v[1:]):
+            if abs(tt - keep_t[-1]) > 1e-6:
+                keep_t.append(tt)
+                keep_v.append(vv)
+        return np.array(keep_t), np.array(keep_v), dt_med
+
     def _draw_speed_labels(self):
         for obj in self._speed_label_objs:
             try:
@@ -2261,25 +2377,8 @@ class AudioSpeedAnalyzer:
             self._speed_label_objs.append(txt)
 
         if (self.speed_overlay_h5 or self.speed_overlay_h4) \
-                and self.gps_points and len(self.gps_points) >= 3 \
+                and self.gps_points and len(self.gps_points) >= 2 \
                 and self.h5 is not None and self.h4 is not None:
-            gps_t = np.array([p[0] for p in self.gps_points], dtype=float)
-            gps_v = np.array([p[1] for p in self.gps_points], dtype=float)
-
-            if len(gps_t) >= 2:
-                dt_med = float(np.median(np.diff(gps_t)))
-                if dt_med <= 0:
-                    dt_med = 1.0
-            else:
-                dt_med = 1.0
-
-            win_n = max(1, int(round(2.0 / dt_med)))
-            if win_n > 1 and win_n < len(gps_v):
-                kernel = np.ones(win_n, dtype=float) / win_n
-                gps_v_sm = np.convolve(gps_v, kernel, mode='same')
-            else:
-                gps_v_sm = gps_v
-
             try:
                 V_ref = self._calc_speed(self.h5, self.h4)[3]
             except Exception:
@@ -2289,69 +2388,52 @@ class AudioSpeedAnalyzer:
                 k5 = self.h5 / V_ref
                 k4 = self.h4 / V_ref
 
-                fps = self.cfg['target_fps']
+                gf_vis, gv_vis, dt_med = self._gps_view_samples(
+                    x0_view, x1_view)
 
-                lag_used = self.gps_lag
-                _override = self.cfg.get('gps_lag_override')
-                if _override is not None:
-                    try:
-                        lag_used = float(_override)
-                    except (ValueError, TypeError):
-                        pass
-                gps_frames = (gps_t - lag_used) * fps
+                if gf_vis is not None and len(gf_vis) >= 1:
+                    min_dist = max(1, int(round(3.0 / dt_med))) \
+                        if dt_med > 0 else 1
 
-                vis = (gps_frames >= x0_view) & (gps_frames <= x1_view)
-                if vis.sum() >= 3:
-                    gf_vis = gps_frames[vis]
-                    gv_vis = gps_v_sm[vis]
+                    if len(gf_vis) >= 3:
+                        peaks_idx = _find_peaks_simple(
+                            gv_vis, min_distance=min_dist)
+                        mins_idx = _find_extrema_simple(
+                            gv_vis, min_distance=min_dist, invert=True)
 
-                    min_dist = max(2, int(round(3.0 / dt_med)))
-                    peaks_idx = _find_peaks_simple(gv_vis,
-                                                   min_distance=min_dist)
-                    mins_idx = _find_extrema_simple(gv_vis,
-                                                    min_distance=min_dist,
-                                                    invert=True)
+                        if len(peaks_idx) > 20:
+                            peaks_idx = sorted(
+                                peaks_idx,
+                                key=lambda i: -gv_vis[i])[:20]
+                            peaks_idx.sort()
+                        if len(mins_idx) > 20:
+                            mins_idx = sorted(
+                                mins_idx,
+                                key=lambda i: gv_vis[i])[:20]
+                            mins_idx.sort()
 
-                    if len(peaks_idx) > 20:
-                        peaks_idx = sorted(peaks_idx,
-                                           key=lambda i: -gv_vis[i])[:20]
-                        peaks_idx.sort()
-                    if len(mins_idx) > 20:
-                        mins_idx = sorted(mins_idx,
-                                          key=lambda i: gv_vis[i])[:20]
-                        mins_idx.sort()
+                        label_pts = [(float(gf_vis[i]), float(gv_vis[i]),
+                                      True) for i in peaks_idx]
+                        label_pts += [(float(gf_vis[i]), float(gv_vis[i]),
+                                       False) for i in mins_idx]
+                    else:
+                        # Узкий диапазон: точек мало (0–2).
+                        # Подписываем все доступные и интерполированные.
+                        label_pts = [(float(gf_vis[i]), float(gv_vis[i]),
+                                      True) for i in range(len(gf_vis))]
 
                     if self.speed_overlay_h5:
-                        for idx in peaks_idx:
-                            v_val = float(gv_vis[idx])
+                        for f_x, v_val, is_max in label_pts:
                             if v_val < 5.0:
                                 continue
-                            _add_label(float(gf_vis[idx]),
-                                       v_val * k5,
-                                       v_val, '#ff00cc', True)
-                        for idx in mins_idx:
-                            v_val = float(gv_vis[idx])
-                            if v_val < 5.0:
-                                continue
-                            _add_label(float(gf_vis[idx]),
-                                       v_val * k5,
-                                       v_val, '#ff00cc', False)
-
+                            _add_label(f_x, v_val * k5, v_val,
+                                       '#ff00cc', is_max)
                     if self.speed_overlay_h4:
-                        for idx in peaks_idx:
-                            v_val = float(gv_vis[idx])
+                        for f_x, v_val, is_max in label_pts:
                             if v_val < 5.0:
                                 continue
-                            _add_label(float(gf_vis[idx]),
-                                       v_val * k4,
-                                       v_val, '#00ccff', True)
-                        for idx in mins_idx:
-                            v_val = float(gv_vis[idx])
-                            if v_val < 5.0:
-                                continue
-                            _add_label(float(gf_vis[idx]),
-                                       v_val * k4,
-                                       v_val, '#00ccff', False)
+                            _add_label(f_x, v_val * k4, v_val,
+                                       '#00ccff', is_max)
 
         if self.tube_t and self.tube_h5_centers and self.tube_h4_centers:
             t_arr = np.array(self.tube_t, dtype=float)
@@ -2458,15 +2540,26 @@ class AudioSpeedAnalyzer:
                 marker='D' if is_max else 'v',
                 color=color, markersize=7,
                 markeredgecolor='black', markeredgewidth=1.0,
-                linestyle='None', zorder=18
+                linestyle='None', zorder=18,
+                clip_on=False
             )
             self._extreme_objs.append(marker)
+            # v0.53.6: подписи не уезжают за края окна.
+            _xr = x1_view - x0_view
+            _mg = 0.06 * _xr if _xr > 0 else 0.0
+            if f_x > x1_view - _mg:
+                _ha = 'right'
+            elif f_x < x0_view + _mg:
+                _ha = 'left'
+            else:
+                _ha = 'center'
             txt = self.ax_spec.text(
                 f_x, f_y, f'{v_val:.1f}',
                 fontsize=8, color=color,
-                ha='center',
+                ha=_ha,
                 va='bottom' if is_max else 'top',
-                fontweight='bold', zorder=19
+                fontweight='bold', zorder=19,
+                clip_on=False
             )
             txt.set_path_effects([
                 pe.Stroke(linewidth=2.5, foreground='black'),
@@ -2518,9 +2611,6 @@ class AudioSpeedAnalyzer:
                                     v_min_g, '#00ff00', False)
 
         if has_gps:
-            gps_t = np.array([p[0] for p in self.gps_points], dtype=float)
-            gps_v = np.array([p[1] for p in self.gps_points], dtype=float)
-
             try:
                 V_ref = self._calc_speed(self.h5, self.h4)[3]
             except Exception:
@@ -2530,21 +2620,11 @@ class AudioSpeedAnalyzer:
                 k5 = self.h5 / V_ref
                 k4 = self.h4 / V_ref
 
-                fps = self.cfg['target_fps']
-                lag_used = self.gps_lag
-                _override = self.cfg.get('gps_lag_override')
-                if _override is not None:
-                    try:
-                        lag_used = float(_override)
-                    except (ValueError, TypeError):
-                        pass
-                gps_frames = (gps_t - lag_used) * fps
+                gf_vis, gv_vis, _ = self._gps_view_samples(
+                    x0_view, x1_view)
 
-                vis = (gps_frames >= x0_view) & (gps_frames <= x1_view)
-                if vis.sum() >= 2:
-                    gf_vis = gps_frames[vis]
-                    gv_vis = gps_v[vis]
-
+                if gf_vis is not None and gv_vis is not None \
+                        and len(gf_vis) >= 1:
                     v_max_g = float(gv_vis.max())
                     v_min_g = float(gv_vis.min())
 
@@ -2552,23 +2632,25 @@ class AudioSpeedAnalyzer:
                         i_max = int(np.argmax(gv_vis))
                         if self.speed_overlay_h5:
                             _add_marker(float(gf_vis[i_max]),
-                                        v_max_g * k5,
-                                        v_max_g, '#ff00cc', True)
+                                        v_max_g * k5, v_max_g,
+                                        '#ff00cc', True)
                         if self.speed_overlay_h4:
                             _add_marker(float(gf_vis[i_max]),
-                                        v_max_g * k4,
-                                        v_max_g, '#00ccff', True)
+                                        v_max_g * k4, v_max_g,
+                                        '#00ccff', True)
 
-                    if v_min_g >= 5.0:
+                    # Минимум рисуем только если он отличается от
+                    # максимума — при единственной точке они совпадают.
+                    if v_min_g >= 5.0 and v_min_g < v_max_g:
                         i_min = int(np.argmin(gv_vis))
                         if self.speed_overlay_h5:
                             _add_marker(float(gf_vis[i_min]),
-                                        v_min_g * k5,
-                                        v_min_g, '#ff00cc', False)
+                                        v_min_g * k5, v_min_g,
+                                        '#ff00cc', False)
                         if self.speed_overlay_h4:
                             _add_marker(float(gf_vis[i_min]),
-                                        v_min_g * k4,
-                                        v_min_g, '#00ccff', False)
+                                        v_min_g * k4, v_min_g,
+                                        '#00ccff', False)
 
         self.fig.canvas.draw_idle()
 
@@ -2685,13 +2767,10 @@ class AudioSpeedAnalyzer:
             self.tb_y_min.set_val(f"{int(ylim[0])}")
             self.tb_y_max.set_val(f"{int(ylim[1])}")
 
-            self.sl_fmin.set_val(ylim[0])
-            self.sl_fmax.set_val(ylim[1])
-
-            self.tb_width.set_val(int(self.sl_width.val))
-            self.tb_step.set_val(f"{float(self.sl_step.val):.3f}")
-            self.tb_color.set_val(int(self.sl_color.val))
-            self.tb_peak.set_val(float(self.sl_peak.val))
+            self.tb_width.set_val(int(self.line_width))
+            self.tb_step.set_val(f"{float(self.cfg['time_step']):.3f}")
+            self.tb_color.set_val(int(self.color_steps))
+            self.tb_peak.set_val(float(self.peak_search_hz))
         finally:
             self._syncing_fields = False
 
@@ -2762,7 +2841,6 @@ class AudioSpeedAnalyzer:
             ylim = self.ax_spec.get_ylim()
             if val < ylim[1]:
                 self.cfg['freq_min'] = val
-                self.sl_fmin.set_val(val)
                 self.ax_spec.set_ylim(val, ylim[1])
                 self._sync_fields()
                 if self.harm_freqs:
@@ -2781,7 +2859,6 @@ class AudioSpeedAnalyzer:
             ylim = self.ax_spec.get_ylim()
             if val > ylim[0]:
                 self.cfg['freq_max'] = val
-                self.sl_fmax.set_val(val)
                 self.ax_spec.set_ylim(ylim[0], val)
                 self._sync_fields()
                 if self.harm_freqs:
@@ -2800,7 +2877,6 @@ class AudioSpeedAnalyzer:
             if 1 <= val <= 20:
                 self.line_width = val
                 self.cfg['harmonic_line_width'] = val
-                self.sl_width.set_val(val)
                 self._set_tb_silent('width', f'{val}')
                 if self.harm_freqs:
                     self.draw_harmonics()
@@ -2815,7 +2891,6 @@ class AudioSpeedAnalyzer:
             val = float(text)
             if 0.01 <= val <= 5.0:
                 self.cfg['time_step'] = val
-                self.sl_step.set_val(val)
                 self._set_tb_silent('step', f'{val:.3f}')
         except ValueError:
             self._sync_fields()
@@ -2828,7 +2903,6 @@ class AudioSpeedAnalyzer:
             if 1 <= val <= 255:
                 self.color_steps = val
                 self.cfg['color_steps'] = val
-                self.sl_color.set_val(val)
                 self._set_tb_silent('color', f'{val}')
         except ValueError:
             self._sync_fields()
@@ -2841,7 +2915,6 @@ class AudioSpeedAnalyzer:
             if 1 <= val <= 30:
                 self.peak_search_hz = val
                 self.cfg['peak_search_hz'] = val
-                self.sl_peak.set_val(val)
                 self._set_tb_silent('peak', f'{int(val)}')
         except ValueError:
             self._sync_fields()
@@ -2916,25 +2989,21 @@ class AudioSpeedAnalyzer:
         ts = entry.get('time_step')
         if ts is not None:
             self.cfg['time_step'] = float(ts)
-            self.sl_step.set_val(float(ts))
 
         cs = entry.get('color_steps')
         if cs is not None:
             self.color_steps = int(cs)
             self.cfg['color_steps'] = int(cs)
-            self.sl_color.set_val(int(cs))
 
         pk = entry.get('peak_search_hz')
         if pk is not None:
             self.peak_search_hz = float(pk)
             self.cfg['peak_search_hz'] = float(pk)
-            self.sl_peak.set_val(float(pk))
 
         lw = entry.get('line_width')
         if lw is not None:
             self.line_width = int(lw)
             self.cfg['harmonic_line_width'] = int(lw)
-            self.sl_width.set_val(int(lw))
 
         om = entry.get('overlay_mode')
         if om is not None:
@@ -3094,63 +3163,6 @@ class AudioSpeedAnalyzer:
         self._update_time_span()
         self._sync_fields()
         self._redraw_all()
-
-    def _on_freq(self, _=None):
-        if self._syncing_fields or self._updating_axes:
-            return
-        fmin = self.sl_fmin.val
-        fmax = self.sl_fmax.val
-        if fmax <= fmin + 1:
-            fmax = fmin + 1
-            self.sl_fmax.set_val(fmax)
-
-        self._updating_axes = True
-        try:
-            self.cfg['freq_min'] = fmin
-            self.cfg['freq_max'] = fmax
-            self.ax_spec.set_ylim(fmin, fmax)
-
-            spec_title = ('Спектрограмма' if self.spec_mode == 'time'
-                          else 'Power Spectrum')
-            self.ax_spec.set_title(
-                f'{spec_title} ({int(fmin)}-{int(fmax)} Гц)  |  '
-                'drag = выбор/масштаб  |  клик = гармоники  |  '
-                'Z = сброс  |  P = PNG  |  Q = выход  |  ? = помощь',
-                fontsize=10
-            )
-            if self.harm_freqs:
-                self.draw_harmonics()
-            self.draw_ranges()
-            self.draw_tubes()
-        finally:
-            self._updating_axes = False
-        self._sync_fields()
-        self.fig.canvas.draw_idle()
-
-    def _on_width(self, _=None):
-        self.line_width = int(self.sl_width.val)
-        self.cfg['harmonic_line_width'] = self.line_width
-        if not self._syncing_fields:
-            self._set_tb_silent('width', f'{self.line_width}')
-        if self.harm_freqs:
-            self.draw_harmonics()
-
-    def _on_step(self, _=None):
-        self.cfg['time_step'] = float(self.sl_step.val)
-        if not self._syncing_fields:
-            self._set_tb_silent('step', f"{self.cfg['time_step']:.3f}")
-
-    def _on_color(self, _=None):
-        self.color_steps = int(self.sl_color.val)
-        self.cfg['color_steps'] = self.color_steps
-        if not self._syncing_fields:
-            self._set_tb_silent('color', f'{self.color_steps}')
-
-    def _on_peak(self, _=None):
-        self.peak_search_hz = float(self.sl_peak.val)
-        self.cfg['peak_search_hz'] = self.peak_search_hz
-        if not self._syncing_fields:
-            self._set_tb_silent('peak', f'{int(self.peak_search_hz)}')
 
     def _on_key(self, event):
         key = event.key
