@@ -1,26 +1,22 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-audio_speed_calc.py v0.51
+audio_speed_calc.py v0.53
 Расчёт скорости по звуку из .ts-фрагментов.
 
-Изменения 0.51:
-  - ИСПРАВЛЕНО: _sync_fields и все последующие методы возвращены в класс
-    (были на нулевом отступе — модуль не запускался).
-  - ИСПРАВЛЕНО: единый формат истории зума (dict) + zoom_pointer.
-  - ИСПРАВЛЕНО: ALGO_NAMES вместо self.ALGO_NAMES.
-  - ИСПРАВЛЕНО: инициализация v_min/dv_min/... перед if all_v.
-  - ИСПРАВЛЕНО: save_config снова вызывается при закрытии/S/P.
-  - ИСПРАВЛЕНО: _on_span корректно ставит analyze_dur для коротких выделений.
-  - ИСПРАВЛЕНО: _reset_zoom/_btn_reset_* сбрасывают zoom_pointer.
-  - ИСПРАВЛЕНО: GPS — корректный UTC (timezone-aware), правильные единицы
-    GPSSpeed через GPSSpeedRef.
-  - ИСПРАВЛЕНО: ?/Z ловятся и как shift+/shift+z.
-  - ИСПРАВЛЕНО: _spec_vmin/_spec_vmax/_cbar инициализируются в __init__.
-
-Запуск:
-    python audio_speed_calc.py file.ts
-    python audio_speed_calc.py file.ts --config my_config.json
+Изменения 0.53:
+  - NEW: кнопка «Подп.V» — подписи пиков скорости на всех включённых
+    источниках (GPS-H5, GPS-H4, реальные треки H5/H4). Каждый источник
+    своим цветом.
+  - NEW: GPS→H5 / GPS→H4 калибруются через V_ref выбранных H5/H4.
+  - NEW: цвета кривых GPS-скорости в палитре inferno.
+  - NEW: gps_lag_override читается из конфига в __init__.
+  - v0.53.1: Vmax/Vmin всегда в видимом окне (даже без локальных пиков).
+  - v0.53.1: в статусе V→Vср, добавлен Vgps ср, убран Rk.
+  - v0.53.1: график придвинут к среднему столбцу кнопок.
+  - v0.53.2: при переходах по истории (Назад/Вперёд/Удалить поз.)
+    результаты пересчитываются для нового диапазона. Защита от
+    пустого analyze_dur и от исключений при пересчёте.
 """
 
 import os
@@ -35,6 +31,7 @@ import shutil
 import numpy as np
 import matplotlib
 import matplotlib.pyplot as plt
+import matplotlib.patheffects as pe
 from matplotlib.widgets import Slider, Button, SpanSelector, TextBox
 
 from sys_fingerprint import (
@@ -48,8 +45,142 @@ if sys.platform == 'win32':
     except Exception:
         pass
 
-VERSION = "0.51"
+VERSION = "0.53"
 CONFIG_FILE = "audio_speed_config.json"
+HISTORY_LOG_FILE = "history_log.txt"
+
+
+CHANGELOG = {
+    "0.53": [
+        "",
+        "v0.53",
+        "-" * 64,
+        "",
+        "NEW",
+        "",
+        "* Кнопка «Подп.V» — залипающий тумблер в среднем столбце.",
+        "  Включает подписи пиков скорости на всех активных источниках.",
+        "  Повторное нажатие выключает.",
+        "",
+        "* Цвета подписей:",
+        "    маджента — GPS-H5",
+        "    голубой  — GPS-H4",
+        "    жёлтый   — реальный трек H5",
+        "    зелёный  — реальный трек H4",
+        "",
+        "* Кривые GPS→H5 / GPS→H4 калибруются через V_ref",
+        "  выбранных H5/H4 (self.h5 / self.h4).",
+        "",
+        "* Цвета кривых:",
+        "    GPS-H5 — маджента #ff00cc",
+        "    GPS-H4 — голубой  #00ccff",
+        "  Плюс чёрная обводка через path_effects.",
+        "",
+        "* gps_lag_override читается из конфига в __init__.",
+        "",
+        "ДОПОЛНЕНИЯ 0.53.1",
+        "",
+        "* Vmax и Vmin в видимом диапазоне времени показываются",
+        "  всегда — маркеры с подписями, даже если локальных пиков",
+        "  в окне нет.",
+        "* В статусной строке V переименован в Vср;",
+        "  добавлено Vgps ср; Rk убран.",
+        "* Графическая область придвинута к среднему столбцу кнопок.",
+        "",
+        "ИСПРАВЛЕНО 0.53.2",
+        "",
+        "* При переходах по истории (Назад/Вперёд/Удалить поз.)",
+        "  Vср / Vgps ср / Δgps пересчитываются для нового",
+        "  восстановленного диапазона. Пустой analyze_dur (0)",
+        "  больше не приводит к отсутствию расчёта — берётся",
+        "  весь доступный диапазон кадров.",
+        "* _draw_speed_overlay больше не падает, если V_ref <= 1.",
+        "",
+    ],
+    "0.52": [
+        "",
+        "v0.52",
+        "-" * 64,
+        "",
+        "NEW",
+        "",
+        "* Журнал изменений формируется скриптом автоматически.",
+        "* Средний столбец кнопок GPS→H5 / GPS→H4.",
+        "* per-entry хранение настроек слайдеров в view_history.",
+        "* analyze_start/analyze_dur пишутся в JSON.",
+        "",
+        "ИСПРАВЛЕНО",
+        "",
+        "* _sync_fields пишет tb_step как «%.3f».",
+        "* _btn_delete_pos удаляет ТЕКУЩУЮ позицию.",
+        "* _push_history ищет дубликаты по всей истории.",
+        "",
+    ],
+    "0.51": [
+        "",
+        "v0.51",
+        "-" * 64,
+        "",
+        "КРИТИЧЕСКИЕ ИСПРАВЛЕНИЯ",
+        "",
+        "* _sync_fields и все последующие методы возвращены в класс.",
+        "* Единый формат истории зума (dict) + zoom_pointer.",
+        "* ALGO_NAMES вместо self.ALGO_NAMES.",
+        "* Инициализация v_min/dv_min/... перед if all_v.",
+        "* save_config снова вызывается при закрытии, по S и P.",
+        "* _on_span корректно ставит analyze_dur.",
+        "* _reset_zoom/_btn_reset_* сбрасывают zoom_pointer.",
+        "* GPS: корректный UTC вместо time.mktime.",
+        "* GPS exiftool: единицы через GPSSpeedRef.",
+        "* ?/Z ловятся и как shift+/ и shift+z.",
+        "",
+    ],
+}
+
+
+def update_history_log(log_dir=None):
+    """Дописывает запись о текущей VERSION в history_log.txt.
+
+    Если файла нет — создаёт с заголовком.
+    Если запись для текущей VERSION уже есть — ничего не делает.
+    Ошибки записи не валят программу, только печатают в stderr.
+    """
+    if log_dir is None:
+        log_dir = os.path.dirname(os.path.abspath(__file__)) or '.'
+    path = os.path.join(log_dir, HISTORY_LOG_FILE)
+
+    if os.path.exists(path):
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            marker = "v" + VERSION
+            for line in content.splitlines():
+                if line.strip() == marker:
+                    return
+        except Exception:
+            pass
+    else:
+        try:
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write("=" * 64 + "\n")
+                f.write("audio_speed_calc.py — журнал изменений\n")
+                f.write("=" * 64 + "\n")
+        except Exception as e:
+            print(f"Не удалось создать {path}: {e}", file=sys.stderr)
+            return
+
+    lines = CHANGELOG.get(VERSION)
+    if not lines:
+        return
+
+    try:
+        with open(path, 'a', encoding='utf-8') as f:
+            for line in lines:
+                f.write(line + "\n")
+        print(f"Журнал обновлён: {path} (v{VERSION})", file=sys.stderr)
+    except Exception as e:
+        print(f"Не удалось обновить {path}: {e}", file=sys.stderr)
+
 
 DEFAULT_CONFIG = {
     "freq_min": 20,
@@ -85,18 +216,13 @@ DEFAULT_CONFIG = {
     "view_history": [],
     "overlay_mode": 0,
     "gps_lag_override": None,
-    # NEW: диапазон анализа (последнее состояние)
     "analyze_start": 0,
-    "analyze_dur": 0,          # 0 = «весь файл», интерпретируется в _restore_view
+    "analyze_dur": 0,
 }
 
 
-# ============================================================
-# Штамп PNG
-# ============================================================
-
 def add_png_footer(fig, y_pos=0.94):
-    """Штамп в левый верхний угол: версия, MD5, дата скрипта, дата PNG."""
+    """Штамп в левый верхний угол."""
     try:
         script_path = os.path.abspath(__file__)
         script_mtime = datetime.datetime.fromtimestamp(os.path.getmtime(script_path))
@@ -115,10 +241,6 @@ def add_png_footer(fig, y_pos=0.94):
                              alpha=0.8, edgecolor='gray', linewidth=0.5))
     return txt
 
-
-# ============================================================
-# Конфигурация
-# ============================================================
 
 def load_config(path):
     if os.path.exists(path):
@@ -142,13 +264,8 @@ def save_config(cfg, path):
     except Exception as e:
         print(f"Ошибка сохранения конфига: {e}", file=sys.stderr)
 
-
-# ============================================================
-# Поиск ffmpeg/ffprobe
-# ============================================================
-
 def _find_exec(name):
-    """Поиск ffmpeg/ffprobe: рядом со скриптом, в bin/, в PATH."""
+    """Поиск ffmpeg/ffprobe/exiftool: рядом со скриптом, в bin/, в PATH."""
     suffix = '.exe' if sys.platform == 'win32' else ''
     script_dir = os.path.dirname(os.path.abspath(__file__))
     candidates = [
@@ -173,10 +290,6 @@ def _init_ffmpeg():
     _FFMPEG_PATH = _find_exec('ffmpeg')
     _FFPROBE_PATH = _find_exec('ffprobe')
 
-
-# ============================================================
-# GPS-парсер (Novatek/Viofo/70mai) — inline, формат tuple
-# ============================================================
 
 def _epoch_from_utc(dt_str):
     """'2026-06-02T05:07:35Z' -> epoch (UTC), независимо от TZ машины."""
@@ -306,7 +419,7 @@ def parse_ts_gps(filepath, deobfuscate=False):
         if pid != GPS_PID:
             continue
         payload_start = 4
-        if pkt[3] & 0x20:  # adaptation field
+        if pkt[3] & 0x20:
             af_len = pkt[4]
             payload_start = 5 + af_len
         if payload_start >= TS_PKT:
@@ -348,9 +461,6 @@ def parse_ts_gps(filepath, deobfuscate=False):
             else:
                 partial = payload[-14:] if len(payload) >= 14 else payload
     return results
-# ============================================================
-# GPS через exiftool
-# ============================================================
 
 _EXIFTOOL_PATH = None
 
@@ -374,17 +484,12 @@ _SPEED_TO_KMH = {'K': 1.0, 'M': 1.609344, 'N': 1.852}
 
 
 def parse_gps_exiftool(filepath):
-    """Извлечение GPS через exiftool -ee3 -n с учётом GPSSpeedRef.
-    Возвращает [(epoch, speed_kmh, lat, lon, bearing), ...] или None."""
+    """Извлечение GPS через exiftool -ee3 -n с учётом GPSSpeedRef."""
     if _EXIFTOOL_PATH is None:
         return None
     fmt = ('$GPSDateTime\t$GPSSpeed\t$GPSSpeedRef\t'
            '$GPSLatitude\t$GPSLongitude\t$GPSTrack\n')
-    cmd = [
-        _EXIFTOOL_PATH, '-ee3', '-n',
-        '-p', fmt,
-        filepath
-    ]
+    cmd = [_EXIFTOOL_PATH, '-ee3', '-n', '-p', fmt, filepath]
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=120,
                            encoding='utf-8', errors='replace')
@@ -426,8 +531,7 @@ def parse_gps_exiftool(filepath):
 
 
 def extract_gps(filepath):
-    """exiftool -> прямой разбор -> пусто.
-    Возвращает (gps_points, method)."""
+    """exiftool -> прямой разбор -> пусто."""
     _init_exiftool()
     if _EXIFTOOL_PATH:
         pts = parse_gps_exiftool(filepath)
@@ -440,7 +544,8 @@ def extract_gps(filepath):
 
 
 def gps_to_relative_time(gps_points, first_epoch=None):
-    """[(epoch, speed, lat, lon, bearing), ...] -> [(t_rel, speed, lat, lon, bearing), ...]."""
+    """[(epoch, speed, lat, lon, bearing), ...]
+    -> [(t_rel, speed, lat, lon, bearing), ...]."""
     if not gps_points:
         return []
     if first_epoch is None:
@@ -450,8 +555,7 @@ def gps_to_relative_time(gps_points, first_epoch=None):
 
 def find_gps_lag(audio_times, audio_speeds, gps_times, gps_speeds,
                  lag_range=(-5.0, 5.0), lag_step=0.1):
-    """Кросс-корреляция: ищет сдвиг GPS относительно аудио.
-    Возвращает (best_lag, best_corr_signed, results_sorted)."""
+    """Кросс-корреляция: ищет сдвиг GPS относительно аудио."""
     if len(gps_times) < 3 or len(audio_times) < 3:
         return 0.0, 0.0, []
 
@@ -501,8 +605,7 @@ def find_gps_lag(audio_times, audio_speeds, gps_times, gps_speeds,
 
 
 def find_gps_window_points(gps_points, t_start, t_end):
-    """GPS-точки в окне и ближайшие до/после.
-    Возвращает (in_window, before, after)."""
+    """GPS-точки в окне и ближайшие до/после."""
     if not gps_points:
         return [], None, None
     in_win, before, after = [], None, None
@@ -518,9 +621,33 @@ def find_gps_window_points(gps_points, t_start, t_end):
     return in_win, before, after
 
 
-# ============================================================
-# Длительность / извлечение аудио
-# ============================================================
+def _find_peaks_simple(signal, min_distance=5):
+    """Простые локальные максимумы в 1D-массиве."""
+    n = len(signal)
+    if n < 3:
+        return []
+    peaks = []
+    for i in range(1, n - 1):
+        if signal[i] > signal[i - 1] and signal[i] > signal[i + 1]:
+            peaks.append(i)
+    if not peaks:
+        return []
+    filtered = [peaks[0]]
+    for p in peaks[1:]:
+        if p - filtered[-1] >= min_distance:
+            filtered.append(p)
+        else:
+            if signal[p] > signal[filtered[-1]]:
+                filtered[-1] = p
+    return filtered
+
+
+def _find_extrema_simple(signal, min_distance=5, invert=False):
+    """Локальные экстремумы: максимумы (invert=False) или минимумы
+    (invert=True). Логика та же, что у _find_peaks_simple."""
+    if invert:
+        return _find_peaks_simple(-signal, min_distance=min_distance)
+    return _find_peaks_simple(signal, min_distance=min_distance)
 
 def get_ts_duration(filepath):
     if _FFPROBE_PATH is None:
@@ -600,10 +727,6 @@ def extract_audio(filepath, start_sec, duration_sec, sample_rate=44100):
         return None, sample_rate
 
 
-# ============================================================
-# STFT
-# ============================================================
-
 _window_cache = {}
 
 
@@ -635,10 +758,6 @@ def compute_stft(audio, sr, fft_size=32768, target_fps=30, window=None):
     S_db = 20 * np.log10(S + 1e-10)
     return freqs, times, S_db.astype(np.float32)
 
-
-# ============================================================
-# Поиск границ/пиков
-# ============================================================
 
 def interp_crossing(freqs, spectrum, idx_above, idx_below, db_threshold):
     db_a = float(spectrum[idx_above])
@@ -713,10 +832,6 @@ def _search_threshold(freqs, spectrum_col, target_freq, db_threshold,
     if h_min > h_max:
         h_min, h_max = h_max, h_min
     return h_min, h_max
-
-# ============================================================
-# Алгоритмы 1-6
-# ============================================================
 
 ALGO_NAMES = {
     1: "Абсолютный порог dB",
@@ -821,7 +936,7 @@ ALGO_HELPS = {
 }
 
 HELP_LEFT_LINES = [
-    "ПОМОЩЬ — audio_speed_calc v0.51",
+    "ПОМОЩЬ — audio_speed_calc v0.53",
     "",
     "МЫШЬ:",
     "  Drag — выбор диапазона + масштаб",
@@ -830,21 +945,28 @@ HELP_LEFT_LINES = [
     "СОСТОЯНИЕ (статусная строка):",
     "  [N/5]  — текущий шаг",
     "  Ист: N/M — позиция в истории / всего",
+    "  Шаг=X.XXXс — текущий шаг расчёта",
     "",
     "КНОПКИ СЛЕВА:",
     "  Спектр — режим time/power",
     "  5я/4я — выбор гармоник",
     "",
+    "КНОПКИ СЕРЕДИНА (v0.53):",
+    "  GPS→H5 — кривая H5 из GPS",
+    "  GPS→H4 — кривая H4 из GPS",
+    "  Подп.V — подписи пиков скорости",
+    "  Повторное нажатие — выкл.",
+    "",
+    "ЦВЕТА ПОДПИСЕЙ:",
+    "  маджента — GPS-H5",
+    "  голубой  — GPS-H4",
+    "  жёлтый   — реал.H5",
+    "  зелёный  — реал.H4",
+    "",
     "КНОПКИ АЛГОРИТМОВ:",
     "  1.dB  2.Пал  3.Отн",
     "  4.Шум 5.-3dB 6.RMS",
     "  ? — справка по алгоритму",
-    "",
-    "КНОПКИ ОВЕРЛЕЯ:",
-    "  Прям. — линии H5/H4 min/max",
-    "  Факт. — кривые по шагам",
-    "  Оба   — и линии, и кривые",
-    "  Выкл  — ничего",
     "",
     "СЛАЙДЕРЫ И ПОЛЯ:",
     "  Fmin/Fmax — диапазон частот",
@@ -855,13 +977,17 @@ HELP_LEFT_LINES = [
 ]
 
 HELP_RIGHT_LINES = [
+    "ОВЕРЛЕЙ:",
+    "  Прям. — линии H5/H4 min/max",
+    "  Факт. — кривые по шагам",
+    "  Оба   — и линии, и кривые",
+    "  Выкл  — ничего",
+    "",
     "НАВИГАЦИЯ ПО ИСТОРИИ:",
     "  Назад / Вперед — по позициям",
     "  Сохр.поз. — записать текущую",
     "  Удалить поз. — стереть текущую",
-    "  Сб.время — сбросить ось X",
-    "  Сб.част  — сбросить ось Y",
-    "  Сброс    — X + Y сразу",
+    "  Сб.время / Сб.част / Сброс",
     "",
     "КЛАВИШИ:",
     "  ? — помощь (это окно)",
@@ -888,7 +1014,9 @@ HELP_RIGHT_LINES = [
     "  <file>_config.json — настройки",
     "  <file>_speed_report_algoN.txt — отчёт",
     "  <file>_spec_YYYYMMDD_HHMMSS.png — PNG",
+    "  history_log.txt — журнал версий",
 ]
+
 
 def find_range_1(freqs, spectrum_col, target_freq, color_steps,
                  vmin, vmax, cmap_n=256, f_lo=None, f_hi=None):
@@ -1044,11 +1172,6 @@ def get_search_bounds(harm_freqs, n_harm, target_idx):
         f_hi = harm_freqs[target_idx] * 1.5
     return f_lo, f_hi
 
-
-# ============================================================
-# Интерактивный анализатор — начало класса
-# ============================================================
-
 class AudioSpeedAnalyzer:
 
     PHASE_TIME = 'time'
@@ -1142,6 +1265,27 @@ class AudioSpeedAnalyzer:
         self._sys_info_printed = False
         self._closing = False
 
+        # v0.53: оверлей GPS-скорости и подписи пиков
+        self.speed_overlay_h5 = False
+        self.speed_overlay_h4 = False
+        self._speed_lines = []
+        self.speed_labels_on = False
+        self._speed_label_objs = []
+
+        # v0.53.1: Vmax/Vmin в окне + GPS-средняя для статуса
+        self.gps_v_avg = None
+        self._extreme_objs = []
+
+        # v0.53.2: защита от повторного входа в пересчёт
+        self._recalc_in_progress = False
+
+        _override_init = config.get('gps_lag_override')
+        if _override_init is not None:
+            try:
+                self.gps_lag = float(_override_init)
+            except (ValueError, TypeError):
+                pass
+
         sm = config.get('spec_mode', 'time')
         if sm == 'freq':
             sm = 'power'
@@ -1198,8 +1342,27 @@ class AudioSpeedAnalyzer:
         with open(filepath, 'w', encoding='utf-8') as f:
             f.write(f"Отчёт расчёта скорости — audio_speed_calc v{VERSION}\n")
             f.write(f"Файл: {os.path.basename(self.filepath)}\n")
-            f.write(f"Длительность: {self.duration:.3f} сек (кадров: {self.n_frames})\n")
-            f.write(f"Алгоритм: {algo} ({ALGO_NAMES.get(algo, '?')})\n")
+            f.write(f"Длительность: {self.duration:.3f} сек "
+                    f"(кадров: {self.n_frames})\n")
+            f.write(f"Алгоритм: {algo} ({ALGO_NAMES.get(algo, '?')})\n\n")
+
+            # --- Диапазон анализа ---
+            f.write(sep + "\n")
+            f.write("ДИАПАЗОН АНАЛИЗА\n")
+            f.write(sep + "\n")
+            f.write(f"  Кадры:     {f_start}-{f_end}  "
+                    f"({f_end - f_start} кадров)\n")
+            f.write(f"  Время:     {f_start/fps:.3f}-{f_end/fps:.3f}с  "
+                    f"({(f_end - f_start)/fps:.3f}с)\n")
+            f.write(f"  FPS:       {fps}\n")
+            step_actual_frames_r0 = int(round(step_sec * fps))
+            step_actual_sec_r0 = step_actual_frames_r0 / fps
+            f.write(f"  Шаг:       {step_sec:.3f} сек "
+                    f"(~{step_sec * fps:.1f} кадров, "
+                    f"факт {step_actual_frames_r0} кадр = "
+                    f"{step_actual_sec_r0:.3f}с)\n")
+            f.write(f"  Шагов:     {len(step_data)}\n")
+            f.write(sep + "\n\n")
 
             now_dt = datetime.datetime.now().strftime('%d.%m.%Y %H:%M:%S')
             f.write(f"Дата и время анализа: {now_dt}\n")
@@ -1211,15 +1374,18 @@ class AudioSpeedAnalyzer:
                 for sl in slines:
                     f.write(sl + "\n")
             f.write(sep + "\n\n")
-            f.write(f"Кадры: {f_start}-{f_end}  Время: {f_start/fps:.3f}-{f_end/fps:.3f}с\n")
+            f.write(f"Кадры: {f_start}-{f_end}  "
+                    f"Время: {f_start/fps:.3f}-{f_end/fps:.3f}с\n")
             step_actual_frames_r = int(round(step_sec * fps))
             step_actual_sec_r = step_actual_frames_r / fps
             f.write(f"Шаг: {step_sec:.3f} сек (~{step_sec * fps:.1f} кадров, "
-                    f"факт {step_actual_frames_r} кадр = {step_actual_sec_r:.3f}с)\n\n")
+                    f"факт {step_actual_frames_r} кадр = "
+                    f"{step_actual_sec_r:.3f}с)\n\n")
 
             f.write("Параметры автомобиля:\n")
             f.write(f"  Цилиндров: {cyl}\n")
-            f.write(f"  Тактность: {stroke} ({'4-такт' if stroke == 2 else '2-такт'})\n")
+            f.write(f"  Тактность: {stroke} "
+                    f"({'4-такт' if stroke == 2 else '2-такт'})\n")
             f.write(f"  Шина: {P}/{H} R{R}\n")
             f.write(f"  Главная пара: {Io}\n")
             f.write(f"  Передача: {Ik}\n\n")
@@ -1235,12 +1401,14 @@ class AudioSpeedAnalyzer:
             f.write("  dn = 60 * df * stroke / cyl\n")
             f.write("  dV = 0.377 * Rk * dn / (Io * Ik)\n\n")
 
-            f.write(f"Rk = 0.85 * {P} * {H} / 100000 + 0.0127 * {R} = {Rk_val:.4f} м\n\n")
+            f.write(f"Rk = 0.85 * {P} * {H} / 100000 + 0.0127 * {R} = "
+                    f"{Rk_val:.4f} м\n\n")
 
             f.write("Пошаговый расчёт:\n")
-            f.write(f"{'N':>3s}  {'Время,с':>8s}  {'H5 min':>10s}  {'H5 max':>10s}  "
-                    f"{'H4 min':>10s}  {'H4 max':>10s}  {'H5ц':>8s}  {'H4ц':>8s}  "
-                    f"{'f,Гц':>8s}  {'n,об/мин':>10s}  {'V,км/ч':>8s}  {'±V,км/ч':>8s}\n")
+            f.write(f"{'N':>3s}  {'Время,с':>8s}  {'H5 min':>10s}  "
+                    f"{'H5 max':>10s}  {'H4 min':>10s}  {'H4 max':>10s}  "
+                    f"{'H5ц':>8s}  {'H4ц':>8s}  {'f,Гц':>8s}  "
+                    f"{'n,об/мин':>10s}  {'V,км/ч':>8s}  {'±V,км/ч':>8s}\n")
             f.write("-" * 120 + "\n")
 
             for i, sd in enumerate(step_data):
@@ -1251,27 +1419,37 @@ class AudioSpeedAnalyzer:
                 f_val, n_val = sd['f'], sd['n']
                 v_val, dv_val = sd['V'], sd['dV']
 
-                f.write(f"{i+1:3d}  {t_sec:8.3f}  {h5mn:10.3f}  {h5mx:10.3f}  "
-                        f"{h4mn:10.3f}  {h4mx:10.3f}  {h5c:8.3f}  {h4c:8.3f}  "
-                        f"{f_val:8.3f}  {n_val:10.0f}  {v_val:8.2f}  {dv_val:8.2f}\n")
+                f.write(f"{i+1:3d}  {t_sec:8.3f}  {h5mn:10.3f}  "
+                        f"{h5mx:10.3f}  {h4mn:10.3f}  {h4mx:10.3f}  "
+                        f"{h5c:8.3f}  {h4c:8.3f}  {f_val:8.3f}  "
+                        f"{n_val:10.0f}  {v_val:8.2f}  {dv_val:8.2f}\n")
 
                 f5 = h5c / 5.0
                 f4 = h4c / 4.0
                 f0 = (f5 + f4) / 2.0
                 n0 = 60.0 * f0 * stroke / cyl
-                df_val = (abs(h5mx - h5mn) / 5.0 + abs(h4mx - h4mn) / 4.0) / 2.0 / 2.0
+                df_val = (abs(h5mx - h5mn) / 5.0
+                          + abs(h4mx - h4mn) / 4.0) / 2.0 / 2.0
                 f.write("     Подстановка:\n")
                 f.write(f"       f5 = {h5c:.3f}/5 = {f5:.3f} Гц\n")
                 f.write(f"       f4 = {h4c:.3f}/4 = {f4:.3f} Гц\n")
                 f.write(f"       f  = ({f5:.3f}+{f4:.3f})/2 = {f0:.3f} Гц\n")
-                f.write(f"       n  = 60*{f0:.3f}*{stroke}/{cyl} = {n0:.0f} об/мин\n")
-                f.write(f"       V  = 0.377*{Rk_val:.4f}*{n0:.0f}/({Io}*{Ik}) = {v_val:.2f} км/ч\n")
-                f.write(f"       df = (({h5mx:.3f}-{h5mn:.3f})/5 + ({h4mx:.3f}-{h4mn:.3f})/4) / 2 / 2 = {df_val:.3f} Гц\n")
+                f.write(f"       n  = 60*{f0:.3f}*{stroke}/{cyl} = "
+                        f"{n0:.0f} об/мин\n")
+                f.write(f"       V  = 0.377*{Rk_val:.4f}*{n0:.0f}/"
+                        f"({Io}*{Ik}) = {v_val:.2f} км/ч\n")
+                f.write(f"       df = (({h5mx:.3f}-{h5mn:.3f})/5 + "
+                        f"({h4mx:.3f}-{h4mn:.3f})/4) / 2 / 2 = "
+                        f"{df_val:.3f} Гц\n")
                 dn0 = 60.0 * df_val * stroke / cyl
-                dV0 = abs(0.377 * Rk_val * dn0 / (Io * Ik)) if (Io * Ik) > 0 else 0.0
-                f.write(f"       dn = 60*{df_val:.3f}*{stroke}/{cyl} = {dn0:.0f} об/мин\n")
-                f.write(f"       dV = 0.377*{Rk_val:.4f}*{dn0:.0f}/({Io}*{Ik}) = {dV0:.2f} км/ч\n")
-                f.write(f"       ИТОГ ШАГА: V = {v_val:.2f} ± {dV0:.2f} км/ч\n\n")
+                dV0 = abs(0.377 * Rk_val * dn0 / (Io * Ik)) \
+                    if (Io * Ik) > 0 else 0.0
+                f.write(f"       dn = 60*{df_val:.3f}*{stroke}/{cyl} = "
+                        f"{dn0:.0f} об/мин\n")
+                f.write(f"       dV = 0.377*{Rk_val:.4f}*{dn0:.0f}/"
+                        f"({Io}*{Ik}) = {dV0:.2f} км/ч\n")
+                f.write(f"       ИТОГ ШАГА: V = {v_val:.2f} ± "
+                        f"{dV0:.2f} км/ч\n\n")
 
             f.write("\nИТОГ (за весь отрезок):\n")
             f.write(f"  H5: {h5_glob_min:.3f} - {h5_glob_max:.3f} Гц\n")
@@ -1293,24 +1471,35 @@ class AudioSpeedAnalyzer:
                 if not gps_in_win_r and len(gps_t_arr_r) >= 2:
                     t_mid_r = (t_start_gps_r + t_end_gps_r) / 2
                     if gps_t_arr_r[0] <= t_mid_r <= gps_t_arr_r[-1]:
-                        gps_in_win_r = [(t_mid_r, float(np.interp(t_mid_r, gps_t_arr_r, gps_v_arr_r)), 0.0)]
+                        gps_in_win_r = [(t_mid_r, float(np.interp(
+                            t_mid_r, gps_t_arr_r, gps_v_arr_r)), 0.0)]
                 f.write("\nGPS-СРАВНЕНИЕ:\n")
                 f.write(f"  Метод: {self.gps_method}\n")
                 f.write(f"  GPS-меток в файле: {len(self.gps_points)}\n")
-                f.write(f"  Запаздывание GPS: {self.gps_lag:+.3f} сек (корреляция: {self.gps_corr:.3f})\n")
+                f.write(f"  Запаздывание GPS: {self.gps_lag:+.3f} сек "
+                        f"(корреляция: {self.gps_corr:.3f})\n")
                 f.write(f"  Окно аудио: {f_start/fps:.3f}-{f_end/fps:.3f}с\n")
-                f.write(f"  Окно GPS (с поправкой): {t_start_gps_r:.3f}-{t_end_gps_r:.3f}с\n")
+                f.write(f"  Окно GPS (с поправкой): "
+                        f"{t_start_gps_r:.3f}-{t_end_gps_r:.3f}с\n")
                 f.write("  Соседние GPS-точки:\n")
                 if gps_before_r:
-                    f.write(f"    [{gps_before_r[0]:.3f}с] {gps_before_r[1]:.1f} км/ч  ({gps_before_r[2]:.3f}с до окна)\n")
+                    f.write(f"    [{gps_before_r[0]:.3f}с] "
+                            f"{gps_before_r[1]:.1f} км/ч  "
+                            f"({gps_before_r[2]:.3f}с до окна)\n")
                 for pt in gps_in_win_r:
-                    f.write(f"    [{pt[0]:.3f}с] {pt[1]:.1f} км/ч  (в окне)\n")
+                    f.write(f"    [{pt[0]:.3f}с] {pt[1]:.1f} км/ч  "
+                            f"(в окне)\n")
                 if gps_after_r:
-                    f.write(f"    [{gps_after_r[0]:.3f}с] {gps_after_r[1]:.1f} км/ч  ({gps_after_r[2]:.3f}с после окна)\n")
+                    f.write(f"    [{gps_after_r[0]:.3f}с] "
+                            f"{gps_after_r[1]:.1f} км/ч  "
+                            f"({gps_after_r[2]:.3f}с после окна)\n")
                 if gps_in_win_r:
-                    gps_avg_r = sum(p[1] for p in gps_in_win_r) / len(gps_in_win_r)
+                    gps_avg_r = sum(p[1] for p in gps_in_win_r) \
+                        / len(gps_in_win_r)
                     f.write(f"  V аудио (ср): {v_avg:.2f} км/ч\n")
-                    f.write(f"  V GPS  (ср): {gps_avg_r:.2f} км/ч (интерполяция по {len(gps_in_win_r)} точкам)\n")
+                    f.write(f"  V GPS  (ср): {gps_avg_r:.2f} км/ч "
+                            f"(интерполяция по "
+                            f"{len(gps_in_win_r)} точкам)\n")
                     f.write(f"  dV: {v_avg - gps_avg_r:+.2f} км/ч\n")
                 else:
                     f.write("  GPS-точек в окне не найдено\n")
@@ -1322,9 +1511,8 @@ class AudioSpeedAnalyzer:
                 f.write(sep + "\n")
                 for i, p in enumerate(png_list):
                     f.write(f"  {i+1}. {p['name']}\n")
-                    f.write(f"     Размер: {p['size']} байт   MD5: {p['md5']}   Дата: {p['date']}\n")
-
-    # ---------- геометрия окна ----------
+                    f.write(f"     Размер: {p['size']} байт   "
+                            f"MD5: {p['md5']}   Дата: {p['date']}\n")
 
     def _save_window_geometry(self):
         try:
@@ -1366,31 +1554,33 @@ class AudioSpeedAnalyzer:
         except Exception:
             pass
 
-    # ---------- запуск ----------
-
     def run(self):
         _init_ffmpeg()
         if _FFMPEG_PATH:
             print(f"ffmpeg: {_FFMPEG_PATH}")
         else:
-            print("ffmpeg не найден. Положите ffprobe.exe и ffmpeg.exe рядом со скриптом или в папку bin/.")
+            print("ffmpeg не найден. Положите ffprobe.exe и ffmpeg.exe "
+                  "рядом со скриптом или в папку bin/.")
             return
         if _FFPROBE_PATH:
             print(f"ffprobe: {_FFPROBE_PATH}")
         else:
-            print("Предупреждение: ffprobe не найден — длительность будет определена по факту.")
+            print("Предупреждение: ffprobe не найден — длительность "
+                  "будет определена по факту.")
 
         dur, dur_source = get_ts_duration(self.filepath)
         if dur:
             self.duration = dur
-            print(f"Файл: {os.path.basename(self.filepath)}  длительность: {dur:.3f} сек ({dur_source})")
+            print(f"Файл: {os.path.basename(self.filepath)}  "
+                  f"длительность: {dur:.3f} сек ({dur_source})")
             extract_dur = self.duration
         else:
             print("Длительность неизвестна (ffprobe), извлекаем полностью...")
             extract_dur = 3600.0
 
         print(f"Извлечение аудио (до {extract_dur:.0f} сек)...")
-        self.audio, self.sr = extract_audio(self.filepath, 0, extract_dur, self.sr)
+        self.audio, self.sr = extract_audio(self.filepath, 0, extract_dur,
+                                            self.sr)
         if self.audio is None or len(self.audio) == 0:
             print("Не удалось извлечь аудио.")
             return
@@ -1398,12 +1588,15 @@ class AudioSpeedAnalyzer:
         actual_dur = len(self.audio) / self.sr
         self.duration = actual_dur
         if dur is None:
-            print(f"  {len(self.audio)} сэмплов, {actual_dur:.3f} сек, SR={self.sr} (фактический замер аудио)")
+            print(f"  {len(self.audio)} сэмплов, {actual_dur:.3f} сек, "
+                  f"SR={self.sr} (фактический замер аудио)")
         else:
             diff_ms = abs(dur - actual_dur) * 1000
-            print(f"  {len(self.audio)} сэмплов, {actual_dur:.3f} сек, SR={self.sr}")
+            print(f"  {len(self.audio)} сэмплов, {actual_dur:.3f} сек, "
+                  f"SR={self.sr}")
             if diff_ms > 1:
-                print(f"  (ffprobe: {dur:.3f} сек, факт: {actual_dur:.3f} сек — расхождение {diff_ms:.0f} мс)")
+                print(f"  (ffprobe: {dur:.3f} сек, факт: {actual_dur:.3f} "
+                      f"сек — расхождение {diff_ms:.0f} мс)")
 
         print("Вычисление спектрограммы...")
         self.freqs, self.times, self.S_db = compute_stft(
@@ -1418,16 +1611,27 @@ class AudioSpeedAnalyzer:
         self.gps_method = 'none'
         self.gps_lag = 0.0
         self.gps_corr = 0.0
+
+        _override_before = self.cfg.get('gps_lag_override')
+        if _override_before is not None:
+            try:
+                self.gps_lag = float(_override_before)
+            except (ValueError, TypeError):
+                pass
+
         try:
             gps_raw, self.gps_method = extract_gps(self.filepath)
             if gps_raw:
                 self.gps_points = gps_to_relative_time(gps_raw)
-                print(f"GPS: {len(self.gps_points)} меток ({self.gps_method})")
+                print(f"GPS: {len(self.gps_points)} меток "
+                      f"({self.gps_method})")
                 if self.gps_points:
                     first = self.gps_points[0]
                     last = self.gps_points[-1]
-                    print(f"  Первая точка: t={first[0]:.1f}с, V={first[1]:.1f} км/ч")
-                    print(f"  Последняя точка: t={last[0]:.1f}с, V={last[1]:.1f} км/ч")
+                    print(f"  Первая точка: t={first[0]:.1f}с, "
+                          f"V={first[1]:.1f} км/ч")
+                    print(f"  Последняя точка: t={last[0]:.1f}с, "
+                          f"V={last[1]:.1f} км/ч")
             else:
                 print("GPS: меток не найдено")
         except Exception as e:
@@ -1464,8 +1668,6 @@ class AudioSpeedAnalyzer:
         self.fig.canvas.draw_idle()
         plt.show()
 
-    # ---------- GUI ----------
-
     def build_gui(self):
         saved_w = self.cfg.get('win_w')
         saved_h = self.cfg.get('win_h')
@@ -1487,12 +1689,17 @@ class AudioSpeedAnalyzer:
 
         self.fig, self.ax_spec = plt.subplots(1, 1, figsize=(fw, fh))
         self.fig.suptitle(
-            f'audio_speed_calc v{VERSION} — {os.path.basename(self.filepath)}',
+            f'audio_speed_calc v{VERSION} — '
+            f'{os.path.basename(self.filepath)}',
             fontsize=10, y=0.98
         )
-        self.fig.subplots_adjust(left=0.10, right=0.85, top=0.91, bottom=0.22)
+        # v0.53.1: график придвинут к среднему столбцу кнопок.
+        self.fig.subplots_adjust(left=0.08, right=0.69, top=0.91, bottom=0.22)
 
         self._draw_spectrogram()
+
+        self.ax_spec.set_autoscalex_on(False)
+        self.ax_spec.set_autoscaley_on(False)
 
         self.span_selector = SpanSelector(
             self.ax_spec, self._on_span, 'horizontal',
@@ -1501,7 +1708,7 @@ class AudioSpeedAnalyzer:
             interactive=True, drag_from_anywhere=False
         )
 
-        sx, sw = 0.12, 0.16
+        sx, sw = 0.10, 0.15
         self.sl_fmin = Slider(
             self.fig.add_axes([sx, 0.04, sw, 0.018]),
             '     Fmin', 20, 600, valinit=self.cfg['freq_min'], valfmt='%d'
@@ -1510,21 +1717,22 @@ class AudioSpeedAnalyzer:
             self.fig.add_axes([sx, 0.085, sw, 0.018]),
             '     Fmax', 20, 600, valinit=self.cfg['freq_max'], valfmt='%d'
         )
-        wx = sx + sw + 0.07
+        wx = sx + sw + 0.05
         self.sl_width = Slider(
-            self.fig.add_axes([wx, 0.04, 0.08, 0.018]),
+            self.fig.add_axes([wx, 0.04, 0.07, 0.018]),
             '     Ширина', 1, 20, valinit=self.line_width, valfmt='%d'
         )
         self.sl_step = Slider(
-            self.fig.add_axes([wx, 0.085, 0.08, 0.018]),
-            '     Шаг,с', 0.01, 5.0, valinit=float(self.cfg['time_step']), valfmt='%.3f'
+            self.fig.add_axes([wx, 0.085, 0.07, 0.018]),
+            '     Шаг,с', 0.01, 5.0,
+            valinit=float(self.cfg['time_step']), valfmt='%.3f'
         )
-        cx = wx + 0.08 + 0.07
+        cx = wx + 0.07 + 0.05
         self.sl_color = Slider(
-            self.fig.add_axes([cx, 0.04, 0.08, 0.018]),
+            self.fig.add_axes([cx, 0.04, 0.07, 0.018]),
             '     Цвет,инд', 1, 255, valinit=self.color_steps, valfmt='%d'
         )
-        px = cx + 0.08 + 0.07
+        px = cx + 0.07 + 0.05
         self.sl_peak = Slider(
             self.fig.add_axes([px, 0.04, 0.06, 0.018]),
             '     Пик,Гц', 1, 30, valinit=self.peak_search_hz, valfmt='%d'
@@ -1537,8 +1745,8 @@ class AudioSpeedAnalyzer:
         self.sl_color.on_changed(self._on_color)
         self.sl_peak.on_changed(self._on_peak)
 
-        btn_x = 0.87
-        btn_w = 0.12
+        btn_x = 0.84
+        btn_w = 0.14
         btn_h = 0.035
         btn_gap = 0.003
         btn_help_w = 0.025
@@ -1579,10 +1787,12 @@ class AudioSpeedAnalyzer:
                 setattr(self, f'_btn_widget_{i}', btn)
                 algo_num = int(label.split('.')[0])
                 setattr(self, f'_btn_widget_algo_{algo_num}', btn)
-                ax_help = self.fig.add_axes([btn_x + btn_main_w + 0.002, y, btn_help_w, btn_h])
+                ax_help = self.fig.add_axes(
+                    [btn_x + btn_main_w + 0.002, y, btn_help_w, btn_h])
                 btn_help = Button(ax_help, '?')
                 btn_help.label.set_fontsize(7)
-                btn_help.on_clicked(lambda _, n=algo_num: self._show_algo_help(n))
+                btn_help.on_clicked(
+                    lambda _, n=algo_num: self._show_algo_help(n))
                 setattr(self, f'_btn_help_widget_{algo_num}', btn_help)
             else:
                 ax_btn = self.fig.add_axes([btn_x, y, btn_w, btn_h])
@@ -1593,10 +1803,32 @@ class AudioSpeedAnalyzer:
                 if overlay_num is not None:
                     setattr(self, f'_btn_widget_overlay_{overlay_num}', btn)
 
+        btn_mid_x = 0.70
+        btn_mid_w = 0.12
+        btn_mid_h = 0.035
+        btn_mid_gap = 0.003
+        btn_mid_defs = [
+            ('GPS→H5', 'h5'),
+            ('GPS→H4', 'h4'),
+            ('Подп.V', 'labels'),
+        ]
+        for i, (label, which) in enumerate(btn_mid_defs):
+            y = y_top - i * (btn_mid_h + btn_mid_gap)
+            ax_btn = self.fig.add_axes([btn_mid_x, y, btn_mid_w, btn_mid_h])
+            b = Button(ax_btn, label)
+            b.label.set_fontsize(8)
+            if which == 'labels':
+                b.on_clicked(lambda _: self._on_toggle_speed_labels())
+            else:
+                b.on_clicked(lambda _, w=which: self._on_speed_overlay(w))
+            setattr(self, f'_btn_mid_{which}', b)
+        self._update_speed_overlay_buttons()
+
         self.status = self.fig.text(
             0.02, 0.135, '', transform=self.fig.transFigure,
             fontsize=9, va='top', ha='left',
-            bbox=dict(boxstyle='round', fc='white', alpha=0.85, edgecolor='gray')
+            bbox=dict(boxstyle='round', fc='white', alpha=0.85,
+                      edgecolor='gray')
         )
         self.update_status()
         self._update_algo_buttons()
@@ -1624,11 +1856,12 @@ class AudioSpeedAnalyzer:
         tb_h = 0.022
         tb_w = 0.04
         tb_step = 0.09
-        tb_x = 0.12
+        tb_x = 0.10
         _tb_defs = [
             ('x_start', 'Xнач,с'), ('x_end', 'Xкон,с'), ('dx', 'dX,с'),
             ('y_min', 'Fmin'), ('y_max', 'Fmax'),
-            ('width', 'Шир'), ('step', 'Шаг'), ('color', 'Цвет'), ('peak', 'Пик'),
+            ('width', 'Шир'), ('step', 'Шаг'), ('color', 'Цвет'),
+            ('peak', 'Пик'),
         ]
         for i, (name, label) in enumerate(_tb_defs):
             tb = TextBox(
@@ -1769,7 +2002,8 @@ class AudioSpeedAnalyzer:
         self.ax_spec.set_xlim(0, self.n_frames)
         self.ax_spec.set_title(
             f'{spec_title} ({int(fmin)}-{int(fmax)} Гц)  |  '
-            'drag = выбор/масштаб  |  клик = гармоники  |  Z = сброс  |  P = PNG  |  Q = выход  |  ? = помощь',
+            'drag = выбор/масштаб  |  клик = гармоники  |  '
+            'Z = сброс  |  P = PNG  |  Q = выход  |  ? = помощь',
             fontsize=10
         )
         self.ax_spec.yaxis.set_major_formatter(
@@ -1862,6 +2096,482 @@ class AudioSpeedAnalyzer:
         self._algo_help_visible_num = None
         self.fig.canvas.draw_idle()
 
+    # ---------- оверлей GPS-скорости (v0.53) ----------
+
+    def _on_speed_overlay(self, which):
+        if which == 'h5':
+            self.speed_overlay_h5 = not self.speed_overlay_h5
+        elif which == 'h4':
+            self.speed_overlay_h4 = not self.speed_overlay_h4
+        else:
+            return
+
+        self._update_speed_overlay_buttons()
+        self._draw_speed_overlay()
+        self._draw_speed_labels()
+        self._draw_speed_extremes()
+
+    def _on_toggle_speed_labels(self):
+        self.speed_labels_on = not self.speed_labels_on
+        self._update_speed_overlay_buttons()
+        self._draw_speed_labels()
+        self._draw_speed_extremes()
+
+    def _update_speed_overlay_buttons(self):
+        states = [
+            ('h5',     self.speed_overlay_h5, '#ffddaa', '#ffcc88'),
+            ('h4',     self.speed_overlay_h4, '#ffccee', '#ffaadd'),
+            ('labels', self.speed_labels_on,  '#ffffcc', '#ffff88'),
+        ]
+        for which, active, on_color, on_hover in states:
+            w = getattr(self, f'_btn_mid_{which}', None)
+            if w is None:
+                continue
+            if active:
+                w.color = on_color
+                w.hovercolor = on_hover
+            else:
+                w.color = '0.85'
+                w.hovercolor = '0.95'
+            w.ax.set_facecolor(w.color)
+            w.ax.figure.canvas.draw_idle()
+
+    def _draw_speed_overlay(self):
+        for ln in self._speed_lines:
+            try:
+                ln.remove()
+            except Exception:
+                pass
+        self._speed_lines = []
+
+        if not (self.speed_overlay_h5 or self.speed_overlay_h4):
+            self.fig.canvas.draw_idle()
+            return
+
+        if not self.gps_points or len(self.gps_points) < 2:
+            self.fig.canvas.draw_idle()
+            return
+
+        if self.h5 is None or self.h4 is None:
+            self.fig.canvas.draw_idle()
+            return
+
+        try:
+            V_ref = self._calc_speed(self.h5, self.h4)[3]
+        except Exception:
+            V_ref = 0.0
+
+        if V_ref <= 1.0:
+            self.fig.canvas.draw_idle()
+            return
+
+        k5 = self.h5 / V_ref
+        k4 = self.h4 / V_ref
+
+        fps = self.cfg['target_fps']
+        gps_t = np.array([p[0] for p in self.gps_points], dtype=float)
+        gps_v = np.array([p[1] for p in self.gps_points], dtype=float)
+
+        if len(gps_t) >= 2:
+            dt_med = float(np.median(np.diff(gps_t)))
+            if dt_med <= 0:
+                dt_med = 1.0
+        else:
+            dt_med = 1.0
+        win_n = max(1, int(round(2.0 / dt_med)))
+        if win_n > 1 and win_n < len(gps_v):
+            kernel = np.ones(win_n, dtype=float) / win_n
+            gps_v_sm = np.convolve(gps_v, kernel, mode='same')
+        else:
+            gps_v_sm = gps_v
+
+        lag_used = self.gps_lag
+        _override = self.cfg.get('gps_lag_override')
+        if _override is not None:
+            try:
+                lag_used = float(_override)
+            except (ValueError, TypeError):
+                pass
+        gps_frames = (gps_t - lag_used) * fps
+
+        if self.speed_overlay_h5:
+            h5_curve = gps_v_sm * k5
+            ln, = self.ax_spec.plot(
+                gps_frames, h5_curve,
+                color='#ff00cc', lw=2.2, alpha=0.95,
+                zorder=10, solid_capstyle='round'
+            )
+            ln.set_path_effects([
+                pe.Stroke(linewidth=4.5, foreground='black'),
+                pe.Normal()
+            ])
+            self._speed_lines.append(ln)
+
+        if self.speed_overlay_h4:
+            h4_curve = gps_v_sm * k4
+            ln, = self.ax_spec.plot(
+                gps_frames, h4_curve,
+                color='#00ccff', lw=2.2, alpha=0.95,
+                zorder=10, solid_capstyle='round'
+            )
+            ln.set_path_effects([
+                pe.Stroke(linewidth=4.5, foreground='black'),
+                pe.Normal()
+            ])
+            self._speed_lines.append(ln)
+
+        self.fig.canvas.draw_idle()
+
+    def _draw_speed_labels(self):
+        for obj in self._speed_label_objs:
+            try:
+                obj.remove()
+            except Exception:
+                pass
+        self._speed_label_objs = []
+
+        if not self.speed_labels_on:
+            self.fig.canvas.draw_idle()
+            return
+
+        x0_view, x1_view = self.ax_spec.get_xlim()
+        if x1_view < x0_view:
+            x0_view, x1_view = x1_view, x0_view
+
+        def _add_label(f_x, f_y, v_val, color, is_max):
+            txt_str = f'{v_val:.1f}'
+            if is_max:
+                txt = self.ax_spec.text(
+                    f_x, f_y, txt_str,
+                    fontsize=8, color=color,
+                    ha='center', va='bottom',
+                    fontweight='bold', zorder=15
+                )
+            else:
+                txt = self.ax_spec.text(
+                    f_x, f_y, txt_str,
+                    fontsize=8, color=color,
+                    ha='center', va='top',
+                    fontweight='bold', zorder=15
+                )
+            txt.set_path_effects([
+                pe.Stroke(linewidth=2.5, foreground='black'),
+                pe.Normal()
+            ])
+            self._speed_label_objs.append(txt)
+
+        if (self.speed_overlay_h5 or self.speed_overlay_h4) \
+                and self.gps_points and len(self.gps_points) >= 3 \
+                and self.h5 is not None and self.h4 is not None:
+            gps_t = np.array([p[0] for p in self.gps_points], dtype=float)
+            gps_v = np.array([p[1] for p in self.gps_points], dtype=float)
+
+            if len(gps_t) >= 2:
+                dt_med = float(np.median(np.diff(gps_t)))
+                if dt_med <= 0:
+                    dt_med = 1.0
+            else:
+                dt_med = 1.0
+
+            win_n = max(1, int(round(2.0 / dt_med)))
+            if win_n > 1 and win_n < len(gps_v):
+                kernel = np.ones(win_n, dtype=float) / win_n
+                gps_v_sm = np.convolve(gps_v, kernel, mode='same')
+            else:
+                gps_v_sm = gps_v
+
+            try:
+                V_ref = self._calc_speed(self.h5, self.h4)[3]
+            except Exception:
+                V_ref = 0.0
+
+            if V_ref > 1.0:
+                k5 = self.h5 / V_ref
+                k4 = self.h4 / V_ref
+
+                fps = self.cfg['target_fps']
+
+                lag_used = self.gps_lag
+                _override = self.cfg.get('gps_lag_override')
+                if _override is not None:
+                    try:
+                        lag_used = float(_override)
+                    except (ValueError, TypeError):
+                        pass
+                gps_frames = (gps_t - lag_used) * fps
+
+                vis = (gps_frames >= x0_view) & (gps_frames <= x1_view)
+                if vis.sum() >= 3:
+                    gf_vis = gps_frames[vis]
+                    gv_vis = gps_v_sm[vis]
+
+                    min_dist = max(2, int(round(3.0 / dt_med)))
+                    peaks_idx = _find_peaks_simple(gv_vis,
+                                                   min_distance=min_dist)
+                    mins_idx = _find_extrema_simple(gv_vis,
+                                                    min_distance=min_dist,
+                                                    invert=True)
+
+                    if len(peaks_idx) > 20:
+                        peaks_idx = sorted(peaks_idx,
+                                           key=lambda i: -gv_vis[i])[:20]
+                        peaks_idx.sort()
+                    if len(mins_idx) > 20:
+                        mins_idx = sorted(mins_idx,
+                                          key=lambda i: gv_vis[i])[:20]
+                        mins_idx.sort()
+
+                    if self.speed_overlay_h5:
+                        for idx in peaks_idx:
+                            v_val = float(gv_vis[idx])
+                            if v_val < 5.0:
+                                continue
+                            _add_label(float(gf_vis[idx]),
+                                       v_val * k5,
+                                       v_val, '#ff00cc', True)
+                        for idx in mins_idx:
+                            v_val = float(gv_vis[idx])
+                            if v_val < 5.0:
+                                continue
+                            _add_label(float(gf_vis[idx]),
+                                       v_val * k5,
+                                       v_val, '#ff00cc', False)
+
+                    if self.speed_overlay_h4:
+                        for idx in peaks_idx:
+                            v_val = float(gv_vis[idx])
+                            if v_val < 5.0:
+                                continue
+                            _add_label(float(gf_vis[idx]),
+                                       v_val * k4,
+                                       v_val, '#00ccff', True)
+                        for idx in mins_idx:
+                            v_val = float(gv_vis[idx])
+                            if v_val < 5.0:
+                                continue
+                            _add_label(float(gf_vis[idx]),
+                                       v_val * k4,
+                                       v_val, '#00ccff', False)
+
+        if self.tube_t and self.tube_h5_centers and self.tube_h4_centers:
+            t_arr = np.array(self.tube_t, dtype=float)
+            h5_c_arr = np.array(self.tube_h5_centers, dtype=float)
+            h4_c_arr = np.array(self.tube_h4_centers, dtype=float)
+
+            v_audio = []
+            for h5c, h4c in zip(h5_c_arr, h4_c_arr):
+                try:
+                    _, _, _, v = self._calc_speed(h5c, h4c)
+                except Exception:
+                    v = 0.0
+                v_audio.append(v)
+            v_audio = np.array(v_audio, dtype=float)
+
+            if len(t_arr) >= 2:
+                dt_step = float(np.median(np.diff(t_arr)))
+            else:
+                dt_step = 0.1
+            if dt_step <= 0:
+                dt_step = 0.1
+
+            vis2 = (t_arr >= x0_view) & (t_arr <= x1_view)
+            if vis2.sum() >= 3:
+                t_vis = t_arr[vis2]
+                h5_vis = h5_c_arr[vis2]
+                h4_vis = h4_c_arr[vis2]
+                v_vis = v_audio[vis2]
+
+                min_dist2 = max(1, int(round(3.0 / dt_step)))
+                peaks_idx2 = _find_peaks_simple(v_vis,
+                                                min_distance=min_dist2)
+                mins_idx2 = _find_extrema_simple(v_vis,
+                                                 min_distance=min_dist2,
+                                                 invert=True)
+
+                if len(peaks_idx2) > 20:
+                    peaks_idx2 = sorted(peaks_idx2,
+                                        key=lambda i: -v_vis[i])[:20]
+                    peaks_idx2.sort()
+                if len(mins_idx2) > 20:
+                    mins_idx2 = sorted(mins_idx2,
+                                       key=lambda i: v_vis[i])[:20]
+                    mins_idx2.sort()
+
+                for idx in peaks_idx2:
+                    v_val = float(v_vis[idx])
+                    if v_val < 5.0:
+                        continue
+                    _add_label(float(t_vis[idx]), float(h5_vis[idx]),
+                               v_val, '#ffff00', True)
+                    _add_label(float(t_vis[idx]), float(h4_vis[idx]),
+                               v_val, '#00ff00', True)
+
+                for idx in mins_idx2:
+                    v_val = float(v_vis[idx])
+                    if v_val < 5.0:
+                        continue
+                    _add_label(float(t_vis[idx]), float(h5_vis[idx]),
+                               v_val, '#ffff00', False)
+                    _add_label(float(t_vis[idx]), float(h4_vis[idx]),
+                               v_val, '#00ff00', False)
+
+        self.fig.canvas.draw_idle()
+
+    def _draw_speed_extremes(self):
+        """Отмечает Vmax и Vmin в видимом диапазоне времени для каждого
+        активного источника.
+
+        Показываются ТОЛЬКО когда подписи пиков (speed_labels_on)
+        выключены. Если включён режим «Подп.V», локальные максимумы и
+        минимумы уже подписаны в _draw_speed_labels — и глобальные
+        Vmax/Vmin дублировать не нужно. Подпись — только число (%.1f).
+        """
+        for obj in getattr(self, '_extreme_objs', []):
+            try:
+                obj.remove()
+            except Exception:
+                pass
+        self._extreme_objs = []
+
+        # Если включён режим подписей локальных пиков — глобальные
+        # Vmax/Vmin не рисуем: они уже покрыты подписями.
+        if self.speed_labels_on:
+            self.fig.canvas.draw_idle()
+            return
+
+        has_audio = bool(self.tube_t and self.tube_h5_centers
+                         and self.tube_h4_centers)
+        has_gps = bool((self.speed_overlay_h5 or self.speed_overlay_h4)
+                       and self.gps_points and len(self.gps_points) >= 3
+                       and self.h5 is not None and self.h4 is not None)
+        if not has_audio and not has_gps:
+            self.fig.canvas.draw_idle()
+            return
+
+        x0_view, x1_view = self.ax_spec.get_xlim()
+        if x1_view < x0_view:
+            x0_view, x1_view = x1_view, x0_view
+
+        def _add_marker(f_x, f_y, v_val, color, is_max):
+            marker, = self.ax_spec.plot(
+                [f_x], [f_y],
+                marker='D' if is_max else 'v',
+                color=color, markersize=7,
+                markeredgecolor='black', markeredgewidth=1.0,
+                linestyle='None', zorder=18
+            )
+            self._extreme_objs.append(marker)
+            txt = self.ax_spec.text(
+                f_x, f_y, f'{v_val:.1f}',
+                fontsize=8, color=color,
+                ha='center',
+                va='bottom' if is_max else 'top',
+                fontweight='bold', zorder=19
+            )
+            txt.set_path_effects([
+                pe.Stroke(linewidth=2.5, foreground='black'),
+                pe.Normal()
+            ])
+            self._extreme_objs.append(txt)
+
+        if has_audio:
+            t_arr = np.array(self.tube_t, dtype=float)
+            h5_c_arr = np.array(self.tube_h5_centers, dtype=float)
+            h4_c_arr = np.array(self.tube_h4_centers, dtype=float)
+
+            v_audio = []
+            for h5c, h4c in zip(h5_c_arr, h4_c_arr):
+                try:
+                    _, _, _, v = self._calc_speed(h5c, h4c)
+                except Exception:
+                    v = 0.0
+                v_audio.append(v)
+            v_audio = np.array(v_audio, dtype=float)
+
+            vis = (t_arr >= x0_view) & (t_arr <= x1_view)
+            if vis.sum() >= 2:
+                t_vis = t_arr[vis]
+                h5_vis = h5_c_arr[vis]
+                h4_vis = h4_c_arr[vis]
+                v_vis = v_audio[vis]
+
+                if len(v_vis) >= 2:
+                    v_max_g = float(v_vis.max())
+                    v_min_g = float(v_vis.min())
+
+                    if v_max_g >= 5.0:
+                        i_max = int(np.argmax(v_vis))
+                        _add_marker(float(t_vis[i_max]),
+                                    float(h5_vis[i_max]),
+                                    v_max_g, '#ffff00', True)
+                        _add_marker(float(t_vis[i_max]),
+                                    float(h4_vis[i_max]),
+                                    v_max_g, '#00ff00', True)
+
+                    if v_min_g >= 5.0:
+                        i_min = int(np.argmin(v_vis))
+                        _add_marker(float(t_vis[i_min]),
+                                    float(h5_vis[i_min]),
+                                    v_min_g, '#ffff00', False)
+                        _add_marker(float(t_vis[i_min]),
+                                    float(h4_vis[i_min]),
+                                    v_min_g, '#00ff00', False)
+
+        if has_gps:
+            gps_t = np.array([p[0] for p in self.gps_points], dtype=float)
+            gps_v = np.array([p[1] for p in self.gps_points], dtype=float)
+
+            try:
+                V_ref = self._calc_speed(self.h5, self.h4)[3]
+            except Exception:
+                V_ref = 0.0
+
+            if V_ref > 1.0:
+                k5 = self.h5 / V_ref
+                k4 = self.h4 / V_ref
+
+                fps = self.cfg['target_fps']
+                lag_used = self.gps_lag
+                _override = self.cfg.get('gps_lag_override')
+                if _override is not None:
+                    try:
+                        lag_used = float(_override)
+                    except (ValueError, TypeError):
+                        pass
+                gps_frames = (gps_t - lag_used) * fps
+
+                vis = (gps_frames >= x0_view) & (gps_frames <= x1_view)
+                if vis.sum() >= 2:
+                    gf_vis = gps_frames[vis]
+                    gv_vis = gps_v[vis]
+
+                    v_max_g = float(gv_vis.max())
+                    v_min_g = float(gv_vis.min())
+
+                    if v_max_g >= 5.0:
+                        i_max = int(np.argmax(gv_vis))
+                        if self.speed_overlay_h5:
+                            _add_marker(float(gf_vis[i_max]),
+                                        v_max_g * k5,
+                                        v_max_g, '#ff00cc', True)
+                        if self.speed_overlay_h4:
+                            _add_marker(float(gf_vis[i_max]),
+                                        v_max_g * k4,
+                                        v_max_g, '#00ccff', True)
+
+                    if v_min_g >= 5.0:
+                        i_min = int(np.argmin(gv_vis))
+                        if self.speed_overlay_h5:
+                            _add_marker(float(gf_vis[i_min]),
+                                        v_min_g * k5,
+                                        v_min_g, '#ff00cc', False)
+                        if self.speed_overlay_h4:
+                            _add_marker(float(gf_vis[i_min]),
+                                        v_min_g * k4,
+                                        v_min_g, '#00ccff', False)
+
+        self.fig.canvas.draw_idle()
+
     def _btn_reset_time(self, _=None):
         if self._last_reset_action == 'time':
             self._last_reset_action = None
@@ -1911,6 +2621,9 @@ class AudioSpeedAnalyzer:
             self.draw_harmonics()
         self.draw_ranges()
         self.draw_tubes()
+        self._draw_speed_overlay()
+        self._draw_speed_labels()
+        self._draw_speed_extremes()
         self.update_status()
         self.fig.canvas.draw_idle()
 
@@ -1921,7 +2634,8 @@ class AudioSpeedAnalyzer:
         return int(round(sec * self.cfg['target_fps']))
 
     def _on_motion(self, event):
-        if event.xdata is None or event.ydata is None or event.inaxes != self.ax_spec:
+        if event.xdata is None or event.ydata is None \
+                or event.inaxes != self.ax_spec:
             if self.cursor_text:
                 self.cursor_text.set_visible(False)
             self.fig.canvas.draw_idle()
@@ -1930,9 +2644,11 @@ class AudioSpeedAnalyzer:
         fps = self.cfg['target_fps']
         t_sec = frame / fps
         freq = event.ydata
-        self.cursor_text.set_text(f'кадр={frame} | t={t_sec:.3f}с | {freq:.0f} Гц')
+        self.cursor_text.set_text(
+            f'кадр={frame} | t={t_sec:.3f}с | {freq:.0f} Гц')
         self.cursor_text.set_visible(True)
-        if event.button == 1 and self.phase == self.PHASE_TIME and self._drag_start_frame is not None:
+        if event.button == 1 and self.phase == self.PHASE_TIME \
+                and self._drag_start_frame is not None:
             xmin = min(self._drag_start_frame, frame)
             xmax = max(self._drag_start_frame, frame)
             dur_f = xmax - xmin
@@ -1940,7 +2656,8 @@ class AudioSpeedAnalyzer:
             t1 = xmax / fps
             dur_s = t1 - t0
             self.drag_text.set_text(
-                f'кадры: {xmin}-{xmax} ({dur_f})  |  время: {t0:.3f}-{t1:.3f}с ({dur_s:.3f}с)'
+                f'кадры: {xmin}-{xmax} ({dur_f})  |  '
+                f'время: {t0:.3f}-{t1:.3f}с ({dur_s:.3f}с)'
             )
             self.drag_text.set_visible(True)
         self.fig.canvas.draw_idle()
@@ -1952,8 +2669,6 @@ class AudioSpeedAnalyzer:
             getattr(self, f'tb_{tb_name}').set_val(value)
         finally:
             self._syncing_fields = old
-
-    # ---------- _sync_fields (внутри класса!) ----------
 
     def _sync_fields(self):
         if self._syncing_fields:
@@ -1979,8 +2694,6 @@ class AudioSpeedAnalyzer:
             self.tb_peak.set_val(float(self.sl_peak.val))
         finally:
             self._syncing_fields = False
-
-    # ---------- обработчики полей ----------
 
     def _on_field_x_start(self, text):
         if self._syncing_fields:
@@ -2144,8 +2857,6 @@ class AudioSpeedAnalyzer:
             color='red', alpha=0.15, zorder=5
         )
 
-    # ---------- история зума (единый формат dict) ----------
-
     def _push_history(self, xlim=None, ylim=None,
                       analyze_start=None, analyze_dur=None):
         if xlim is None:
@@ -2167,7 +2878,6 @@ class AudioSpeedAnalyzer:
             'h5': float(self.h5) if self.h5 is not None else None,
             'h4': float(self.h4) if self.h4 is not None else None,
             'algorithm': int(self.last_algo) if self.last_algo is not None else 0,
-            # NEW: настройки слайдеров и overlay на момент сохранения
             'time_step':      float(self.cfg['time_step']),
             'color_steps':    int(self.color_steps),
             'peak_search_hz': float(self.peak_search_hz),
@@ -2184,29 +2894,46 @@ class AudioSpeedAnalyzer:
         self.zoom_pointer = len(self.zoom_history) - 1
 
     def _apply_history_entry(self, entry):
+        """Восстанавливает состояние из записи истории и пересчитывает
+        результаты для нового диапазона.
+
+        Параметры (Шаг, Цвет, Пик, Ширина, H5, H4, алгоритм, overlay)
+        восстанавливаются из entry. Если есть H5, H4 и гармоники —
+        _on_run запускается заново, чтобы Vср/Vgps ср/Δgps и подписи
+        соответствовали новому диапазону.
+        """
+        # --- 1. Оси ---
         self.ax_spec.set_xlim(entry['view_x_start'], entry['view_x_end'])
         self.ax_spec.set_ylim(entry['view_y_start'], entry['view_y_end'])
+
+        # --- 2. Диапазон анализа ---
         self.analyze_start = int(entry.get('analyze_start', 0))
         self.analyze_dur = int(entry.get('analyze_dur', self.n_frames))
+        if self.analyze_dur <= 0:
+            self.analyze_dur = max(1, self.n_frames - self.analyze_start)
 
-        # NEW: восстановить настройки слайдеров.
-        # Используем sl_X.set_val() — он триггерит _on_X, который
-        # сам обновит self.cfg и self.<атрибут>. Потом _sync_fields
-        # подтянет значения в текстовые поля.
+        # --- 3. Слайдеры и поля ---
         ts = entry.get('time_step')
         if ts is not None:
+            self.cfg['time_step'] = float(ts)
             self.sl_step.set_val(float(ts))
 
         cs = entry.get('color_steps')
         if cs is not None:
+            self.color_steps = int(cs)
+            self.cfg['color_steps'] = int(cs)
             self.sl_color.set_val(int(cs))
 
         pk = entry.get('peak_search_hz')
         if pk is not None:
+            self.peak_search_hz = float(pk)
+            self.cfg['peak_search_hz'] = float(pk)
             self.sl_peak.set_val(float(pk))
 
         lw = entry.get('line_width')
         if lw is not None:
+            self.line_width = int(lw)
+            self.cfg['harmonic_line_width'] = int(lw)
             self.sl_width.set_val(int(lw))
 
         om = entry.get('overlay_mode')
@@ -2215,7 +2942,7 @@ class AudioSpeedAnalyzer:
             self.cfg['overlay_mode'] = self.overlay_mode
             self._update_overlay_buttons()
 
-        # H5 / H4 / алгоритм
+        # --- 4. H5 / H4 ---
         new_h5 = entry.get('h5')
         new_h4 = entry.get('h4')
         h_changed = False
@@ -2232,6 +2959,7 @@ class AudioSpeedAnalyzer:
             self.h4 = float(new_h4)
             self.cfg['harmonic_4_freq'] = float(new_h4)
 
+        # --- 5. Алгоритм ---
         new_algo = entry.get('algorithm')
         if new_algo is not None:
             self.last_algo = int(new_algo)
@@ -2240,12 +2968,41 @@ class AudioSpeedAnalyzer:
         if h_changed:
             self.calc_harmonics()
 
-        # Расчёт для этой позиции невалиден, пока пользователь
-        # не нажмёт алгоритм заново
-        self._algo_run_done = False
-
+        # --- 6. Обновление визуальных слоёв ---
         self._update_time_span()
         self._sync_fields()
+
+        # --- 7. Пересчёт для нового диапазона ---
+        # Запускаем всегда, когда есть всё необходимое: гармоники,
+        # H5/H4, валидный диапазон и корректный номер алгоритма.
+        # Раньше здесь проверялся флаг was_run = self._algo_run_done —
+        # из-за него пересчёт мог молча пропускаться.
+        can_recalc = (
+            not self._recalc_in_progress
+            and bool(self.harm_freqs)
+            and self.h5 is not None and self.h4 is not None
+            and self.analyze_dur > 0
+            and self.last_algo in (1, 2, 3, 4, 5, 6)
+        )
+
+        if can_recalc:
+            self._recalc_in_progress = True
+            try:
+                self._on_run(None, self.last_algo)
+                return
+            except Exception as e:
+                print(f"Не удалось пересчитать для нового диапазона: {e}",
+                      file=sys.stderr)
+                self._algo_run_done = False
+                self.gps_v_avg = None
+            finally:
+                self._recalc_in_progress = False
+
+        # Если пересчёт не удался или не требуется — очищаем старые
+        # данные, чтобы в статусе не остались числа от прошлого окна,
+        # и перерисовываем.
+        self._algo_run_done = False
+        self.gps_v_avg = None
         self._redraw_all()
 
     def _step_back(self, event=None):
@@ -2265,40 +3022,28 @@ class AudioSpeedAnalyzer:
         self._step_back(event)
 
     def _btn_save_pos(self, _=None):
-        added = self._push_history()
-        if added:
-            print("Текущее положение сохранено в историю.", file=sys.stderr)
-        else:
-            print("Такое положение уже есть в истории — "
-                  "дубликат не добавлен.", file=sys.stderr)
+        self._push_history()
+        print("Текущее положение сохранено в историю.", file=sys.stderr)
         self.update_status()
 
     def _btn_delete_pos(self, _=None):
-        """Удаляет ТЕКУЩУЮ позицию из истории и переключается на соседнюю
-        (предыдущую, если она есть; иначе — на первую доступную)."""
         if not self.zoom_history:
             return
 
-        # Индекс текущей записи (защита от рассинхрона)
         pos = self.zoom_pointer
         if pos < 0 or pos >= len(self.zoom_history):
             pos = len(self.zoom_history) - 1
 
-        # Удаляем ТЕКУЩУЮ запись
         self.zoom_history.pop(pos)
 
-        # История стала пустой — полный сброс
         if not self.zoom_history:
             self.zoom_pointer = -1
             self._reset_zoom()
             self.update_status()
             return
 
-        # Новая текущая позиция: на одну назад, но не ниже нуля
         self.zoom_pointer = max(0, pos - 1)
 
-        # Применяем новую позицию — это перерисует график, обновит
-        # красную полосу диапазона, поля X/Y и статусную строку
         self._apply_history_entry(self.zoom_history[self.zoom_pointer])
         self.update_status()
 
@@ -2365,10 +3110,12 @@ class AudioSpeedAnalyzer:
             self.cfg['freq_max'] = fmax
             self.ax_spec.set_ylim(fmin, fmax)
 
-            spec_title = 'Спектрограмма' if self.spec_mode == 'time' else 'Power Spectrum'
+            spec_title = ('Спектрограмма' if self.spec_mode == 'time'
+                          else 'Power Spectrum')
             self.ax_spec.set_title(
                 f'{spec_title} ({int(fmin)}-{int(fmax)} Гц)  |  '
-                'drag = выбор/масштаб  |  клик = гармоники  |  Z = сброс  |  P = PNG  |  Q = выход  |  ? = помощь',
+                'drag = выбор/масштаб  |  клик = гармоники  |  '
+                'Z = сброс  |  P = PNG  |  Q = выход  |  ? = помощь',
                 fontsize=10
             )
             if self.harm_freqs:
@@ -2510,12 +3257,16 @@ class AudioSpeedAnalyzer:
                 'h5': e.get('h5'),
                 'h4': e.get('h4'),
                 'algorithm': int(e.get('algorithm', 0)),
-                # NEW:
-                'time_step':      float(e.get('time_step', self.cfg['time_step'])),
-                'color_steps':    int(e.get('color_steps', self.color_steps)),
-                'peak_search_hz': float(e.get('peak_search_hz', self.peak_search_hz)),
-                'line_width':     int(e.get('line_width', self.line_width)),
-                'overlay_mode':   int(e.get('overlay_mode', self.overlay_mode)),
+                'time_step':      float(e.get(
+                    'time_step', self.cfg['time_step'])),
+                'color_steps':    int(e.get(
+                    'color_steps', self.color_steps)),
+                'peak_search_hz': float(e.get(
+                    'peak_search_hz', self.peak_search_hz)),
+                'line_width':     int(e.get(
+                    'line_width', self.line_width)),
+                'overlay_mode':   int(e.get(
+                    'overlay_mode', self.overlay_mode)),
             }
             for e in self.zoom_history[-50:]
             if isinstance(e, dict) and 'view_x_start' in e
@@ -2552,7 +3303,8 @@ class AudioSpeedAnalyzer:
                         'view_y_start': float(entry['view_y_start']),
                         'view_y_end':   float(entry['view_y_end']),
                         'analyze_start': int(entry.get('analyze_start', 0)),
-                        'analyze_dur':   int(entry.get('analyze_dur', self.n_frames)),
+                        'analyze_dur':   int(entry.get(
+                            'analyze_dur', self.n_frames)),
                         'h5': entry.get('h5'),
                         'h4': entry.get('h4'),
                         'algorithm': int(entry.get('algorithm', 0)),
@@ -2599,8 +3351,11 @@ class AudioSpeedAnalyzer:
             root.withdraw()
             base = os.path.splitext(os.path.basename(self.filepath))[0]
             now = datetime.datetime.now()
-            default_name = f"{base}_spec_{now.strftime('%Y%m%d')}_{now.strftime('%H%M%S')}.png"
-            png_dir = self.cfg.get('last_png_dir', '') or os.path.dirname(self.filepath) or '.'
+            default_name = (f"{base}_spec_"
+                            f"{now.strftime('%Y%m%d')}_"
+                            f"{now.strftime('%H%M%S')}.png")
+            png_dir = (self.cfg.get('last_png_dir', '')
+                       or os.path.dirname(self.filepath) or '.')
             if not os.path.isdir(png_dir):
                 png_dir = os.path.dirname(self.filepath) or '.'
             filepath = filedialog.asksaveasfilename(
@@ -2630,7 +3385,9 @@ class AudioSpeedAnalyzer:
                 png_dir = os.path.dirname(self.filepath) or '.'
             base = os.path.splitext(os.path.basename(self.filepath))[0]
             now = datetime.datetime.now()
-            png_name = f"{base}_spec_{now.strftime('%Y%m%d')}_{now.strftime('%H%M%S')}.png"
+            png_name = (f"{base}_spec_"
+                        f"{now.strftime('%Y%m%d')}_"
+                        f"{now.strftime('%H%M%S')}.png")
             png_path = os.path.join(png_dir, png_name)
 
         if self._footer_text is not None:
@@ -2666,7 +3423,8 @@ class AudioSpeedAnalyzer:
         try:
             png_size = os.path.getsize(png_path)
             png_md5 = md5_file(png_path)
-            png_mtime = datetime.datetime.fromtimestamp(os.path.getmtime(png_path))
+            png_mtime = datetime.datetime.fromtimestamp(
+                os.path.getmtime(png_path))
             png_date_str = png_mtime.strftime('%Y-%m-%d %H:%M:%S')
         except Exception:
             png_size = 0
@@ -2715,13 +3473,15 @@ class AudioSpeedAnalyzer:
         if self.phase == self.PHASE_H5:
             self.h5 = click_f
             self.cfg['harmonic_5_freq'] = click_f
-            print(f"5-я гармоника: {click_f:.3f} Гц (кадр={int(click_frame)}, "
+            print(f"5-я гармоника: {click_f:.3f} Гц "
+                  f"(кадр={int(click_frame)}, "
                   f"t={click_frame/fps:.1f}с)")
             self._set_phase(self.PHASE_H4)
         elif self.phase == self.PHASE_H4:
             self.h4 = click_f
             self.cfg['harmonic_4_freq'] = click_f
-            print(f"4-я гармоника: {click_f:.3f} Гц (кадр={int(click_frame)}, "
+            print(f"4-я гармоника: {click_f:.3f} Гц "
+                  f"(кадр={int(click_frame)}, "
                   f"t={click_frame/fps:.1f}с)")
             self.calc_harmonics()
             self.draw_harmonics()
@@ -2763,7 +3523,8 @@ class AudioSpeedAnalyzer:
 
         for i, freq in enumerate(self.harm_freqs):
             c = colors[i % len(colors)]
-            ln = self.ax_spec.axhline(y=freq, color=c, lw=1.5, ls='--', alpha=0.85)
+            ln = self.ax_spec.axhline(y=freq, color=c, lw=1.5,
+                                      ls='--', alpha=0.85)
             self.harm_lines.append(ln)
             w = self.line_width
             for j in range(w, 0, -1):
@@ -2853,8 +3614,10 @@ class AudioSpeedAnalyzer:
         if draw_straight:
             xlim = self.ax_spec.get_xlim()
             x = [xlim[0], xlim[1]]
-            self._draw_tube_band(x, x, x, 'cyan', self.h5_min, self.h5_max, None, True)
-            self._draw_tube_band(x, x, x, 'yellow', self.h4_min, self.h4_max, None, True)
+            self._draw_tube_band(x, x, x, 'cyan',
+                                 self.h5_min, self.h5_max, None, True)
+            self._draw_tube_band(x, x, x, 'yellow',
+                                 self.h4_min, self.h4_max, None, True)
 
         if draw_actual:
             self._draw_tube_band(t, h5_lo, h5_hi, 'cyan', None, None,
@@ -2864,23 +3627,28 @@ class AudioSpeedAnalyzer:
 
         self.fig.canvas.draw_idle()
 
-    def _draw_tube_band(self, x, lo, hi, color, flat_lo, flat_hi, centers, is_flat):
+    def _draw_tube_band(self, x, lo, hi, color, flat_lo, flat_hi,
+                        centers, is_flat):
         if is_flat:
             if flat_lo is None or flat_hi is None:
                 return
-            llo, = self.ax_spec.plot(x, [flat_lo, flat_lo], color=color, lw=1.5,
-                                     ls='-', alpha=0.8, zorder=5)
-            lhi, = self.ax_spec.plot(x, [flat_hi, flat_hi], color=color, lw=1.5,
-                                     ls='-', alpha=0.8, zorder=5)
+            llo, = self.ax_spec.plot(x, [flat_lo, flat_lo], color=color,
+                                     lw=1.5, ls='-', alpha=0.8, zorder=5)
+            lhi, = self.ax_spec.plot(x, [flat_hi, flat_hi], color=color,
+                                     lw=1.5, ls='-', alpha=0.8, zorder=5)
             self.tube_center_lines.extend([llo, lhi])
-            coll = self.ax_spec.fill_between(x, [flat_lo, flat_lo], [flat_hi, flat_hi],
-                                             color=color, alpha=0.12, zorder=3)
+            coll = self.ax_spec.fill_between(
+                x, [flat_lo, flat_lo], [flat_hi, flat_hi],
+                color=color, alpha=0.12, zorder=3)
             self.tube_collections.append(coll)
         else:
-            llo, = self.ax_spec.plot(x, lo, color=color, lw=1.2, ls='-', alpha=0.9, zorder=5)
-            lhi, = self.ax_spec.plot(x, hi, color=color, lw=1.2, ls='-', alpha=0.9, zorder=5)
+            llo, = self.ax_spec.plot(x, lo, color=color, lw=1.2, ls='-',
+                                     alpha=0.9, zorder=5)
+            lhi, = self.ax_spec.plot(x, hi, color=color, lw=1.2, ls='-',
+                                     alpha=0.9, zorder=5)
             self.overlay_objects.extend([llo, lhi])
-            coll = self.ax_spec.fill_between(x, lo, hi, color=color, alpha=0.15, zorder=4)
+            coll = self.ax_spec.fill_between(x, lo, hi, color=color,
+                                             alpha=0.15, zorder=4)
             self.tube_collections.append(coll)
             if centers:
                 c_arr = np.array(centers)
@@ -2902,8 +3670,9 @@ class AudioSpeedAnalyzer:
         for algo_num in sorted(self._algo_results.keys()):
             r = self._algo_results[algo_num]
             name = ALGO_NAMES.get(algo_num, '?')[:24]
-            print(f"  {algo_num:>4d}  {r['v_min']:8.2f}  {r['v_max']:8.2f}  {r['v_avg']:8.2f}  "
-                  f"{r['dv_min']:8.2f}  {r['dv_max']:8.2f}  {r['dv_avg']:8.2f}  | {name}")
+            print(f"  {algo_num:>4d}  {r['v_min']:8.2f}  {r['v_max']:8.2f}  "
+                  f"{r['v_avg']:8.2f}  {r['dv_min']:8.2f}  "
+                  f"{r['dv_max']:8.2f}  {r['dv_avg']:8.2f}  | {name}")
         if n >= 2:
             v_mins = [r['v_min'] for r in self._algo_results.values()]
             v_maxs = [r['v_max'] for r in self._algo_results.values()]
@@ -2912,8 +3681,10 @@ class AudioSpeedAnalyzer:
             dv_maxs = [r['dv_max'] for r in self._algo_results.values()]
             dv_avgs = [r['dv_avg'] for r in self._algo_results.values()]
             print(f"  {sep}")
-            print(f"  {'СР':>4s}  {sum(v_mins)/n:8.2f}  {sum(v_maxs)/n:8.2f}  {sum(v_avgs)/n:8.2f}  "
-                  f"{sum(dv_mins)/n:8.2f}  {sum(dv_maxs)/n:8.2f}  {sum(dv_avgs)/n:8.2f}  | Усреднение по {n} алг.")
+            print(f"  {'СР':>4s}  {sum(v_mins)/n:8.2f}  "
+                  f"{sum(v_maxs)/n:8.2f}  {sum(v_avgs)/n:8.2f}  "
+                  f"{sum(dv_mins)/n:8.2f}  {sum(dv_maxs)/n:8.2f}  "
+                  f"{sum(dv_avgs)/n:8.2f}  | Усреднение по {n} алг.")
             spread = max(v_avgs) - min(v_avgs)
             print(f"  Разброс V ср между алгоритмами: {spread:.2f} км/ч")
         print(f"{'='*70}")
@@ -2929,14 +3700,40 @@ class AudioSpeedAnalyzer:
         self._algo_run_done = True
         self.cfg['algorithm'] = algo
 
+        # Сброс GPS-средней (v0.53.1)
+        self.gps_v_avg = None
+
         step_sec = float(self.cfg['time_step'])
         step_frames_float = step_sec * self.cfg['target_fps']
 
         color_steps = self.color_steps
         peak_hz = self.peak_search_hz
 
+        # --- Диапазон анализа ---
+        # Никогда не сбрасываем молча на весь трек. Если analyze_dur
+        # округлился до 0 (например, dX < 1/fps), берём ровно 1 кадр
+        # от analyze_start. Если analyze_start вне границ — прижимаем.
         f_start = int(round(self.analyze_start))
-        f_end = min(f_start + int(round(self.analyze_dur)), self.n_frames)
+        if f_start < 0:
+            f_start = 0
+        if self.n_frames > 0 and f_start > self.n_frames - 1:
+            f_start = self.n_frames - 1
+
+        f_dur_frames = int(round(self.analyze_dur))
+        if f_dur_frames < 1:
+            f_dur_frames = 1
+
+        f_end = f_start + f_dur_frames
+        if f_end > self.n_frames:
+            f_end = self.n_frames
+        if f_end <= f_start:
+            f_end = min(f_start + 1, self.n_frames)
+
+        # Нормализуем: отчёт и статус показывают ровно тот диапазон,
+        # по которому считали.
+        self.analyze_start = f_start
+        self.analyze_dur = f_end - f_start
+        self._update_time_span()
 
         if self._spec_vmin is not None:
             vmin, vmax = self._spec_vmin, self._spec_vmax
@@ -2958,12 +3755,14 @@ class AudioSpeedAnalyzer:
 
         self._print_system_info()
         print(f"\n{'='*70}")
-        print(f"Расчёт min/max по гармоникам — алгоритм {algo}: {ALGO_NAMES.get(algo, '?')}")
+        print(f"Расчёт min/max по гармоникам — алгоритм {algo}: "
+              f"{ALGO_NAMES.get(algo, '?')}")
         fps = self.cfg['target_fps']
         t_start_sec = f_start / fps
         t_end_sec = f_end / fps
         print(f"  Кадры: {f_start}-{f_end}")
-        print(f"  Время: {t_start_sec:.3f}-{t_end_sec:.3f}с ({t_end_sec - t_start_sec:.3f}с)")
+        print(f"  Время: {t_start_sec:.3f}-{t_end_sec:.3f}с "
+              f"({t_end_sec - t_start_sec:.3f}с)")
         step_actual_frames = int(round(step_frames_float))
         step_actual_sec = step_actual_frames / fps
         print(f"  Шаг: {step_sec:.3f} сек (~{step_frames_float:.1f} кадров, "
@@ -2971,7 +3770,8 @@ class AudioSpeedAnalyzer:
         print(f"  Порог палитры: -{color_steps} индекс (из 255)")
         print(f"  Поиск пика: +/-{peak_hz:.0f} Гц")
         print(f"  Палитра: vmin={vmin:.1f} dB, vmax={vmax:.1f} dB")
-        print(f"  H5: {f_lo5:.1f}-{f_hi5:.1f} Гц  |  H4: {f_lo4:.1f}-{f_hi4:.1f} Гц")
+        print(f"  H5: {f_lo5:.1f}-{f_hi5:.1f} Гц  |  "
+              f"H4: {f_lo4:.1f}-{f_hi4:.1f} Гц")
         print(f"  Гармоник: {self.n_harm}  |  f0 = {self.f0:.3f} Гц")
 
         if self.gps_points and len(self.gps_points) >= 3:
@@ -2981,7 +3781,8 @@ class AudioSpeedAnalyzer:
             if override is not None:
                 self.gps_lag = float(override)
                 self.gps_corr = 0.0
-                print(f"  GPS запаздывание: {self.gps_lag:.3f} сек (ручной ввод)")
+                print(f"  GPS запаздывание: {self.gps_lag:.3f} сек "
+                      f"(ручной ввод)")
             else:
                 audio_times_full = []
                 audio_speeds_full = []
@@ -3004,39 +3805,55 @@ class AudioSpeedAnalyzer:
                         arr_t = np.array(audio_times_full, dtype=float)
                         if len(arr_v) > smooth_win:
                             kernel = np.ones(smooth_win) / smooth_win
-                            arr_v_smooth = np.convolve(arr_v, kernel, mode='same')
+                            arr_v_smooth = np.convolve(arr_v, kernel,
+                                                       mode='same')
                         else:
                             arr_v_smooth = arr_v
-                        ds = max(1, len(arr_v_smooth) // max(1, len(gps_times)))
+                        ds = max(1, len(arr_v_smooth)
+                                 // max(1, len(gps_times)))
                         arr_t_ds = arr_t[::ds]
                         arr_v_ds = arr_v_smooth[::ds]
-                        print(f"  GPS-корреляция: аудио {len(arr_v)} -> сгл. {len(arr_v_smooth)} "
+                        print(f"  GPS-корреляция: аудио {len(arr_v)} "
+                              f"-> сгл. {len(arr_v_smooth)} "
                               f"-> даунс. {len(arr_v_ds)} точек")
-                        print(f"  V аудио разброс: {arr_v.min():.2f}..{arr_v.max():.2f} км/ч "
+                        print(f"  V аудио разброс: "
+                              f"{arr_v.min():.2f}..{arr_v.max():.2f} км/ч "
                               f"(std={arr_v.std():.3f})")
-                        print(f"  V GPS  разброс: {min(gps_speeds):.2f}..{max(gps_speeds):.2f} км/ч "
+                        print(f"  V GPS  разброс: "
+                              f"{min(gps_speeds):.2f}.."
+                              f"{max(gps_speeds):.2f} км/ч "
                               f"(std={np.std(gps_speeds):.3f})")
-                        self.gps_lag, self.gps_corr, lag_results = find_gps_lag(
-                            arr_t_ds.tolist(), arr_v_ds.tolist(), gps_times, gps_speeds)
+                        self.gps_lag, self.gps_corr, lag_results = \
+                            find_gps_lag(arr_t_ds.tolist(),
+                                         arr_v_ds.tolist(),
+                                         gps_times, gps_speeds)
                         if lag_results:
                             print("  Топ-5 лагов по корреляции:")
                             for l, c, nn in lag_results[:5]:
-                                marker = " <==" if abs(l - self.gps_lag) < 1e-9 else ""
-                                print(f"    {l:+.1f}с  corr={c:+.3f}  n={nn}{marker}")
+                                marker = (" <==" if abs(l - self.gps_lag)
+                                          < 1e-9 else "")
+                                print(f"    {l:+.1f}с  corr={c:+.3f}  "
+                                      f"n={nn}{marker}")
                         print(f"  GPS запаздывание: {self.gps_lag:+.3f} сек "
                               f"(корреляция: {self.gps_corr:+.3f})")
                         if abs(self.gps_corr) < 0.5:
-                            print("  ВНИМАНИЕ: |корреляция| < 0.5 — результат недостоверен!")
-                            print("    Задайте gps_lag_override в конфиге (например 1.5)")
+                            print("  ВНИМАНИЕ: |корреляция| < 0.5 — "
+                                  "результат недостоверен!")
+                            print("    Задайте gps_lag_override в конфиге "
+                                  "(например 1.5)")
                     else:
-                        print(f"  GPS: недостаточно точек аудио ({len(audio_times_full)})")
+                        print(f"  GPS: недостаточно точек аудио "
+                              f"({len(audio_times_full)})")
                 except Exception as e:
                     print(f"  GPS: не удалось вычислить запаздывание ({e})")
 
         print("  Интерполяция границ: включена (суббинная точность)")
-        print(f"  Параметры авто: цил={self.cfg['cylinders']} такт={self.cfg['stroke']} "
-              f"шина={self.cfg['tire_width']}/{self.cfg['tire_profile']} "
-              f"R{self.cfg['rim_diameter']} ГП={self.cfg['final_drive']} "
+        print(f"  Параметры авто: цил={self.cfg['cylinders']} "
+              f"такт={self.cfg['stroke']} "
+              f"шина={self.cfg['tire_width']}/"
+              f"{self.cfg['tire_profile']} "
+              f"R{self.cfg['rim_diameter']} "
+              f"ГП={self.cfg['final_drive']} "
               f"КПП={self.cfg['gear_ratio']}")
         print(f"{'='*70}")
 
@@ -3064,7 +3881,8 @@ class AudioSpeedAnalyzer:
         expected_h5 = self.h5
         expected_h4 = self.h4
 
-        n_steps = max(1, math.floor((f_end - f_start) / step_frames_float) + 1)
+        n_steps = max(1, math.floor((f_end - f_start)
+                                    / step_frames_float) + 1)
         for step_i in range(n_steps):
             fs = f_start + int(round(step_i * step_frames_float))
             if fs > f_end:
@@ -3132,7 +3950,8 @@ class AudioSpeedAnalyzer:
 
             f_val, n_val, Rk_val, V_val = self._calc_speed(h5_c, h4_c)
             df_val, dV_val = self._calc_speed_error(h5_min, h5_max,
-                                                    h4_min, h4_max, f_val, V_val)
+                                                    h4_min, h4_max,
+                                                    f_val, V_val)
 
             all_v.append(V_val)
             all_dv.append(dV_val)
@@ -3157,9 +3976,9 @@ class AudioSpeedAnalyzer:
                     gps_v_str = f"  {gps_v_val:8.1f}"
 
             row = (f"{t_sec:8.3f}  {h5_min:10.3f}  {h5_max:10.3f}  "
-                   f"{h4_min:10.3f}  {h4_max:10.3f}  {h5_c:8.3f}  {h4_c:8.3f}  "
-                   f"{f_val:8.3f}  {n_val:10.0f}  {V_val:8.2f}  "
-                   f"{dV_val:8.2f}{gps_v_str}")
+                   f"{h4_min:10.3f}  {h4_max:10.3f}  {h5_c:8.3f}  "
+                   f"{h4_c:8.3f}  {f_val:8.3f}  {n_val:10.0f}  "
+                   f"{V_val:8.2f}  {dV_val:8.2f}{gps_v_str}")
             print(row)
             sys.stdout.flush()
 
@@ -3172,8 +3991,8 @@ class AudioSpeedAnalyzer:
         dv_min = dv_max = dv_avg = 0.0
         n_min_v = n_max_v = 0
         f0_avg = 0.0
-        Rk_v = (0.85 * self.cfg['tire_width'] * self.cfg['tire_profile'] / 100000.0
-                + 0.0127 * self.cfg['rim_diameter'])
+        Rk_v = (0.85 * self.cfg['tire_width'] * self.cfg['tire_profile']
+                / 100000.0 + 0.0127 * self.cfg['rim_diameter'])
 
         print(f"\n{'='*70}")
         print("ИТОГ (за весь отрезок):")
@@ -3209,11 +4028,11 @@ class AudioSpeedAnalyzer:
                 if not gps_in_win and len(gps_t_arr) >= 2:
                     t_mid = (t_start_gps + t_end_gps) / 2
                     if gps_t_arr[0] <= t_mid <= gps_t_arr[-1]:
-                        gps_in_win = [(t_mid,
-                                       float(np.interp(t_mid, gps_t_arr, gps_v_arr)),
-                                       0.0)]
+                        gps_in_win = [(t_mid, float(np.interp(
+                            t_mid, gps_t_arr, gps_v_arr)), 0.0)]
                 if gps_in_win:
                     gps_avg = sum(p[1] for p in gps_in_win) / len(gps_in_win)
+                    self.gps_v_avg = gps_avg  # v0.53.1
                     dv_gps = v_avg - gps_avg
                     print("  GPS-сравнение:")
                     print(f"    Метод: {self.gps_method}")
@@ -3223,19 +4042,23 @@ class AudioSpeedAnalyzer:
                     print(f"    Окно: {t_start_sec:.3f}-{t_end_sec:.3f}с -> "
                           f"GPS: {t_start_gps:.3f}-{t_end_gps:.3f}с")
                     if gps_before:
-                        print(f"    [{gps_before[0]:.3f}с] {gps_before[1]:.1f} км/ч  "
+                        print(f"    [{gps_before[0]:.3f}с] "
+                              f"{gps_before[1]:.1f} км/ч  "
                               f"({gps_before[2]:.3f}с до окна)")
                     for pt in gps_in_win:
-                        print(f"    [{pt[0]:.3f}с] {pt[1]:.1f} км/ч  (в окне)")
+                        print(f"    [{pt[0]:.3f}с] {pt[1]:.1f} км/ч  "
+                              f"(в окне)")
                     if gps_after:
-                        print(f"    [{gps_after[0]:.3f}с] {gps_after[1]:.1f} км/ч  "
+                        print(f"    [{gps_after[0]:.3f}с] "
+                              f"{gps_after[1]:.1f} км/ч  "
                               f"({gps_after[2]:.3f}с после окна)")
                     print(f"    V аудио (ср): {v_avg:.2f} км/ч")
                     print(f"    V GPS  (ср): {gps_avg:.2f} км/ч "
                           f"(интерполяция по {len(gps_in_win)} точкам)")
                     print(f"    dV: {dv_gps:+.2f} км/ч")
                 else:
-                    print(f"  GPS: нет точек в окне (с поправкой t={self.gps_lag:+.3f}с)")
+                    print(f"  GPS: нет точек в окне "
+                          f"(с поправкой t={self.gps_lag:+.3f}с)")
 
             base = os.path.splitext(os.path.basename(self.filepath))[0]
             report_path = f"{base}_speed_report_algo{algo}.txt"
@@ -3264,13 +4087,15 @@ class AudioSpeedAnalyzer:
         self._update_algo_buttons()
         self.draw_tubes()
         self.draw_ranges()
+        self._draw_speed_overlay()
+        self._draw_speed_labels()
+        self._draw_speed_extremes()
         self.update_status()
         self.fig.canvas.draw_idle()
 
     def update_status(self):
         parts = []
 
-        # Определяем текущий шаг (всего 5)
         if self.phase == self.PHASE_TIME:
             step = 1
         elif self.phase == self.PHASE_H5:
@@ -3282,19 +4107,17 @@ class AudioSpeedAnalyzer:
 
         parts.append(f"[{step}/5]")
 
-        # История зума: текущая позиция / всего записей
         hist_total = len(self.zoom_history)
         if hist_total == 0:
             parts.append("Ист: 0/0")
         else:
-            hist_pos = self.zoom_pointer + 1  # 1-based для человека
+            hist_pos = self.zoom_pointer + 1
             if hist_pos < 1:
                 hist_pos = 1
             if hist_pos > hist_total:
                 hist_pos = hist_total
             parts.append(f"Ист: {hist_pos}/{hist_total}")
 
-        # Текущий шаг расчёта
         try:
             step_sec = float(self.cfg['time_step'])
         except (ValueError, TypeError):
@@ -3302,13 +4125,36 @@ class AudioSpeedAnalyzer:
         parts.append(f"Шаг={step_sec:.3f}с")
 
         if self.phase == self.PHASE_TIME:
-            parts.append("Drag — выбрать диапазон, клик — выбрать 5-ю гармонику")
+            parts.append("Drag — выбрать диапазон, "
+                         "клик — выбрать 5-ю гармонику")
             parts.append(f"Файл: {os.path.basename(self.filepath)}")
         elif self.phase == self.PHASE_H5:
             parts.append("Кликните мышью по 5-й гармонике")
         elif self.phase == self.PHASE_H4:
             parts.append("Кликните мышью по 4-й гармонике")
         elif self.phase == self.PHASE_DONE:
+            # --- Диапазон анализа (кадры и секунды) ---
+            try:
+                fps_status = float(self.cfg['target_fps'])
+                f_s = int(round(self.analyze_start))
+                f_d = int(round(self.analyze_dur))
+                if f_d < 1:
+                    f_d = 1
+                f_e = min(f_s + f_d, self.n_frames)
+                if f_e <= f_s:
+                    f_e = min(f_s + 1, self.n_frames)
+                if fps_status > 0:
+                    t0 = f_s / fps_status
+                    t1 = f_e / fps_status
+                    parts.append(
+                        f"Диап: кадры {f_s}-{f_e} "
+                        f"({t0:.3f}-{t1:.3f}с)"
+                    )
+                else:
+                    parts.append(f"Диап: кадры {f_s}-{f_e}")
+            except Exception:
+                pass
+
             if not self._algo_run_done:
                 parts.append("Выберите алгоритм: 1.dB ... 6.RMS")
                 if self.h5 is not None:
@@ -3320,25 +4166,40 @@ class AudioSpeedAnalyzer:
             else:
                 algo_name = ALGO_NAMES.get(self.last_algo, "?")
                 parts.append(f"Готово | Алго {self.last_algo}: {algo_name}")
-                if self.h5 is not None and self.h4 is not None and self.f0 is not None:
-                    cyl = self.cfg['cylinders']
-                    stroke = self.cfg['stroke']
-                    P = self.cfg['tire_width']
-                    H = self.cfg['tire_profile']
-                    R = self.cfg['rim_diameter']
-                    Io = self.cfg['final_drive']
-                    Ik = self.cfg['gear_ratio']
+                if (self.h5 is not None and self.h4 is not None
+                        and self.f0 is not None):
+                    parts.append(f"H5={self.h5:.1f} Гц | "
+                                 f"H4={self.h4:.1f} Гц")
+                    parts.append(f"f0={self.f0:.1f} Гц")
 
-                    f5 = self.h5 / 5.0
-                    f4 = self.h4 / 4.0
-                    f = (f5 + f4) / 2.0
-                    Rk = 0.85 * P * H / 100000.0 + 0.0127 * R
-                    n = 60.0 * f * stroke / cyl
-                    V = 0.377 * Rk * n / (Io * Ik)
+                    # Vср — из результатов последнего запуска алгоритма,
+                    # ровно то же значение, что записано в отчёте.
+                    v_avg_status = None
+                    if self._algo_results and \
+                            self.last_algo in self._algo_results:
+                        v_avg_status = self._algo_results[
+                            self.last_algo].get('v_avg')
+                    if v_avg_status is not None:
+                        parts.append(f"Vср={v_avg_status:.1f} км/ч")
 
-                    parts.append(f"H5={self.h5:.1f} Гц | H4={self.h4:.1f} Гц")
-                    parts.append(f"f0={self.f0:.1f} Гц | Rk={Rk:.4f} м")
-                    parts.append(f"V={V:.1f} км/ч")
+                    gps_avg = getattr(self, 'gps_v_avg', None)
+                    if gps_avg is not None:
+                        parts.append(f"Vgps ср={gps_avg:.1f} км/ч")
+
+                    # Δgps — сдвиг между GPS-временем и временем аудио
+                    # (как в отчёте). Если активен gps_lag_override из
+                    # JSON — помечаем «(OVR)».
+                    gps_dt_used = self.gps_lag
+                    _override = self.cfg.get('gps_lag_override')
+                    ovr_flag = False
+                    if _override is not None:
+                        try:
+                            gps_dt_used = float(_override)
+                            ovr_flag = True
+                        except (ValueError, TypeError):
+                            pass
+                    parts.append(f"Δgps={gps_dt_used:+.3f}с"
+                                 + (" (OVR)" if ovr_flag else ""))
 
         self.status.set_text(' | '.join(parts) if parts else '')
         self.fig.canvas.draw_idle()
@@ -3385,10 +4246,6 @@ class AudioSpeedAnalyzer:
             self.fig.canvas.draw_idle()
 
 
-# ============================================================
-# Main
-# ============================================================
-
 def prompt_car_params(config, config_path):
     """Запрос параметров автомобиля. Промпты в stderr."""
     keys = [
@@ -3404,12 +4261,15 @@ def prompt_car_params(config, config_path):
     print("\nПАРАМЕТРЫ АВТОМОБИЛЯ (из config):", file=sys.stderr)
     print(f"  Цилиндры:      {config['cylinders']}", file=sys.stderr)
     print(f"  Тактность:     {config['stroke']} "
-          f"({'4-такт' if config['stroke']==2 else '2-такт'})", file=sys.stderr)
-    print(f"  Шина:          {config['tire_width']}/{config['tire_profile']} "
+          f"({'4-такт' if config['stroke']==2 else '2-такт'})",
+          file=sys.stderr)
+    print(f"  Шина:          {config['tire_width']}/"
+          f"{config['tire_profile']} "
           f"R{config['rim_diameter']}", file=sys.stderr)
     print(f"  ГП:            {config['final_drive']}", file=sys.stderr)
     print(f"  КПП:           {config['gear_ratio']}", file=sys.stderr)
-    print("Согласны? (Enter=да / n=ввести новые):", file=sys.stderr, flush=True)
+    print("Согласны? (Enter=да / n=ввести новые):",
+          file=sys.stderr, flush=True)
 
     try:
         resp = input().strip().lower()
@@ -3419,7 +4279,8 @@ def prompt_car_params(config, config_path):
     if resp == 'n':
         for key, label, typ in keys:
             cur = config[key]
-            print(f"  {label} [{cur}]: ", file=sys.stderr, end='', flush=True)
+            print(f"  {label} [{cur}]: ", file=sys.stderr,
+                  end='', flush=True)
             try:
                 val = input().strip()
             except (EOFError, OSError):
@@ -3428,7 +4289,8 @@ def prompt_car_params(config, config_path):
                 try:
                     config[key] = typ(val)
                 except ValueError:
-                    print(f"    Ошибка: оставлено {cur}", file=sys.stderr)
+                    print(f"    Ошибка: оставлено {cur}",
+                          file=sys.stderr)
         save_config(config, config_path)
 
 
@@ -3438,7 +4300,8 @@ def main():
     )
     parser.add_argument('filepath', help='Путь к .ts файлу')
     parser.add_argument('--config', default=None,
-                        help='Файл конфигурации JSON (по умолчанию: <base_ts>_config.json)')
+                        help='Файл конфигурации JSON '
+                             '(по умолчанию: <base_ts>_config.json)')
     args = parser.parse_args()
 
     if not os.path.exists(args.filepath):
@@ -3454,13 +4317,15 @@ def main():
         config_path = per_file_config
     else:
         if os.path.exists(CONFIG_FILE):
-            print(f"Перенос настроек из {CONFIG_FILE} -> {per_file_config}",
-                  file=sys.stderr)
+            print(f"Перенос настроек из {CONFIG_FILE} -> "
+                  f"{per_file_config}", file=sys.stderr)
             old_cfg = load_config(CONFIG_FILE)
             save_config(old_cfg, per_file_config)
             config_path = per_file_config
         else:
             config_path = per_file_config
+
+    update_history_log()
 
     config = load_config(config_path)
 
