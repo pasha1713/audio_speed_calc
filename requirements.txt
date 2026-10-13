@@ -1,0 +1,25 @@
+# ============================================================
+#  audio_speed_calc — Python-зависимости
+# ============================================================
+#
+#  Установка:
+#      pip install -r requirements.txt
+#
+#  или:
+#      python -m pip install -r requirements.txt
+#
+#  Примечание:
+#    tkinter НЕ указан здесь — он входит в стандартную поставку
+#    Python на Windows и macOS. На Linux обычно ставится
+#    отдельным пакетом:
+#       Debian/Ubuntu:  sudo apt install python3-tk
+#       Fedora:         sudo dnf install python3-tkinter
+#       Arch:           sudo pacman -S tk
+#
+#    ffmpeg / ffprobe / exiftool — это ВНЕШНИЕ программы,
+#    они не ставятся через pip. См. README.md → раздел
+#    «Установка» → шаг 3.
+# ============================================================
+
+numpy>=1.20
+matplotlib>=3.4
