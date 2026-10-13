@@ -1,0 +1,853 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>audio_speed_calc — README</title>
+<style>
+  :root {
+    --bg: #ffffff;
+    --fg: #24292f;
+    --muted: #57606a;
+    --border: #d0d7de;
+    --accent: #0969da;
+    --accent-bg: #ddf4ff;
+    --code-bg: #f6f8fa;
+    --table-stripe: #f6f8fa;
+    --warn-bg: #fff8c5;
+    --warn-border: #d4a72c;
+    --ok-bg: #dafbe1;
+    --ok-border: #2da44e;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue",
+                 Arial, "Noto Sans", sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
+    font-size: 16px;
+    line-height: 1.6;
+  }
+
+  .container {
+    max-width: 980px;
+    margin: 0 auto;
+    padding: 32px 24px 96px;
+  }
+
+  /* ---- Заголовки ---- */
+  h1, h2, h3, h4 {
+    font-weight: 600;
+    line-height: 1.25;
+    margin: 32px 0 16px;
+    scroll-margin-top: 16px;
+  }
+  h1 {
+    font-size: 2em;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 0.3em;
+    margin-top: 0;
+  }
+  h2 {
+    font-size: 1.5em;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 0.3em;
+    margin-top: 40px;
+  }
+  h3 { font-size: 1.2em; }
+  h4 { font-size: 1em; }
+
+  /* ---- Параграфы, ссылки, списки ---- */
+  p { margin: 0 0 16px; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  ul, ol { padding-left: 2em; margin: 0 0 16px; }
+  li + li { margin-top: 4px; }
+
+  /* ---- Бейджи ---- */
+  .badges {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 24px;
+  }
+  .badge {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 999px;
+    font-size: 0.82em;
+    font-weight: 600;
+    background: var(--accent-bg);
+    color: var(--accent);
+    border: 1px solid #b6e3ff;
+  }
+  .badge.green { background: #dafbe1; color: #1a7f37; border-color: #aceebb; }
+  .badge.orange { background: #fff1e5; color: #bc4c00; border-color: #ffd8b5; }
+  .badge.grey { background: #eff1f3; color: #57606a; border-color: #d8dee4; }
+
+  /* ---- Код ---- */
+  code {
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+                 "Liberation Mono", monospace;
+    font-size: 0.88em;
+    padding: 0.2em 0.4em;
+    background: var(--code-bg);
+    border-radius: 6px;
+    word-break: break-word;
+  }
+  pre {
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+                 "Liberation Mono", monospace;
+    font-size: 0.85em;
+    line-height: 1.5;
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 16px;
+    overflow-x: auto;
+    margin: 0 0 16px;
+  }
+  pre code {
+    padding: 0;
+    background: transparent;
+    font-size: 1em;
+    white-space: pre;
+    word-break: normal;
+  }
+
+  /* ---- Таблицы ---- */
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 0 0 20px;
+    font-size: 0.94em;
+    display: block;
+    overflow-x: auto;
+  }
+  thead { background: var(--code-bg); }
+  th, td {
+    border: 1px solid var(--border);
+    padding: 8px 12px;
+    text-align: left;
+    vertical-align: top;
+  }
+  th { font-weight: 600; }
+  tbody tr:nth-child(even) { background: var(--table-stripe); }
+  td code { white-space: nowrap; }
+
+  /* ---- Блоки-цитаты / предупреждения ---- */
+  blockquote {
+    margin: 0 0 16px;
+    padding: 0 16px;
+    color: var(--muted);
+    border-left: 4px solid var(--border);
+  }
+  .callout {
+    margin: 0 0 20px;
+    padding: 12px 16px;
+    border-radius: 8px;
+    border-left: 4px solid;
+    font-size: 0.95em;
+  }
+  .callout.ok  { background: var(--ok-bg);   border-color: var(--ok-border); }
+  .callout.warn{ background: var(--warn-bg); border-color: var(--warn-border); }
+  .callout.info{ background: var(--accent-bg); border-color: var(--accent); }
+  .callout p:last-child { margin-bottom: 0; }
+  .callout strong { font-weight: 600; }
+
+  /* ---- Оглавление ---- */
+  nav.toc {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px 24px;
+    margin-bottom: 32px;
+  }
+  nav.toc h2 {
+    margin: 0 0 12px;
+    font-size: 1.1em;
+    border: none;
+    padding: 0;
+  }
+  nav.toc ul { margin: 0; padding-left: 1.2em; columns: 2; column-gap: 32px; }
+  nav.toc li { break-inside: avoid; margin: 2px 0; }
+  @media (max-width: 640px) {
+    nav.toc ul { columns: 1; }
+  }
+
+  /* ---- Секция FAQ ---- */
+  .faq-q {
+    font-weight: 600;
+    margin-top: 20px;
+    margin-bottom: 6px;
+  }
+  .faq-a {
+    margin: 0 0 16px 0;
+    padding-left: 0;
+  }
+
+  /* ---- Мелочи ---- */
+  hr {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 40px 0;
+  }
+  .file-tree {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.85em;
+    line-height: 1.55;
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 18px;
+    overflow-x: auto;
+    white-space: pre;
+    margin: 0 0 20px;
+  }
+  .anchor { scroll-margin-top: 16px; }
+  footer {
+    margin-top: 64px;
+    padding-top: 24px;
+    border-top: 1px solid var(--border);
+    color: var(--muted);
+    font-size: 0.85em;
+    text-align: center;
+  }
+</style>
+</head>
+<body>
+<div class="container">
+
+  <h1>audio_speed_calc</h1>
+
+  <div class="badges">
+    <span class="badge">Python 3.8+</span>
+    <span class="badge grey">Windows · Linux · macOS</span>
+    <span class="badge orange">v0.55.9</span>
+    <span class="badge green">MIT</span>
+  </div>
+
+  <p>
+    Расчёт скорости автомобиля по <strong>звуку двигателя</strong> из
+    <code>.ts</code>-фрагментов видеорегистраторов (Novatek / Viofo / 70mai).
+    Дополнительно сопоставляет результат с <strong>GPS-данными</strong>,
+    содержащимися в том же файле.
+  </p>
+
+  <!-- ============== ОГЛАВЛЕНИЕ ============== -->
+  <nav class="toc" id="toc">
+    <h2>Содержание</h2>
+    <ul>
+      <li><a href="#features">Возможности</a></li>
+      <li><a href="#how">Как это работает</a></li>
+      <li><a href="#requirements">Требования</a></li>
+      <li><a href="#install">Установка</a></li>
+      <li><a href="#quickstart">Быстрый старт</a></li>
+      <li><a href="#usage">Использование</a></li>
+      <li><a href="#hotkeys">Горячие клавиши</a></li>
+      <li><a href="#files">Файлы проекта</a></li>
+      <li><a href="#config">Конфигурация</a></li>
+      <li><a href="#formulas">Формулы</a></li>
+      <li><a href="#scripts">Скрипты</a></li>
+      <li><a href="#deps">Зависимости по модулям</a></li>
+      <li><a href="#faq">FAQ</a></li>
+      <li><a href="#license">Лицензия</a></li>
+      <li><a href="#credits">Благодарности</a></li>
+      <li><a href="#changelog">История версий</a></li>
+    </ul>
+  </nav>
+
+  <!-- ============== ВОЗМОЖНОСТИ ============== -->
+  <h2 id="features" class="anchor">Возможности</h2>
+
+  <h3>Анализ звука</h3>
+  <ul>
+    <li><strong>6 алгоритмов</strong> выделения границ гармоник в спектрограмме:
+      <ol>
+        <li><code>1.dB</code> — абсолютный порог в dB</li>
+        <li><code>2.Пал</code> — индекс палитры</li>
+        <li><code>3.Отн</code> — относительно пика</li>
+        <li><code>4.Шум</code> — адаптивный от шума</li>
+        <li><code>5.-3dB</code> — половинная мощность</li>
+        <li><code>6.RMS</code> — RMS-интегрирование</li>
+      </ol>
+    </li>
+    <li>Выбор <strong>5-й и 4-й гармоник</strong> кликом мыши прямо по спектрограмме.</li>
+    <li>Расчёт мгновенной скорости по шагам с оценкой погрешности <code>±V</code>.</li>
+    <li>Интерактивный зум, история переходов, сохранение позиций.</li>
+  </ul>
+
+  <h3>GPS-сравнение</h3>
+  <ul>
+    <li>Автоизвлечение GPS-меток из <code>.ts</code>-файла:
+      <ul>
+        <li>основной способ — <code>exiftool -ee3</code>;</li>
+        <li>резервный — прямой бинарный разбор потока PID <code>0x0300</code>.</li>
+      </ul>
+    </li>
+    <li>Автоматический поиск <strong>запаздывания GPS</strong> относительно
+      аудио через кросс-корреляцию (по положительной корреляции Пирсона).</li>
+    <li>Ручная переустановка лага через <code>gps_lag_override</code> в конфиге.</li>
+    <li>Наложение GPS-скорости на спектрограмму в единицах Гц (H5 / H4).</li>
+    <li>Полный <strong>диагностический лог</strong> по GPS-лагу
+      (<code>*_gps_lag_diag.log</code> + CSV).</li>
+  </ul>
+
+  <h3>Визуализация</h3>
+  <ul>
+    <li>Спектрограмма в режимах <code>time</code> (pcolormesh) и
+      <code>power</code> (contourf).</li>
+    <li>Сетка гармоник, полосы H5/H4, линии min/max, «трубы» по шагам.</li>
+    <li>Подписи пиков скорости и маркеры Vmax/Vmin в видимом окне.</li>
+    <li>Экспорт PNG со штампом (версия, MD5, время, путь).</li>
+  </ul>
+
+  <h3>Отчёты</h3>
+  <ul>
+    <li><code>&lt;file&gt;_speed_report_algoN.txt</code> — пошаговый расчёт
+      с формулами и подстановками, сведения о системе, диске и скрипте.</li>
+    <li>Включает сводку по всем запущенным алгоритмам за сеанс.</li>
+  </ul>
+
+  <!-- ============== КАК ЭТО РАБОТАЕТ ============== -->
+  <h2 id="how" class="anchor">Как это работает</h2>
+  <p>
+    Двигатель внутреннего сгорания возбуждает акустические колебания на
+    частоте, пропорциональной оборотам коленвала:
+  </p>
+<pre><code>f_осн = n · cyl / (60 · stroke)</code></pre>
+  <p>
+    где <code>n</code> — обороты (об/мин), <code>cyl</code> — число цилиндров,
+    <code>stroke</code> — тактность (<code>2</code> для 4-тактного,
+    <code>1</code> для 2-тактного).
+  </p>
+  <p>
+    Спектрограмма <code>.ts</code>-дорожки содержит чёткие пики на гармониках
+    основной частоты. Программа отслеживает положение 5-й и 4-й гармоник
+    во времени, вычисляет среднюю фундаментальную частоту и пересчитывает
+    её в скорость по формуле:
+  </p>
+<pre><code>V = 0.377 · Rk · n / (Io · Ik)</code></pre>
+  <p>
+    где <code>Rk</code> — эффективный радиус качения колеса,
+    <code>Io</code> — главная пара, <code>Ik</code> — передаточное число КПП.
+  </p>
+
+  <!-- ============== ТРЕБОВАНИЯ ============== -->
+  <h2 id="requirements" class="anchor">Требования</h2>
+
+  <h3>Обязательные</h3>
+  <ul>
+    <li><strong>Python</strong> 3.8+ (проверено на 3.10–3.13)</li>
+    <li><strong>pip</strong></li>
+    <li><strong>ffmpeg</strong> и <strong>ffprobe</strong> — извлечение аудио из <code>.ts</code></li>
+    <li><strong>tkinter</strong> — для диалогов и геометрии окна (обычно входит в Python)</li>
+  </ul>
+
+  <h3>Опционально (но рекомендуется)</h3>
+  <ul>
+    <li><strong>exiftool</strong> — быстрая и точная выгрузка GPS-меток
+      (без него используется встроенный бинарный парсер)</li>
+  </ul>
+
+  <h3>Python-пакеты</h3>
+  <ul>
+    <li><code>numpy &gt;= 1.20</code></li>
+    <li><code>matplotlib &gt;= 3.4</code></li>
+  </ul>
+
+  <!-- ============== УСТАНОВКА ============== -->
+  <h2 id="install" class="anchor">Установка</h2>
+
+  <h3>1. Клонирование</h3>
+<pre><code>git clone https://github.com/&lt;ваш-логин&gt;/audio_speed_calc.git
+cd audio_speed_calc</code></pre>
+
+  <h3>2. Установка Python-зависимостей</h3>
+<pre><code>pip install -r requirements.txt</code></pre>
+  <p>
+    Если <code>pip</code> не в PATH — используйте
+    <code>python -m pip install -r requirements.txt</code>.
+  </p>
+
+  <h3>3. Установка внешних программ</h3>
+
+  <h4>Windows</h4>
+  <ol>
+    <li>
+      <strong>ffmpeg + ffprobe</strong> — скачать
+      <code>ffmpeg-release-essentials.zip</code> с
+      <a href="https://www.gyan.dev/ffmpeg/builds/">gyan.dev</a> или
+      <code>ffmpeg-master-latest-win64-gpl.zip</code> с
+      <a href="https://github.com/BtbN/FFmpeg-Builds/releases">BtbN/FFmpeg-Builds</a>.
+      Распаковать <code>ffmpeg.exe</code> и <code>ffprobe.exe</code>
+      в папку <code>bin\</code> рядом со скриптом <strong>или</strong>
+      добавить в системный <code>PATH</code>.
+    </li>
+    <li>
+      <strong>exiftool</strong> (опционально) — скачать
+      <code>exiftool-XX.XX_64.zip</code> с
+      <a href="https://exiftool.org/">exiftool.org</a>.
+      Распаковать содержимое в папку <code>bin\</code>.
+      Файл <code>exiftool(-k).exe</code> переименовать в
+      <code>exiftool.exe</code>.
+    </li>
+  </ol>
+
+  <h4>Linux (Debian/Ubuntu)</h4>
+<pre><code>sudo apt install ffmpeg libimage-exiftool-perl python3-tk</code></pre>
+
+  <h4>Linux (Fedora)</h4>
+<pre><code>sudo dnf install ffmpeg perl-Image-ExifTool python3-tkinter</code></pre>
+
+  <h4>macOS (Homebrew)</h4>
+<pre><code>brew install ffmpeg exiftool python-tk</code></pre>
+
+  <h3>4. Проверка установки</h3>
+<pre><code>python audio_speed_calc.py путь/к/файлу.TS</code></pre>
+  <p>В консоли должны появиться строки вида:</p>
+<pre><code>ffmpeg: C:\...\bin\ffmpeg.exe
+ffprobe: C:\...\bin\ffprobe.exe
+Файл: 2026_0602_050735.TS  длительность: 180.000 сек (ffprobe (video stream))
+GPS: 176 меток (exiftool)</code></pre>
+  <div class="callout warn">
+    <p><strong>Если <code>ffmpeg не найден</code></strong> — программа
+      выйдет с подсказкой. Это значит, что <code>ffmpeg.exe</code> /
+      <code>ffprobe.exe</code> не лежат ни рядом со скриптом, ни в
+      <code>bin/</code>, ни в <code>PATH</code>.</p>
+  </div>
+
+  <!-- ============== БЫСТРЫЙ СТАРТ ============== -->
+  <h2 id="quickstart" class="anchor">Быстрый старт</h2>
+<pre><code>python audio_speed_calc.py path/to/DCIM/2026_0602_050735.TS</code></pre>
+  <p>При первом запуске:</p>
+  <ol>
+    <li>Программа извлечёт аудио и построит спектрограмму.</li>
+    <li>Откроется консольный запрос параметров автомобиля
+      (Enter — согласиться с сохранёнными, <code>n</code> — ввести новые).</li>
+    <li>Кликните мышью по <strong>5-й гармонике</strong> и
+      <strong>4-й гармонике</strong>.</li>
+    <li>Нажмите кнопку алгоритма (<code>1.dB</code> … <code>6.RMS</code>)
+      или клавишу <code>1</code>–<code>6</code>.</li>
+    <li>Опционально: <code>GPS→H5</code> / <code>GPS→H4</code> —
+      наложить GPS-скорость.</li>
+    <li>Клавиша <code>S</code> — сохранить отчёт, <code>P</code> —
+      сохранить PNG.</li>
+  </ol>
+
+  <!-- ============== ИСПОЛЬЗОВАНИЕ ============== -->
+  <h2 id="usage" class="anchor">Использование</h2>
+
+  <h3>Выбор диапазона анализа</h3>
+  <ul>
+    <li><strong>Drag</strong> по спектрограмме — выбрать фрагмент с
+      разгоном/торможением.</li>
+    <li>Поля <code>Xнач</code>, <code>Xкон</code>, <code>dX</code> —
+      точная установка в секундах.</li>
+    <li><strong>Сб.время</strong> — сбросить временной диапазон.</li>
+  </ul>
+
+  <h3>Выбор гармоник</h3>
+  <ul>
+    <li>Кнопки <code>5я гармоника</code> / <code>4я гармоника</code> — режим выбора.</li>
+    <li>Клик по спектрограмме фиксирует частоту.</li>
+    <li><strong>Сброс</strong> возвращает всю область к полному диапазону.</li>
+  </ul>
+
+  <h3>GPS-оверлей</h3>
+  <table>
+    <thead><tr><th>Кнопка</th><th>Что делает</th></tr></thead>
+    <tbody>
+      <tr><td><code>GPS→H5</code></td><td>рисует GPS-скорость в единицах Гц (кривая H5)</td></tr>
+      <tr><td><code>GPS→H4</code></td><td>рисует GPS-скорость в единицах Гц (кривая H4)</td></tr>
+      <tr><td><code>Подп.V</code></td><td>подписи пиков скорости на всех активных слоях</td></tr>
+      <tr><td><code>Все 3</code></td><td>зажигает/гасит все три тумблера одновременно</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Оверлей расчётных полос</h3>
+  <table>
+    <thead><tr><th>Кнопка</th><th>Что показывает</th></tr></thead>
+    <tbody>
+      <tr><td><code>Прям.</code></td><td>горизонтальные линии H5 min/max и H4 min/max</td></tr>
+      <tr><td><code>Факт.</code></td><td>ломаные min/max по шагам + центральная кривая</td></tr>
+      <tr><td><code>Оба</code></td><td>и линии, и ломаные</td></tr>
+      <tr><td><code>Выкл</code></td><td>ничего не рисуется</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Навигация по истории</h3>
+  <table>
+    <thead><tr><th>Кнопка</th><th>Действие</th></tr></thead>
+    <tbody>
+      <tr><td><code>Сохр.поз.</code></td><td>записать текущую позицию в историю</td></tr>
+      <tr><td><code>Назад</code></td><td>шаг назад</td></tr>
+      <tr><td><code>Вперед</code></td><td>шаг вперёд</td></tr>
+      <tr><td><code>Удалить поз.</code></td><td>удалить текущую позицию</td></tr>
+      <tr><td><code>Сб.время</code></td><td>сбросить временной зум</td></tr>
+      <tr><td><code>Сб.част</code></td><td>сбросить частотный зум</td></tr>
+      <tr><td><code>Сброс</code></td><td>полный сброс</td></tr>
+    </tbody>
+  </table>
+
+  <!-- ============== ГОРЯЧИЕ КЛАВИШИ ============== -->
+  <h2 id="hotkeys" class="anchor">Горячие клавиши</h2>
+  <table>
+    <thead><tr><th>Клавиша</th><th>Действие</th></tr></thead>
+    <tbody>
+      <tr><td><code>?</code></td><td>Справка</td></tr>
+      <tr><td><code>Q</code></td><td>Выход</td></tr>
+      <tr><td><code>S</code></td><td>Сохранить конфиг + PNG</td></tr>
+      <tr><td><code>P</code></td><td>Сохранить PNG (диалог выбора файла)</td></tr>
+      <tr><td><code>Z</code></td><td>Шаг назад по истории</td></tr>
+      <tr><td><code>Shift+Z</code></td><td>Общий сброс</td></tr>
+      <tr><td><code>Esc</code></td><td>Отмена / возврат в режим TIME</td></tr>
+      <tr><td><code>1</code>…<code>6</code></td><td>Запуск алгоритма 1..6</td></tr>
+      <tr><td><code>Tab</code></td><td>Следующее поле ввода</td></tr>
+      <tr><td><code>Shift+Tab</code></td><td>Предыдущее поле ввода</td></tr>
+    </tbody>
+  </table>
+
+  <!-- ============== ФАЙЛЫ ПРОЕКТА ============== -->
+  <h2 id="files" class="anchor">Файлы проекта</h2>
+  <div class="file-tree">audio_speed_calc/
+├── audio_speed_calc.py     # основной скрипт GUI и расчёта
+├── gps_parser.py           # извлечение GPS из .ts (exiftool + бинарный)
+├── sys_fingerprint.py      # MD5, сведения о ПК / диске / скрипте
+├── requirements.txt        # Python-зависимости
+├── README.md               # этот файл (Markdown)
+├── README.html             # эта же документация (HTML)
+├── LICENSE                 # MIT
+├── history_log.txt         # журнал версий (создаётся автоматически)
+└── bin/                    # локальные ffmpeg / ffprobe / exiftool
+    ├── ffmpeg.exe
+    ├── ffprobe.exe
+    └── exiftool.exe</div>
+  <p>При работе рядом с <code>.ts</code>-файлом создаются:</p>
+  <ul>
+    <li><code>&lt;base&gt;_config.json</code> — сохранённые настройки;</li>
+    <li><code>&lt;base&gt;_speed_report_algoN.txt</code> — отчёт по расчёту;</li>
+    <li><code>&lt;base&gt;_spec_YYYYMMDD_HHMMSS.png</code> — скриншоты;</li>
+    <li><code>&lt;base&gt;_gps_lag_diag.log</code> / <code>.csv</code> —
+      диагностика GPS-лага.</li>
+  </ul>
+
+  <!-- ============== КОНФИГУРАЦИЯ ============== -->
+  <h2 id="config" class="anchor">Конфигурация</h2>
+  <p>Файл <code>&lt;base&gt;_config.json</code> создаётся автоматически.
+    Ключевые поля:</p>
+  <table>
+    <thead><tr><th>Поле</th><th>Назначение</th></tr></thead>
+    <tbody>
+      <tr><td><code>freq_min</code> / <code>freq_max</code></td><td>диапазон частот спектрограммы, Гц</td></tr>
+      <tr><td><code>harmonic_5_freq</code></td><td>частота 5-й гармоники, Гц</td></tr>
+      <tr><td><code>harmonic_4_freq</code></td><td>частота 4-й гармоники, Гц</td></tr>
+      <tr><td><code>time_step</code></td><td>шаг расчёта, с (0.01…5.0)</td></tr>
+      <tr><td><code>color_steps</code></td><td>параметр алгоритма (1…255)</td></tr>
+      <tr><td><code>peak_search_hz</code></td><td>полуширина поиска пика, Гц (1…30)</td></tr>
+      <tr><td><code>algorithm</code></td><td>последний использованный алгоритм (1…6)</td></tr>
+      <tr><td><code>cylinders</code></td><td>число цилиндров</td></tr>
+      <tr><td><code>stroke</code></td><td><code>2</code> = 4-такт, <code>1</code> = 2-такт</td></tr>
+      <tr><td><code>tire_width</code></td><td>ширина шины, мм</td></tr>
+      <tr><td><code>tire_profile</code></td><td>профиль шины, %</td></tr>
+      <tr><td><code>rim_diameter</code></td><td>посадочный диаметр, дюймы</td></tr>
+      <tr><td><code>final_drive</code></td><td>главная пара</td></tr>
+      <tr><td><code>gear_ratio</code></td><td>передаточное число КПП</td></tr>
+      <tr><td><code>gps_lag_override</code></td><td>ручной лаг GPS, с (<code>null</code> = авто)</td></tr>
+      <tr><td><code>gps_trim_fft_edges</code></td><td>обрезать края FFT при корреляции</td></tr>
+      <tr><td><code>gps_smooth_sec</code></td><td>окно сглаживания GPS и аудио, с</td></tr>
+    </tbody>
+  </table>
+
+  <p>Пример фрагмента конфига:</p>
+<pre><code>{
+  "cylinders": 4,
+  "stroke": 2,
+  "tire_width": 235,
+  "tire_profile": 70,
+  "rim_diameter": 16,
+  "final_drive": 4.875,
+  "gear_ratio": 0.802,
+  "gps_lag_override": null,
+  "gps_smooth_sec": 2.0
+}</code></pre>
+
+  <!-- ============== ФОРМУЛЫ ============== -->
+  <h2 id="formulas" class="anchor">Формулы</h2>
+<pre><code>f5 = H5ц / 5
+f4 = H4ц / 4
+f  = (f5 + f4) / 2
+
+n  = 60 · f · stroke / cylinders
+Rk = 0.85 · P · H / 1e5 + 0.0127 · R
+V  = 0.377 · Rk · n / (Io · Ik)
+
+df = ((H5max-H5min)/5 + (H4max-H4min)/4) / 2 / 2
+dn = 60 · df · stroke / cylinders
+dV = 0.377 · Rk · dn / (Io · Ik)</code></pre>
+  <p>где:</p>
+  <ul>
+    <li><code>P</code> — ширина шины, мм</li>
+    <li><code>H</code> — профиль шины, %</li>
+    <li><code>R</code> — посадочный диаметр, дюймы</li>
+    <li><code>Io</code> — главная пара</li>
+    <li><code>Ik</code> — передаточное число КПП</li>
+  </ul>
+
+  <!-- ============== СКРИПТЫ ============== -->
+  <h2 id="scripts" class="anchor">Скрипты</h2>
+
+  <h3><code>audio_speed_calc.py</code></h3>
+  <p>
+    Основной модуль GUI на <code>matplotlib</code> + <code>tkinter</code>.
+    Класс <code>AudioSpeedAnalyzer</code> реализует всё: от извлечения
+    аудио через <code>ffmpeg</code> до отрисовки спектрограммы, оверлеев,
+    отчётов и работы с историей переходов.
+  </p>
+  <p>Ключевые точки входа:</p>
+  <ul>
+    <li><code>main()</code> — CLI-парсер аргументов, подготовка конфига, запуск;</li>
+    <li><code>AudioSpeedAnalyzer.run()</code> — основной цикл;</li>
+    <li><code>_on_run()</code> — расчёт по выбранному алгоритму;</li>
+    <li><code>_draw_speed_overlay()</code> / <code>_draw_speed_labels()</code> —
+      GPS-оверлей;</li>
+    <li><code>write_gps_lag_diag()</code> — диагностический лог по GPS-лагу.</li>
+  </ul>
+
+  <h3><code>gps_parser.py</code></h3>
+  <p>Извлечение GPS из <code>.ts</code>:</p>
+  <ul>
+    <li><code>extract_gps()</code> — унифицированная точка входа;</li>
+    <li><code>parse_ts_gps_exiftool()</code> — exiftool <code>-ee3 -n</code>;</li>
+    <li><code>parse_ts_gps()</code> — прямой бинарный разбор PID <code>0x0300</code>;</li>
+    <li><code>find_gps_lag()</code> — кросс-корреляция;</li>
+    <li><code>gps_to_relative_time()</code> — перевод в относительные секунды.</li>
+  </ul>
+  <p>Может запускаться как CLI:</p>
+<pre><code>python gps_parser.py путь/к/файлу.TS [-d]</code></pre>
+  <p>где <code>-d</code> включает деобфускацию координат.</p>
+
+  <h3><code>sys_fingerprint.py</code></h3>
+  <ul>
+    <li><code>md5_file()</code> — FIPS-совместимый MD5;</li>
+    <li><code>get_computer_info()</code> — ЦП, ОС, пользователь, CPU S/N;</li>
+    <li><code>get_disk_info()</code> — ФС, метка тома, модель и серийник
+      диска (через WinAPI <code>DeviceIoControl</code>, <code>wmic</code>,
+      PowerShell);</li>
+    <li><code>get_script_info()</code> — размер, mtime, MD5 скрипта.</li>
+  </ul>
+
+  <!-- ============== ЗАВИСИМОСТИ ПО МОДУЛЯМ ============== -->
+  <h2 id="deps" class="anchor">Зависимости по модулям</h2>
+
+  <h3>Python-пакеты (pip)</h3>
+  <table>
+    <thead>
+      <tr>
+        <th>Пакет</th>
+        <th><code>audio_speed_calc.py</code></th>
+        <th><code>gps_parser.py</code></th>
+        <th><code>sys_fingerprint.py</code></th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td><code>numpy</code></td><td>✔</td><td>✔</td><td>—</td></tr>
+      <tr><td><code>matplotlib</code></td><td>✔</td><td>—</td><td>—</td></tr>
+      <tr><td><code>tkinter</code></td><td>✔ (только GUI)</td><td>—</td><td>—</td></tr>
+    </tbody>
+  </table>
+  <div class="callout info">
+    <p><strong>Для установки через pip — два пакета:</strong>
+      <code>numpy</code> и <code>matplotlib</code>.</p>
+  </div>
+
+  <h3>Внешние программы</h3>
+  <table>
+    <thead>
+      <tr>
+        <th>Программа</th>
+        <th><code>audio_speed_calc.py</code></th>
+        <th><code>gps_parser.py</code></th>
+        <th><code>sys_fingerprint.py</code></th>
+        <th>Статус</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td><code>ffmpeg</code></td><td>✔</td><td>—</td><td>—</td><td><strong>обязателен</strong></td></tr>
+      <tr><td><code>ffprobe</code></td><td>✔</td><td>—</td><td>—</td><td><strong>обязателен</strong></td></tr>
+      <tr><td><code>exiftool</code></td><td>✔ (fallback — бинарный парсер)</td><td>✔ (то же)</td><td>—</td><td>опционален</td></tr>
+      <tr><td><code>wmic</code></td><td>—</td><td>—</td><td>✔ (Windows)</td><td>опционален</td></tr>
+      <tr><td><code>powershell</code></td><td>—</td><td>—</td><td>✔ (Windows)</td><td>опционален</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Локальные модули проекта</h3>
+  <table>
+    <thead><tr><th>Модуль</th><th>Импортируется в</th></tr></thead>
+    <tbody>
+      <tr><td><code>sys_fingerprint</code></td><td><code>audio_speed_calc.py</code></td></tr>
+      <tr><td><code>gps_parser</code></td><td><em>нигде</em> (автономный CLI)</td></tr>
+    </tbody>
+  </table>
+  <div class="callout warn">
+    <p>
+      <strong>Важно:</strong> <code>audio_speed_calc.py</code>
+      <em>не импортирует</em> <code>gps_parser.py</code>. В нём есть
+      собственные функции <code>parse_ts_gps</code> /
+      <code>parse_gps_exiftool</code>, продублированные с
+      <code>gps_parser.py</code>. Поэтому <code>gps_parser.py</code> —
+      отдельная утилита для ручной проверки <code>.ts</code>-файлов, а
+      не зависимость основной программы.
+    </p>
+  </div>
+
+  <h3>Содержимое <code>requirements.txt</code></h3>
+<pre><code># audio_speed_calc — Python-зависимости
+# Установка: pip install -r requirements.txt
+
+numpy&gt;=1.20
+matplotlib&gt;=3.4</code></pre>
+
+  <!-- ============== FAQ ============== -->
+  <h2 id="faq" class="anchor">FAQ</h2>
+
+  <p class="faq-q">Q: ffmpeg не найден.</p>
+  <div class="faq-a">
+    <p>
+      Положите <code>ffmpeg.exe</code> и <code>ffprobe.exe</code> в папку
+      <code>bin/</code> рядом со скриптом или добавьте в системный
+      <code>PATH</code>. На Linux/macOS:
+    </p>
+<pre><code>sudo apt install ffmpeg      # Debian/Ubuntu
+brew install ffmpeg          # macOS</code></pre>
+  </div>
+
+  <p class="faq-q">Q: GPS-корреляция &lt; 0.5.</p>
+  <div class="faq-a">
+    <p>Результат недостоверен. Варианты:</p>
+    <ul>
+      <li>выбрать окно с выраженным разгоном/торможением;</li>
+      <li>проверить правильность ввода передач КПП и главной пары;</li>
+      <li>задать <code>gps_lag_override</code> вручную в JSON-конфиге;</li>
+      <li>открыть <code>&lt;base&gt;_gps_lag_diag.log</code> и посмотреть
+        секции 4, 5, 10.</li>
+    </ul>
+  </div>
+
+  <p class="faq-q">Q: «нет динамики» в диагностическом логе.</p>
+  <div class="faq-a">
+    <p>
+      Обе скорости (аудио и GPS) почти постоянны в окне анализа.
+      Корреляция двух плоских сигналов ненадёжна. Выберите другой отрезок
+      с разгоном или торможением.
+    </p>
+  </div>
+
+  <p class="faq-q">Q: Много гармоник в спектрограмме — как выбрать нужные.</p>
+  <div class="faq-a">
+    <p>
+      Начните с 5-й — обычно это самая низкая чёткая линия в диапазоне
+      <code>f0 * 5</code>. Кликните по её середине. Программа сама
+      переключится в режим выбора 4-й гармоники.
+    </p>
+  </div>
+
+  <p class="faq-q">Q: Tkinter отсутствует на Linux.</p>
+  <div class="faq-a">
+    <p>Установите отдельным пакетом:</p>
+<pre><code>sudo apt install python3-tk        # Debian/Ubuntu
+sudo dnf install python3-tkinter   # Fedora
+sudo pacman -S tk                  # Arch</code></pre>
+  </div>
+
+  <p class="faq-q">Q: Как задать оффсет GPS вручную.</p>
+  <div class="faq-a">
+    <p>В <code>&lt;base&gt;_config.json</code> установите:</p>
+<pre><code>"gps_lag_override": 1.5</code></pre>
+    <p>
+      Значение в секундах. Программа пометит его как <code>(OVR)</code>
+      в статусной строке.
+    </p>
+  </div>
+
+  <p class="faq-q">Q: Программа запускается, но окно пустое / без кнопок.</p>
+  <div class="faq-a">
+    <p>
+      Скорее всего, конфликт версий <code>matplotlib</code>. Убедитесь,
+      что установлен <code>matplotlib &gt;= 3.4</code>:
+    </p>
+<pre><code>pip install --upgrade matplotlib</code></pre>
+  </div>
+
+  <p class="faq-q">Q: Как поменять частотный диапазон спектрограммы.</p>
+  <div class="faq-a">
+    <p>
+      Поля <code>Fmin</code> / <code>Fmax</code> в нижней панели ввода.
+      Или править <code>freq_min</code> / <code>freq_max</code> в
+      JSON-конфиге до запуска.
+    </p>
+  </div>
+
+  <p class="faq-q">Q: Что такое <code>gps_trim_fft_edges</code>.</p>
+  <div class="faq-a">
+    <p>
+      При корреляции аудио-сигнала края FFT-окна искажены
+      (hanning-окно не даёт ровных значений на границах). Флаг
+      включает обрезку краёв на длину одного FFT-окна (≈ 0.73 с при
+      32768 сэмплов и 30 fps). По умолчанию — <code>true</code>.
+    </p>
+  </div>
+
+  <!-- ============== ЛИЦЕНЗИЯ ============== -->
+  <h2 id="license" class="anchor">Лицензия</h2>
+  <p>MIT. См. файл <code>LICENSE</code>.</p>
+
+  <!-- ============== БЛАГОДАРНОСТИ ============== -->
+  <h2 id="credits" class="anchor">Благодарности</h2>
+  <ul>
+    <li>
+      <strong>Sergei Franco</strong> — оригинальный Novatek GPS extractor
+      (<a href="https://gist.github.com/UndeRus/01ef8b436353f579760a60b0dea96253">gist</a>),
+      на котором основан бинарный парсер <code>gps_parser.py</code>.
+    </li>
+    <li>
+      Разработчикам <strong>exiftool</strong> — за поддержку
+      <code>-ee3</code> для встроенных GPS-меток в <code>.ts</code>.
+    </li>
+    <li>
+      Сообществу <strong>matplotlib</strong> — за гибкий GUI-тулкит.
+    </li>
+    <li>Всем, кто тестирует и присылает баг-репорты.</li>
+  </ul>
+
+  <!-- ============== ИСТОРИЯ ВЕРСИЙ ============== -->
+  <h2 id="changelog" class="anchor">История версий</h2>
+  <p>
+    Актуальный журнал — в файле <code>history_log.txt</code>, который
+    обновляется автоматически при запуске скрипта.
+  </p>
+  <p>Ключевые вехи:</p>
+  <ul>
+    <li><strong>0.55.9</strong> — калибровка GPS-кривых по среднему реальному треку.</li>
+    <li><strong>0.55.3</strong> — корректное выравнивание GPS по времени аудио.</li>
+    <li><strong>0.55.2</strong> — критическое исправление знака GPS-лага.</li>
+    <li><strong>0.55.0</strong> — обрезка краёв FFT, единое сглаживание.</li>
+    <li><strong>0.54.0</strong> — поиск лага внутри окна анализа.</li>
+    <li><strong>0.53.0</strong> — кнопка <code>Подп.V</code>, калибровка GPS→H5/H4 через <code>V_ref</code>.</li>
+    <li><strong>0.52.0</strong> — журнал изменений и per-entry история.</li>
+  </ul>
+
+  <footer>
+    <p>
+      audio_speed_calc v0.55.9 · MIT License ·
+      <a href="#toc">↑ Наверх</a>
+    </p>
+  </footer>
+
+</div>
+</body>
+</html>
