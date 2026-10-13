@@ -253,7 +253,7 @@
       <li><a href="#config">Конфигурация</a></li>
       <li><a href="#formulas">Формулы</a></li>
       <li><a href="#scripts">Скрипты</a></li>
-      <li><a href="#deps">Зависимости по модулям</a></li>
+      <li><a href="#deps">Зависимости</a></li>
       <li><a href="#faq">FAQ</a></li>
       <li><a href="#license">Лицензия</a></li>
       <li><a href="#credits">Благодарности</a></li>
@@ -286,7 +286,8 @@
     <li>Автоизвлечение GPS-меток из <code>.ts</code>-файла:
       <ul>
         <li>основной способ — <code>exiftool -ee3</code>;</li>
-        <li>резервный — прямой бинарный разбор потока PID <code>0x0300</code>.</li>
+        <li>резервный — прямой бинарный разбор потока PID <code>0x0300</code>
+          (встроен в основной скрипт).</li>
       </ul>
     </li>
     <li>Автоматический поиск <strong>запаздывания GPS</strong> относительно
@@ -515,11 +516,10 @@ GPS: 176 меток (exiftool)</code></pre>
   <!-- ============== ФАЙЛЫ ПРОЕКТА ============== -->
   <h2 id="files" class="anchor">Файлы проекта</h2>
   <div class="file-tree">audio_speed_calc/
-├── audio_speed_calc.py     # основной скрипт GUI и расчёта
-├── gps_parser.py           # извлечение GPS из .ts (exiftool + бинарный)
+├── audio_speed_calc.py     # основной скрипт: GUI, расчёт, GPS
 ├── sys_fingerprint.py      # MD5, сведения о ПК / диске / скрипте
 ├── requirements.txt        # Python-зависимости
-├── README.md               # этот файл (Markdown)
+├── README.md               # эта документация (Markdown)
 ├── README.html             # эта же документация (HTML)
 ├── LICENSE                 # MIT
 ├── history_log.txt         # журнал версий (создаётся автоматически)
@@ -603,10 +603,8 @@ dV = 0.377 · Rk · dn / (Io · Ik)</code></pre>
 
   <h3><code>audio_speed_calc.py</code></h3>
   <p>
-    Основной модуль GUI на <code>matplotlib</code> + <code>tkinter</code>.
-    Класс <code>AudioSpeedAnalyzer</code> реализует всё: от извлечения
-    аудио через <code>ffmpeg</code> до отрисовки спектрограммы, оверлеев,
-    отчётов и работы с историей переходов.
+    Основной модуль: GUI на <code>matplotlib</code> + <code>tkinter</code>,
+    весь расчёт скорости, работа с GPS и системная диагностика.
   </p>
   <p>Ключевые точки входа:</p>
   <ul>
@@ -617,19 +615,15 @@ dV = 0.377 · Rk · dn / (Io · Ik)</code></pre>
       GPS-оверлей;</li>
     <li><code>write_gps_lag_diag()</code> — диагностический лог по GPS-лагу.</li>
   </ul>
-
-  <h3><code>gps_parser.py</code></h3>
-  <p>Извлечение GPS из <code>.ts</code>:</p>
+  <p>Функции работы с GPS (внутри модуля):</p>
   <ul>
     <li><code>extract_gps()</code> — унифицированная точка входа;</li>
-    <li><code>parse_ts_gps_exiftool()</code> — exiftool <code>-ee3 -n</code>;</li>
+    <li><code>parse_gps_exiftool()</code> — exiftool <code>-ee3 -n</code>;</li>
     <li><code>parse_ts_gps()</code> — прямой бинарный разбор PID <code>0x0300</code>;</li>
-    <li><code>find_gps_lag()</code> — кросс-корреляция;</li>
-    <li><code>gps_to_relative_time()</code> — перевод в относительные секунды.</li>
+    <li><code>find_gps_lag()</code> — кросс-корреляция аудио и GPS;</li>
+    <li><code>gps_to_relative_time()</code> — перевод в относительные секунды;</li>
+    <li><code>find_gps_window_points()</code> — выборка GPS-точек в окне анализа.</li>
   </ul>
-  <p>Может запускаться как CLI:</p>
-<pre><code>python gps_parser.py путь/к/файлу.TS [-d]</code></pre>
-  <p>где <code>-d</code> включает деобфускацию координат.</p>
 
   <h3><code>sys_fingerprint.py</code></h3>
   <ul>
@@ -641,8 +635,8 @@ dV = 0.377 · Rk · dn / (Io · Ik)</code></pre>
     <li><code>get_script_info()</code> — размер, mtime, MD5 скрипта.</li>
   </ul>
 
-  <!-- ============== ЗАВИСИМОСТИ ПО МОДУЛЯМ ============== -->
-  <h2 id="deps" class="anchor">Зависимости по модулям</h2>
+  <!-- ============== ЗАВИСИМОСТИ ============== -->
+  <h2 id="deps" class="anchor">Зависимости</h2>
 
   <h3>Python-пакеты (pip)</h3>
   <table>
@@ -650,14 +644,13 @@ dV = 0.377 · Rk · dn / (Io · Ik)</code></pre>
       <tr>
         <th>Пакет</th>
         <th><code>audio_speed_calc.py</code></th>
-        <th><code>gps_parser.py</code></th>
         <th><code>sys_fingerprint.py</code></th>
       </tr>
     </thead>
     <tbody>
-      <tr><td><code>numpy</code></td><td>✔</td><td>✔</td><td>—</td></tr>
-      <tr><td><code>matplotlib</code></td><td>✔</td><td>—</td><td>—</td></tr>
-      <tr><td><code>tkinter</code></td><td>✔ (только GUI)</td><td>—</td><td>—</td></tr>
+      <tr><td><code>numpy</code></td><td>✔</td><td>—</td></tr>
+      <tr><td><code>matplotlib</code></td><td>✔</td><td>—</td></tr>
+      <tr><td><code>tkinter</code></td><td>✔ (только GUI)</td><td>—</td></tr>
     </tbody>
   </table>
   <div class="callout info">
@@ -671,17 +664,16 @@ dV = 0.377 · Rk · dn / (Io · Ik)</code></pre>
       <tr>
         <th>Программа</th>
         <th><code>audio_speed_calc.py</code></th>
-        <th><code>gps_parser.py</code></th>
         <th><code>sys_fingerprint.py</code></th>
         <th>Статус</th>
       </tr>
     </thead>
     <tbody>
-      <tr><td><code>ffmpeg</code></td><td>✔</td><td>—</td><td>—</td><td><strong>обязателен</strong></td></tr>
-      <tr><td><code>ffprobe</code></td><td>✔</td><td>—</td><td>—</td><td><strong>обязателен</strong></td></tr>
-      <tr><td><code>exiftool</code></td><td>✔ (fallback — бинарный парсер)</td><td>✔ (то же)</td><td>—</td><td>опционален</td></tr>
-      <tr><td><code>wmic</code></td><td>—</td><td>—</td><td>✔ (Windows)</td><td>опционален</td></tr>
-      <tr><td><code>powershell</code></td><td>—</td><td>—</td><td>✔ (Windows)</td><td>опционален</td></tr>
+      <tr><td><code>ffmpeg</code></td><td>✔</td><td>—</td><td><strong>обязателен</strong></td></tr>
+      <tr><td><code>ffprobe</code></td><td>✔</td><td>—</td><td><strong>обязателен</strong></td></tr>
+      <tr><td><code>exiftool</code></td><td>✔ (fallback — бинарный парсер)</td><td>—</td><td>опционален</td></tr>
+      <tr><td><code>wmic</code></td><td>—</td><td>✔ (Windows)</td><td>опционален</td></tr>
+      <tr><td><code>powershell</code></td><td>—</td><td>✔ (Windows)</td><td>опционален</td></tr>
     </tbody>
   </table>
 
@@ -690,20 +682,8 @@ dV = 0.377 · Rk · dn / (Io · Ik)</code></pre>
     <thead><tr><th>Модуль</th><th>Импортируется в</th></tr></thead>
     <tbody>
       <tr><td><code>sys_fingerprint</code></td><td><code>audio_speed_calc.py</code></td></tr>
-      <tr><td><code>gps_parser</code></td><td><em>нигде</em> (автономный CLI)</td></tr>
     </tbody>
   </table>
-  <div class="callout warn">
-    <p>
-      <strong>Важно:</strong> <code>audio_speed_calc.py</code>
-      <em>не импортирует</em> <code>gps_parser.py</code>. В нём есть
-      собственные функции <code>parse_ts_gps</code> /
-      <code>parse_gps_exiftool</code>, продублированные с
-      <code>gps_parser.py</code>. Поэтому <code>gps_parser.py</code> —
-      отдельная утилита для ручной проверки <code>.ts</code>-файлов, а
-      не зависимость основной программы.
-    </p>
-  </div>
 
   <h3>Содержимое <code>requirements.txt</code></h3>
 <pre><code># audio_speed_calc — Python-зависимости
@@ -802,6 +782,18 @@ sudo pacman -S tk                  # Arch</code></pre>
     </p>
   </div>
 
+  <p class="faq-q">Q: Как разобрать GPS из <code>.ts</code>-файла без запуска GUI.</p>
+  <div class="faq-a">
+    <p>
+      В основном скрипте есть функции <code>extract_gps()</code> и
+      <code>parse_ts_gps()</code>. Можно вызвать их из Python-REPL:
+    </p>
+<pre><code>from audio_speed_calc import extract_gps, gps_to_relative_time
+pts, method = extract_gps('путь/к/файлу.TS')
+for t, v, lat, lon, brg in gps_to_relative_time(pts):
+    print(f'{t:7.1f}  {v:7.1f}  {lat:9.5f}  {lon:9.5f}  {brg:6.1f}')</code></pre>
+  </div>
+
   <!-- ============== ЛИЦЕНЗИЯ ============== -->
   <h2 id="license" class="anchor">Лицензия</h2>
   <p>MIT. См. файл <code>LICENSE</code>.</p>
@@ -812,7 +804,8 @@ sudo pacman -S tk                  # Arch</code></pre>
     <li>
       <strong>Sergei Franco</strong> — оригинальный Novatek GPS extractor
       (<a href="https://gist.github.com/UndeRus/01ef8b436353f579760a60b0dea96253">gist</a>),
-      на котором основан бинарный парсер <code>gps_parser.py</code>.
+      на котором основан бинарный парсер GPS, встроенный
+      в <code>audio_speed_calc.py</code>.
     </li>
     <li>
       Разработчикам <strong>exiftool</strong> — за поддержку
