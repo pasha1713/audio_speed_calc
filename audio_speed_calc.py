@@ -45,12 +45,123 @@ if sys.platform == 'win32':
     except Exception:
         pass
 
-VERSION = "0.55.9"
+VERSION = "0.56.3"
 CONFIG_FILE = "audio_speed_config.json"
 HISTORY_LOG_FILE = "history_log.txt"
 
 
 CHANGELOG = {
+    "0.56.3": [
+        "",
+        "v0.56.3",
+        "-" * 64,
+        "",
+        "NEW: Apply-модель истории",
+        "",
+        "* История больше не пополняется автоматически на",
+        "  каждое действие. Все правки копятся в памяти, а в",
+        "  историю попадают ОДНОЙ записью по команде.",
+        "",
+        "* Кнопка «Применить» (бывшая «Сохр.поз.») + клавиша A.",
+        "  Фиксирует: оси X/Y, диапазон анализа, H5/H4,",
+        "  алгоритм, Шаг, Цвет, Пик, Ширину, режим оверлея.",
+        "",
+        "* Кнопки «Назад» / «Вперёд» при наличии неприменённых",
+        "  правок спрашивают: Да (применить) / Нет (потерять) /",
+        "  Отмена.",
+        "",
+        "* В статусной строке маркер * рядом с «Ист: N/M» —",
+        "  признак неприменённых правок.",
+        "",
+        "ИСПРАВЛЕНО",
+        "",
+        "* _reset_zoom больше НЕ стирает историю. «Сброс» и",
+        "  Shift+Z — обычные изменения состояния, фиксируются",
+        "  через Apply.",
+        "",
+        "* Кнопки «Сб.время», «Сб.част», «Сброс» — убраны",
+        "  авто-push и логика _last_reset_action.",
+        "",
+        "* При старте, если история пуста — создаётся стартовая",
+        "  запись, чтобы кнопка Назад сразу работала.",
+        "",
+    ],
+    "0.56.2": [
+        "",
+        "v0.56.2",
+        "-" * 64,
+        "",
+        "ИСПРАВЛЕНО",
+        "",
+        "* _step_back при pointer==0 больше НЕ вызывает",
+        "  _reset_zoom — история не стирается при попытке",
+        "  шагнуть назад с первой позиции.",
+        "",
+        "* _btn_delete_pos: pointer остаётся на индексе",
+        "  удалённой записи (т.е. на следующей по списку),",
+        "  а не уезжает на предыдущую.",
+        "",
+        "* _btn_save_pos: всегда создаёт новую запись",
+        "  (force=True), даже если состояние совпадает",
+        "  с текущей. Раньше молча ничего не сохранялось.",
+        "",
+        "* _push_history: сравнение совпадения идёт с",
+        "  ТЕКУЩЕЙ записью (по zoom_pointer), а не с",
+        "  последней в списке. Ложных срабатываний нет.",
+        "",
+        "* _step_forward: обновляет статусную строку.",
+        "",
+    ],
+    "0.56.1": [
+        "",
+        "v0.56.1",
+        "-" * 64,
+        "",
+        "NEW",
+        "",
+        "* Автоматическая калибровка dGPS по САМОМУ ДЛИННОМУ",
+        "  интервалу из истории (view_history + текущее окно).",
+        "  Логика:",
+        "    1) находим запись с максимальным analyze_dur;",
+        "    2) считаем корреляцию аудио<->GPS именно на ней;",
+        "    3) кэшируем результат и применяем ко всем",
+        "       остальным (более коротким) интервалам.",
+        "",
+        "* Кэш инвалидируется при смене H5/H4.",
+        "",
+        "* Новая опция конфига: gps_lag_from_history (bool).",
+        "  false — старое поведение (считать по текущему окну).",
+        "",
+        "* В статусной строке dgps помечается как (H) при",
+        "  использовании калиброванного значения.",
+        "",
+    ],
+    "0.56.0": [
+        "",
+        "v0.56.0",
+        "-" * 64,
+        "",
+        "ИСПРАВЛЕНО",
+        "",
+        "* Убрано автосохранение конфига при закрытии окна.",
+        "  Кнопка «Выход», клавиша Q и крестик окна больше",
+        "  НЕ пишут JSON на диск. Только клавиша S.",
+        "",
+        "* Убрано автосохранение конфига после PNG.",
+        "",
+        "* Убрано автосохранение конфига после ввода",
+        "  параметров авто в консоли.",
+        "",
+        "* Убрана автозапись в history_log.txt при запуске.",
+        "",
+        "NEW",
+        "",
+        "* Кнопка-дискета (floppy disk) в тулбаре перехвачена",
+        "  и вызывает нашу функцию сохранения PNG — то же,",
+        "  что клавиша P: диалог выбора пути, штамп, запись",
+        "  в <base>_speed_report_algoN.txt.",
+        "",
+    ],
     "0.55.3": [
         "",
         "v0.55.3",
@@ -376,6 +487,7 @@ DEFAULT_CONFIG = {
     "analyze_dur": 0,
     "gps_trim_fft_edges": True,
     "gps_smooth_sec": 2.0,
+    "gps_lag_from_history": True,
 }
 
 
@@ -1159,6 +1271,11 @@ HELP_LEFT_LINES = [
     "  Шаг,с — шаг расчёта (0.01-5.0)",
     "  Цвет — градаций палитры (1-255)",
     "  Пик,Гц — поиск пика (1-30)",
+    "",
+    "dGPS-КАЛИБРОВКА (v0.56.1):",
+    "  Авто по самому длинному интервалу",
+    "  из истории. В статусе — метка (H).",
+    "  Отключить: gps_lag_from_history=false",
 ]
 
 HELP_RIGHT_LINES = [
@@ -1170,14 +1287,22 @@ HELP_RIGHT_LINES = [
     "",
     "НАВИГАЦИЯ ПО ИСТОРИИ:",
     "  Назад / Вперед — по позициям",
-    "  Сохр.поз. — записать текущую",
+    "  Применить (A) — зафиксировать",
+    "     все правки ОДНОЙ записью",
     "  Удалить поз. — стереть текущую",
     "  Сб.время / Сб.част / Сброс",
+    "",
+    "ИНДИКАТОР ПРАВОК:",
+    "  Ист: N/M * — есть правки,",
+    "     не зафиксированные Apply.",
+    "  При Назад/Вперёд с правками —",
+    "     диалог Да/Нет/Отмена.",
     "",
     "КЛАВИШИ:",
     "  ? — помощь (это окно)",
     "  Q — выход   S — сохранить конфиг",
     "  P — PNG-скриншот со штампом",
+    "  A — применить правки (Apply)",
     "  Z — шаг назад по истории",
     "  Shift+Z — общий сброс",
     "  Esc — отмена / фаза TIME",
@@ -2042,6 +2167,13 @@ class AudioSpeedAnalyzer:
         # v0.53.2: защита от повторного входа в пересчёт
         self._recalc_in_progress = False
 
+        # v0.56.1: кэш калибровки dGPS по длинному интервалу
+        self.gps_lag_calibrated = None
+        self.gps_corr_calibrated = 0.0
+        self.gps_lag_calib_h5 = None
+        self.gps_lag_calib_h4 = None
+        self.gps_lag_calib_info = None
+
         _override_init = config.get('gps_lag_override')
         if _override_init is not None:
             try:
@@ -2540,6 +2672,10 @@ class AudioSpeedAnalyzer:
             self.update_status()
 
         self._restore_view()
+        # v0.56.3: если истории нет — создаём стартовую запись,
+        # чтобы кнопка Назад сразу имела куда возвращаться.
+        if not self.zoom_history:
+            self._push_history(force=True)
         self._update_overlay_buttons()
         self._update_algo_buttons()
         if self.harm_freqs:
@@ -2619,7 +2755,7 @@ class AudioSpeedAnalyzer:
             ('Назад', '_btn_back', False, None),
             ('Вперед', '_step_forward', False, None),
             ('Удалить поз.', '_btn_delete_pos', False, None),
-            ('Сохр.поз.', '_btn_save_pos', False, None),
+            ('Применить', '_btn_apply', False, None),
             ('Выход', '_btn_exit', False, None),
         ]
         n_btns = len(btn_labels)
@@ -2743,6 +2879,17 @@ class AudioSpeedAnalyzer:
 
         plt.rcParams['keymap.save'] = []
         plt.rcParams['keymap.pan'] = []
+
+        # v0.56.0: перехват кнопки floppy disk в тулбаре.
+        # Клик по дискете вызывает нашу _toolbar_save_png(),
+        # а не стандартный save_figure() matplotlib.
+        try:
+            _tb = self.fig.canvas.manager.toolbar
+            if _tb is not None:
+                _tb.save_figure = self._make_floppy_handler()
+        except Exception as _e:
+            print(f"Не удалось перехватить floppy disk: {_e}",
+                  file=sys.stderr)
 
         self.fig.canvas.mpl_connect('key_press_event', self._on_key)
         self.fig.canvas.mpl_connect('button_press_event', self._on_click)
@@ -3566,12 +3713,7 @@ class AudioSpeedAnalyzer:
         self.fig.canvas.draw_idle()
 
     def _btn_reset_time(self, _=None):
-        if self._last_reset_action == 'time':
-            self._last_reset_action = None
-            self._step_back()
-            return
-        self._last_reset_action = 'time'
-        self._push_history()
+        """v0.56.3: обычное изменение — Apply по A."""
         self.ax_spec.set_xlim(0, self.n_frames)
         self.analyze_start = 0
         self.analyze_dur = self.n_frames
@@ -3580,23 +3722,13 @@ class AudioSpeedAnalyzer:
         self._redraw_all()
 
     def _btn_reset_freq(self, _=None):
-        if self._last_reset_action == 'freq':
-            self._last_reset_action = None
-            self._step_back()
-            return
-        self._last_reset_action = 'freq'
-        self._push_history()
+        """v0.56.3: обычное изменение — Apply по A."""
         self.ax_spec.set_ylim(20, 600)
         self._sync_fields()
         self._redraw_all()
 
     def _btn_reset_all(self, _=None):
-        if self._last_reset_action == 'all':
-            self._last_reset_action = None
-            self._step_back()
-            return
-        self._last_reset_action = 'all'
-        self._push_history()
+        """v0.56.3: обычное изменение — Apply по A."""
         self._reset_zoom()
 
     def _btn_exit(self, _=None):
@@ -3694,7 +3826,7 @@ class AudioSpeedAnalyzer:
             frame = self._sec_to_frame(val)
             xlim = self.ax_spec.get_xlim()
             dur = xlim[1] - xlim[0]
-            self._push_history()
+            # v0.56.3: авто-запись убрана (Apply по A).
             self.ax_spec.set_xlim(frame, frame + dur)
             self.analyze_start = max(0, frame)
             self.analyze_dur = int(round(dur))
@@ -3712,7 +3844,7 @@ class AudioSpeedAnalyzer:
             fps = self.cfg['target_fps']
             frame_end = self._sec_to_frame(val)
             xlim = self.ax_spec.get_xlim()
-            self._push_history()
+            # v0.56.3: авто-запись убрана (Apply по A).
             self.ax_spec.set_xlim(xlim[0], frame_end)
             self.analyze_start = max(0, int(xlim[0]))
             self.analyze_dur = max(1, int(round(frame_end - xlim[0])))
@@ -3734,7 +3866,7 @@ class AudioSpeedAnalyzer:
             xlim = self.ax_spec.get_xlim()
             x_start = xlim[0]
             x_end = x_start + dx_sec * fps
-            self._push_history()
+            # v0.56.3: авто-запись убрана (Apply по A).
             self.ax_spec.set_xlim(x_start, x_end)
             self.analyze_start = max(0, int(round(x_start)))
             self.analyze_dur = max(1, int(round(x_end - x_start)))
@@ -3842,7 +3974,16 @@ class AudioSpeedAnalyzer:
         )
 
     def _push_history(self, xlim=None, ylim=None,
-                      analyze_start=None, analyze_dur=None):
+                      analyze_start=None, analyze_dur=None,
+                      force=False):
+        """Добавляет текущее состояние в историю.
+
+        v0.56.2:
+          * сравнение совпадения — с ТЕКУЩЕЙ записью
+            (zoom_history[zoom_pointer]), а не с последней;
+          * force=True — добавить запись даже если она совпадает
+            с текущей (для явного действия «Сохр.поз.»).
+        """
         if xlim is None:
             xlim = self.ax_spec.get_xlim()
         if ylim is None:
@@ -3868,14 +4009,104 @@ class AudioSpeedAnalyzer:
             'line_width':     int(self.line_width),
             'overlay_mode':   int(self.overlay_mode),
         }
-        if self.zoom_history and self.zoom_history[-1] == entry:
-            return
+
+        # Проверка совпадения — с ТЕКУЩЕЙ записью.
+        if not force:
+            cur = self.zoom_pointer
+            if 0 <= cur < len(self.zoom_history):
+                if self.zoom_history[cur] == entry:
+                    return
+
+        # Обрезаем «будущее» (стандартное поведение undo/redo).
         if self.zoom_pointer < len(self.zoom_history) - 1:
             self.zoom_history = self.zoom_history[:self.zoom_pointer + 1]
+
         self.zoom_history.append(entry)
         while len(self.zoom_history) > 50:
             self.zoom_history.pop(0)
         self.zoom_pointer = len(self.zoom_history) - 1
+
+    def _is_dirty(self):
+        """v0.56.3: True, если текущее состояние отличается от
+        текущей записи истории.
+
+        Сравниваются те же поля, что пишет _push_history.
+        Никакого отдельного «флага изменений» — состояние
+        вычисляется на момент вызова.
+        """
+        if not self.zoom_history:
+            return True
+        if (self.zoom_pointer < 0
+                or self.zoom_pointer >= len(self.zoom_history)):
+            return True
+        cur = self.zoom_history[self.zoom_pointer]
+        try:
+            xlim = self.ax_spec.get_xlim()
+            ylim = self.ax_spec.get_ylim()
+        except Exception:
+            return True
+        entry = {
+            'view_x_start': float(xlim[0]),
+            'view_x_end':   float(xlim[1]),
+            'view_y_start': float(ylim[0]),
+            'view_y_end':   float(ylim[1]),
+            'analyze_start': int(self.analyze_start),
+            'analyze_dur':   int(self.analyze_dur),
+            'h5': float(self.h5) if self.h5 is not None else None,
+            'h4': float(self.h4) if self.h4 is not None else None,
+            'algorithm': int(self.last_algo) if self.last_algo is not None else 0,
+            'time_step':      float(self.cfg['time_step']),
+            'color_steps':    int(self.color_steps),
+            'peak_search_hz': float(self.peak_search_hz),
+            'line_width':     int(self.line_width),
+            'overlay_mode':   int(self.overlay_mode),
+        }
+        return cur != entry
+
+    def _ask_apply_confirm(self, direction='дальше'):
+        """v0.56.3: спрашивает у пользователя, применить ли правки.
+
+        Возвращает:
+            True  — применить
+            False — не применять (правки потеряются)
+            None  — отмена (ничего не делать)
+        """
+        try:
+            import tkinter as tk
+            from tkinter import messagebox
+            root = tk.Tk()
+            root.withdraw()
+            try:
+                ans = messagebox.askyesnocancel(
+                    "audio_speed_calc — неприменённые правки",
+                    f"Есть неприменённые правки.\n\n"
+                    f"Применить перед тем, как идти {direction}?\n\n"
+                    f"Да     — применить и продолжить\n"
+                    f"Нет    — не применять (правки будут потеряны)\n"
+                    f"Отмена — остаться на месте"
+                )
+            finally:
+                try:
+                    root.destroy()
+                except Exception:
+                    pass
+            return ans
+        except Exception as e:
+            print(f"Диалог недоступен ({e}), использую консоль",
+                  file=sys.stderr)
+        try:
+            print(f"\nЕсть неприменённые правки. "
+                  f"Применить перед тем, как идти {direction}? "
+                  f"[y=да / n=нет / c=отмена]: ",
+                  file=sys.stderr, end='', flush=True)
+            s = input().strip().lower()
+            if s.startswith('y') or s == '':
+                return True
+            if s.startswith('n'):
+                return False
+            return None
+        except Exception:
+            return False
 
     def _apply_history_entry(self, entry):
         """Восстанавливает состояние из записи истории и пересчитывает
@@ -3947,6 +4178,9 @@ class AudioSpeedAnalyzer:
 
         if h_changed:
             self.calc_harmonics()
+            # v0.56.1: H5/H4 изменились — кэш калибровки dGPS
+            # больше не актуален.
+            self._invalidate_gps_lag_cache()
 
         # --- 6. Обновление визуальных слоёв ---
         self._update_time_span()
@@ -3986,43 +4220,105 @@ class AudioSpeedAnalyzer:
         self._redraw_all()
 
     def _step_back(self, event=None):
+        """v0.56.3: при неприменённых правках — диалог.
+
+        Да  — применить и шагнуть назад.
+        Нет — не применять, шагнуть назад (правки потеряются).
+        Отмена — ничего.
+        """
+        if not self.zoom_history:
+            return
+        if self._is_dirty():
+            resp = self._ask_apply_confirm('назад')
+            if resp is None:
+                return
+            if resp:
+                self._push_history(force=True)
+                # после push мы в конце истории; шагаем назад
         if self.zoom_pointer <= 0:
-            self._reset_zoom()
+            self.update_status()
             return
         self.zoom_pointer -= 1
         self._apply_history_entry(self.zoom_history[self.zoom_pointer])
+        self.update_status()
 
     def _step_forward(self, event=None):
+        """v0.56.3: при неприменённых правках — диалог.
+
+        Да  — применить (вперёд уже некуда, остаёмся).
+        Нет — не применять, шагнуть вперёд (правки потеряются).
+        Отмена — ничего.
+        """
+        if not self.zoom_history:
+            return
+        if self._is_dirty():
+            resp = self._ask_apply_confirm('вперёд')
+            if resp is None:
+                return
+            if resp:
+                # Применяем и остаёмся — вперёд идти уже некуда,
+                # т.к. push ставит запись в конец.
+                self._push_history(force=True)
+                self.update_status()
+                return
         if self.zoom_pointer >= len(self.zoom_history) - 1:
+            self.update_status()
             return
         self.zoom_pointer += 1
         self._apply_history_entry(self.zoom_history[self.zoom_pointer])
+        self.update_status()
 
     def _btn_back(self, event=None):
         self._step_back(event)
 
-    def _btn_save_pos(self, _=None):
-        self._push_history()
-        print("Текущее положение сохранено в историю.", file=sys.stderr)
+    def _btn_apply(self, _=None):
+        """v0.56.3: фиксирует все накопленные правки как одну запись.
+
+        Клавиша A. Кнопка «Применить».
+
+        Если состояние совпадает с текущей записью истории —
+        ничего не делает (нет правок). Иначе добавляет запись.
+        """
+        if not self._is_dirty():
+            print("Нечего применять — состояние уже совпадает "
+                  "с текущей записью истории.", file=sys.stderr)
+            self.update_status()
+            return
+        self._push_history(force=True)
+        print(f"Применено. Позиций в истории: {len(self.zoom_history)}",
+              file=sys.stderr)
         self.update_status()
 
     def _btn_delete_pos(self, _=None):
+        """v0.56.2: удаляем ТЕКУЩУЮ позицию, остаёмся на её месте.
+
+        После удаления на индексе `pos` теперь стоит следующая
+        запись (бывшая pos+1). Пользователь остаётся на том же
+        индексе. Если удалили последнюю — pointer сдвигается на
+        новую последнюю.
+
+        Раньше pointer уезжал на pos-1 (предыдущую) — визуально
+        казалось, что показана «копия соседней позиции».
+        """
         if not self.zoom_history:
             return
 
         pos = self.zoom_pointer
         if pos < 0 or pos >= len(self.zoom_history):
+            # Если pointer вне списка — удаляем последнюю.
             pos = len(self.zoom_history) - 1
 
         self.zoom_history.pop(pos)
 
         if not self.zoom_history:
             self.zoom_pointer = -1
-            self._reset_zoom()
             self.update_status()
+            self.fig.canvas.draw_idle()
             return
 
-        self.zoom_pointer = max(0, pos - 1)
+        # Остаёмся на той же позиции — теперь там следующая запись.
+        # Если удалили последнюю, прижимаемся к новой последней.
+        self.zoom_pointer = min(pos, len(self.zoom_history) - 1)
 
         self._apply_history_entry(self.zoom_history[self.zoom_pointer])
         self.update_status()
@@ -4032,19 +4328,20 @@ class AudioSpeedAnalyzer:
             return
         self._closing = True
         self._save_view()
-        save_config(self.cfg, self.config_path)
+        # v0.56.0: автосохранение конфига убрано.
+        # На диск конфиг пишется только по клавише S.
 
     def _on_exit(self, _=None):
         if getattr(self, '_closing', False):
             return
         self._closing = True
         self._save_view()
-        save_config(self.cfg, self.config_path)
+        # v0.56.0: автосохранение конфига убрано.
         plt.close(self.fig)
 
     def _on_span(self, xmin, xmax):
         self.drag_text.set_visible(False)
-        self._push_history()
+        # v0.56.3: авто-запись убрана — фиксируется через Apply (A).
         x0 = max(0, int(round(min(xmin, xmax))))
         x1 = max(0, int(round(max(xmin, xmax))))
         self.analyze_start = x0
@@ -4060,11 +4357,15 @@ class AudioSpeedAnalyzer:
         self._redraw_all()
 
     def _reset_zoom(self, _=None):
+        """v0.56.3: НЕ стираем историю.
+
+        Сброс — обычное изменение состояния. Зафиксировать через
+        Apply (A). Раньше здесь делался zoom_history.clear(),
+        и пользователь терял все сохранённые позиции.
+        """
         self.drag_text.set_visible(False)
         self._updating_axes = True
         try:
-            self.zoom_history.clear()
-            self.zoom_pointer = -1
             self.ax_spec.set_xlim(0, self.n_frames)
             self.ax_spec.set_ylim(self.cfg['freq_min'], self.cfg['freq_max'])
             self.analyze_start = 0
@@ -4099,6 +4400,15 @@ class AudioSpeedAnalyzer:
             self._btn_reset_all()
         elif key in ('p', 'P'):
             self._toolbar_save_png()
+        elif key in ('a', 'A'):
+            tb_focused = False
+            for tb in self._tb_list:
+                if hasattr(self.fig.canvas, 'widgetlock') and \
+                        not self.fig.canvas.widgetlock.available(tb):
+                    tb_focused = True
+                    break
+            if not tb_focused:
+                self._btn_apply()
         elif key in ('1', '2', '3', '4', '5', '6'):
             tb_focused = False
             for tb in self._tb_list:
@@ -4248,6 +4558,10 @@ class AudioSpeedAnalyzer:
             self.zoom_history.pop(0)
         self.zoom_pointer = len(self.zoom_history) - 1
 
+        # v0.56.1: история загружена заново — кэш калибровки
+        # dGPS может быть неактуален.
+        self._invalidate_gps_lag_cache()
+
         self._sync_fields()
         self._update_time_span()
         self.draw_tubes()
@@ -4265,6 +4579,22 @@ class AudioSpeedAnalyzer:
             for sl in slines:
                 print(sl)
         print(sep)
+
+    def _make_floppy_handler(self):
+        """Обработчик для кнопки-дискеты в тулбаре matplotlib.
+
+        Клик по дискете вызывает _toolbar_save_png() — то же, что
+        клавиша P: диалог выбора пути + штамп + запись в _png_list.
+        Принимает и игнорирует любые args/kwargs, которые matplotlib
+        может передать в save_figure(*args, **kwargs).
+        """
+        def _handler(*args, **kwargs):
+            try:
+                self._toolbar_save_png()
+            except Exception as e:
+                print(f"Floppy disk: ошибка сохранения ({e})",
+                      file=sys.stderr)
+        return _handler
 
     def _toolbar_save_png(self):
         try:
@@ -4368,8 +4698,8 @@ class AudioSpeedAnalyzer:
             'date': png_date_str,
         })
 
+        # v0.56.0: last_png_dir обновляется только в памяти.
         self.cfg['last_png_dir'] = png_dir
-        save_config(self.cfg, self.config_path)
 
     def _on_click(self, event):
         if event.xdata is None or event.ydata is None:
@@ -4406,6 +4736,8 @@ class AudioSpeedAnalyzer:
             print(f"4-я гармоника: {click_f:.3f} Гц "
                   f"(кадр={int(click_frame)}, "
                   f"t={click_frame/fps:.1f}с)")
+            # v0.56.1: сброс кэша калибровки dGPS
+            self._invalidate_gps_lag_cache()
             self.calc_harmonics()
             self.draw_harmonics()
             self._set_phase(self.PHASE_DONE)
@@ -4612,6 +4944,237 @@ class AudioSpeedAnalyzer:
             print(f"  Разброс V ср между алгоритмами: {spread:.2f} км/ч")
         print(f"{'='*70}")
 
+    # ---------- v0.56.1: калибровка dGPS по истории ----------
+
+    def _invalidate_gps_lag_cache(self):
+        """Сбрасывает кэш калибровки dGPS.
+        Вызывать при смене H5/H4 или при изменении GPS-данных.
+        """
+        self.gps_lag_calibrated = None
+        self.gps_corr_calibrated = 0.0
+        self.gps_lag_calib_h5 = None
+        self.gps_lag_calib_h4 = None
+        self.gps_lag_calib_info = None
+
+    def _find_longest_history_entry(self, f_start, f_end):
+        """Возвращает самый длинный интервал из истории + текущий.
+
+        Returns:
+            (cal_f_start, cal_f_end, source) или None.
+            source in {'current', 'history'}.
+        """
+        best_dur = f_end - f_start
+        best = (f_start, f_end, 'current')
+
+        for e in self.zoom_history:
+            if not isinstance(e, dict):
+                continue
+            e_start = int(e.get('analyze_start', 0))
+            e_dur = int(e.get('analyze_dur', 0))
+            if e_dur < 1:
+                continue
+            e_end = min(e_start + e_dur, self.n_frames)
+            if e_end <= e_start:
+                continue
+            dur = e_end - e_start
+            if dur > best_dur:
+                best_dur = dur
+                best = (e_start, e_end, 'history')
+
+        return best
+
+    def _compute_gps_lag_for_range(self, f_start, f_end,
+                                    f_lo5, f_hi5, f_lo4, f_hi4,
+                                    peak_hz):
+        """Считает dGPS на указанном диапазоне кадров.
+
+        Returns:
+            (lag, corr, info)
+            lag:  float или None при неудаче.
+            corr: float (0.0 при неудаче).
+            info: dict с диагностикой и полем 'error'.
+        """
+        info = {
+            'n_audio': 0,
+            'audio_std': 0.0,
+            'gps_std': 0.0,
+            'error': None,
+            'diag_path': None,
+        }
+
+        if not self.gps_points or len(self.gps_points) < 3:
+            info['error'] = 'нет GPS-точек'
+            return None, 0.0, info
+
+        fps = self.cfg['target_fps']
+        gps_times = [p[0] for p in self.gps_points]
+        gps_speeds = [p[1] for p in self.gps_points]
+
+        audio_times_full = []
+        audio_speeds_full = []
+        try:
+            step_check = 3
+            edge_frames = 0
+            if self.cfg.get('gps_trim_fft_edges', True):
+                hop_l = max(1, int(self.sr / fps))
+                edge_frames = ((self.cfg['fft_size']
+                                + hop_l - 1) // hop_l)
+                if f_end - f_start <= 4 * edge_frames:
+                    edge_frames = 0
+            f_start_corr = f_start + edge_frames
+            f_end_corr = f_end - edge_frames
+            if f_end_corr <= f_start_corr:
+                f_start_corr = f_start
+                f_end_corr = f_end
+            for step_i_check in range(f_start_corr, f_end_corr,
+                                       step_check):
+                if step_i_check >= self.n_frames:
+                    break
+                col = self.S_db[:, step_i_check]
+                h5_peak = find_peak_near(self.freqs, col, self.h5,
+                                          peak_hz, f_lo5, f_hi5)
+                h4_peak = find_peak_near(self.freqs, col, self.h4,
+                                          peak_hz, f_lo4, f_hi4)
+                _, _, _, v_tmp = self._calc_speed(h5_peak, h4_peak)
+                audio_times_full.append(step_i_check / fps)
+                audio_speeds_full.append(v_tmp)
+        except Exception as e:
+            info['error'] = f'ошибка расчёта пиков: {e}'
+            return None, 0.0, info
+
+        info['n_audio'] = len(audio_times_full)
+        if len(audio_times_full) < 10:
+            info['error'] = (f'мало точек аудио '
+                              f'({len(audio_times_full)})')
+            return None, 0.0, info
+
+        try:
+            smooth_sec = float(self.cfg.get('gps_smooth_sec', 2.0))
+            arr_v = np.array(audio_speeds_full, dtype=float)
+            arr_t = np.array(audio_times_full, dtype=float)
+            dt_a_nominal = step_check / fps
+            arr_v_sm = _smooth_series(arr_v, smooth_sec, dt_a_nominal)
+            gps_t_np = np.array(gps_times, dtype=float)
+            gps_v_np = np.array(gps_speeds, dtype=float)
+            if len(gps_t_np) >= 2:
+                dt_g_nom = float(np.median(np.diff(gps_t_np)))
+            else:
+                dt_g_nom = 1.0
+            gps_v_sm = _smooth_series(gps_v_np, smooth_sec, dt_g_nom)
+            gps_points_sm = [
+                (float(p[0]), float(gps_v_sm[i]),
+                 float(p[2]), float(p[3]), float(p[4]))
+                for i, p in enumerate(self.gps_points)
+            ]
+            info['audio_std'] = float(arr_v.std())
+            info['gps_std'] = float(np.std(gps_speeds))
+
+            lag, corr, lag_results = find_gps_lag(
+                arr_t.tolist(), arr_v_sm.tolist(),
+                gps_times, gps_v_sm.tolist())
+
+            try:
+                _diag_path = write_gps_lag_diag(
+                    filepath=self.filepath,
+                    gps_points=gps_points_sm,
+                    arr_t=arr_t.tolist(),
+                    arr_v=arr_v_sm.tolist(),
+                    best_lag=lag,
+                    best_corr=corr,
+                    all_results=lag_results,
+                    gps_method=self.gps_method,
+                    analyze_window=(f_start / fps, f_end / fps),
+                )
+                info['diag_path'] = _diag_path
+            except Exception:
+                pass
+
+            return float(lag), float(corr), info
+        except Exception as e:
+            info['error'] = f'ошибка корреляции: {e}'
+            return None, 0.0, info
+
+    def _try_use_calibrated_gps_lag(self, f_start, f_end,
+                                     f_lo5, f_hi5, f_lo4, f_hi4,
+                                     peak_hz):
+        """v0.56.1: пытается применить dGPS, откалиброванный
+        по самому длинному интервалу из истории.
+
+        Логика:
+          * если H5/H4 не менялись и текущее окно НЕ длиннее,
+            чем калиброванное — берём из кэша;
+          * иначе — пересчитываем на самом длинном интервале.
+
+        Возвращает True, если self.gps_lag установлен,
+        иначе False (вызывающий код использует fallback).
+        """
+        if not self.gps_points or len(self.gps_points) < 3:
+            return False
+
+        longest = self._find_longest_history_entry(f_start, f_end)
+        if longest is None:
+            return False
+        cal_f_start, cal_f_end, cal_src = longest
+        cal_dur = cal_f_end - cal_f_start
+        cur_dur = f_end - f_start
+
+        cache_valid = (
+            self.gps_lag_calibrated is not None
+            and self.gps_lag_calib_h5 is not None
+            and self.gps_lag_calib_h4 is not None
+            and abs(self.gps_lag_calib_h5 - self.h5) < 1e-9
+            and abs(self.gps_lag_calib_h4 - self.h4) < 1e-9
+        )
+
+        if cache_valid:
+            cached_dur = int(
+                self.gps_lag_calib_info.get('duration_frames', 0))
+            if cur_dur <= cached_dur:
+                self.gps_lag = float(self.gps_lag_calibrated)
+                self.gps_corr = float(self.gps_corr_calibrated)
+                _src = self.gps_lag_calib_info.get('source', '?')
+                _dur = self.gps_lag_calib_info.get('duration_sec', 0.0)
+                print(f"  GPS запаздывание: {self.gps_lag:+.3f} сек "
+                      f"(кэш калибровки: {_src}, {_dur:.2f}с, "
+                      f"corr={self.gps_corr:+.3f})")
+                return True
+
+        fps = float(self.cfg['target_fps'])
+        print(f"  GPS: калибровка dGPS по самому длинному "
+              f"интервалу ({cal_src}): "
+              f"{cal_f_start/fps:.2f}-{cal_f_end/fps:.2f}с "
+              f"({cal_dur/fps:.2f}с)")
+
+        lag, corr, info = self._compute_gps_lag_for_range(
+            cal_f_start, cal_f_end, f_lo5, f_hi5, f_lo4, f_hi4, peak_hz)
+
+        if lag is None:
+            print(f"  GPS: калибровка не удалась: "
+                  f"{info.get('error', 'неизвестная ошибка')}")
+            return False
+
+        self.gps_lag_calibrated = float(lag)
+        self.gps_corr_calibrated = float(corr)
+        self.gps_lag_calib_h5 = float(self.h5)
+        self.gps_lag_calib_h4 = float(self.h4)
+        self.gps_lag_calib_info = {
+            'f_start': cal_f_start,
+            'f_end': cal_f_end,
+            'duration_frames': cal_dur,
+            'duration_sec': cal_dur / fps,
+            'corr': corr,
+            'n_audio': info.get('n_audio', 0),
+            'source': cal_src,
+        }
+        self.gps_lag = float(lag)
+        self.gps_corr = float(corr)
+        print(f"  GPS запаздывание: {self.gps_lag:+.3f} сек "
+              f"(калибровка: {cal_src}, {cal_dur/fps:.2f}с, "
+              f"corr={self.gps_corr:+.3f}, n={info.get('n_audio', 0)})")
+        if info.get('diag_path'):
+            print(f"  GPS-diag: {info['diag_path']}")
+        return True
+
     def _on_run(self, _, algo=None):
         if not self.harm_freqs:
             print("Сначала выберите гармоники (5-ю и 4-ю)")
@@ -4706,6 +5269,14 @@ class AudioSpeedAnalyzer:
                 self.gps_corr = 0.0
                 print(f"  GPS запаздывание: {self.gps_lag:.3f} сек "
                       f"(ручной ввод)")
+            elif (self.cfg.get('gps_lag_from_history', True)
+                  and self._try_use_calibrated_gps_lag(
+                      f_start, f_end, f_lo5, f_hi5, f_lo4, f_hi4,
+                      peak_hz)):
+                # v0.56.1: dGPS применён из калибровки по длинному
+                # интервалу из истории. Старый блок корреляции ниже
+                # не выполняется.
+                pass
             else:
                 audio_times_full = []
                 audio_speeds_full = []
@@ -5092,14 +5663,18 @@ class AudioSpeedAnalyzer:
 
         hist_total = len(self.zoom_history)
         if hist_total == 0:
-            parts.append("Ист: 0/0")
+            hist_str = "Ист: 0/0"
         else:
             hist_pos = self.zoom_pointer + 1
             if hist_pos < 1:
                 hist_pos = 1
             if hist_pos > hist_total:
                 hist_pos = hist_total
-            parts.append(f"Ист: {hist_pos}/{hist_total}")
+            hist_str = f"Ист: {hist_pos}/{hist_total}"
+        # v0.56.3: маркер неприменённых правок.
+        if self._is_dirty():
+            hist_str += " *"
+        parts.append(hist_str)
 
         try:
             step_sec = float(self.cfg['time_step'])
@@ -5181,8 +5756,14 @@ class AudioSpeedAnalyzer:
                             ovr_flag = True
                         except (ValueError, TypeError):
                             pass
-                    parts.append(f"Δgps={gps_dt_used:+.3f}с"
-                                 + (" (OVR)" if ovr_flag else ""))
+                    # v0.56.1: маркер (H) — dGPS применён из
+                    # калибровки по длинному интервалу из истории.
+                    _calib_flag = (not ovr_flag
+                                    and self.gps_lag_calib_info
+                                    is not None)
+                    _mark = (" (OVR)" if ovr_flag
+                             else (" (H)" if _calib_flag else ""))
+                    parts.append(f"Δgps={gps_dt_used:+.3f}с" + _mark)
 
         self.status.set_text(' | '.join(parts) if parts else '')
         self.fig.canvas.draw_idle()
@@ -5230,7 +5811,14 @@ class AudioSpeedAnalyzer:
 
 
 def prompt_car_params(config, config_path):
-    """Запрос параметров автомобиля. Промпты в stderr."""
+    """Запрос параметров автомобиля. Промпты в stderr.
+
+    v0.56.0: НЕ сохраняет config автоматически на диск.
+    Новые значения действуют только в текущей сессии;
+    для записи в файл — клавиша S в окне.
+
+    Параметр config_path оставлен для совместимости сигнатуры.
+    """
     keys = [
         ('cylinders',     'Цилиндров',     int),
         ('stroke',        'Тактность (1=2-такт, 2=4-такт)', int),
@@ -5274,7 +5862,12 @@ def prompt_car_params(config, config_path):
                 except ValueError:
                     print(f"    Ошибка: оставлено {cur}",
                           file=sys.stderr)
-        save_config(config, config_path)
+        # v0.56.0: автосохранение убрано.
+        # Новые параметры действуют в текущей сессии;
+        # на диск — по клавише S в окне.
+        print("Новые параметры применены только в текущей сессии. "
+              "Для записи в файл нажмите S в окне.",
+              file=sys.stderr)
 
 
 def main():
@@ -5308,7 +5901,10 @@ def main():
         else:
             config_path = per_file_config
 
-    update_history_log()
+    # v0.56.0: автозапись в history_log.txt убрана.
+    # Функция update_history_log() остаётся в модуле,
+    # но больше не вызывается автоматически.
+    # update_history_log()
 
     config = load_config(config_path)
 
