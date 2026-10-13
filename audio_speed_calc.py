@@ -45,12 +45,154 @@ if sys.platform == 'win32':
     except Exception:
         pass
 
-VERSION = "0.53.5"
+VERSION = "0.55.9"
 CONFIG_FILE = "audio_speed_config.json"
 HISTORY_LOG_FILE = "history_log.txt"
 
 
 CHANGELOG = {
+    "0.55.3": [
+        "",
+        "v0.55.3",
+        "-" * 64,
+        "",
+        "ИСПРАВЛЕНО",
+        "",
+        "* Выравнивание GPS-графика по шкале времени аудио:",
+        "  корректно учитываются GPS-точки, которые до сдвига",
+        "  (shifted = gps_t + lag) находились ЗА пределами",
+        "  выбранного диапазона анализа, но после сдвига в него",
+        "  попадают.",
+        "* Единый источник эффективного лага — _effective_lag()",
+        "  (устраняет расхождения между отрисовкой и расчётами).",
+        "* _gps_shifted_arrays() — полный массив GPS со сдвигом;",
+        "  используется для отрисовки графика GPS.",
+        "* Сглаживание сигналов — через _smooth_series() с",
+        "  параметром gps_smooth_sec из конфига",
+        "  (было hardcoded 2.0 с).",
+        "",
+    ],
+    "0.53.7": [
+        "",
+        "v0.53.7",
+        "-" * 64,
+        "",
+        "ИСПРАВЛЕНО",
+        "",
+        "* Диагностический лог GPS-лага: полный"
+        "  отчёт без сокращений.",
+        "* Шаг корреляции в широком поиске: 0.5 -> 0.1 с.",
+        "* Секции 4 и 5 печатают ВСЕ проверенные сдвиги",
+        "  (было: топ-10 и каждая 4-я точка).",
+        "",
+    ],
+    "0.55.2": [
+        "",
+        "v0.55.2",
+        "-" * 64,
+        "",
+        "КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ",
+        "",
+        "* Исправлен знак GPS-лага в 5 местах.",
+        "  Соглашение find_gps_lag: shifted = gps_t + lag.",
+        "* Отрисовка GPS-кривой: (gps_t + lag) * fps",
+        "  (было (gps_t - lag) * fps).",
+        "* Поиск GPS-точек в окне: gps_t ∈ [a0-lag, a1-lag]",
+        "  (было [a0+lag, a1+lag]).",
+        "* GPS-скорость в момент аудио t: gps_t = t - lag",
+        "  (было gps_t = t + lag).",
+        "* Следствие: в набор Vgps ср теперь попадают точки,",
+        "  которые были ЗА пределами окна анализа и попали в",
+        "  него только после сдвига (например, стартовая ramp).",
+        "",
+    ],
+    "0.55.1": [
+        "",
+        "v0.55.1",
+        "-" * 64,
+        "",
+        "ИСПРАВЛЕНО",
+        "",
+        "* Корректная глубина обрезки краёв FFT.",
+        "  Было fft_size//(2*hop) = 11 кадров (0.37 с),",
+        "  стало ceil(fft_size/hop) = 22 кадра (0.73 с).",
+        "  Полу-окно не убирает краевой артефакт hanning",
+        "  полностью; целое окно — корректно.",
+        "",
+    ],
+    "0.55.0": [
+        "",
+        "v0.55.0",
+        "-" * 64,
+        "",
+        "КРУПНЫЙ ПАТЧ",
+        "",
+        "* Обрезка краёв FFT (gps_trim_fft_edges).",
+        "* Единое сглаживание обоих сигналов"
+        "  (gps_smooth_sec, дефолт 2.0с).",
+        "* Диагностический лог: колонки n_g, dt_a, dt_g,"
+        "  dmean, StdRt, RMSE; CSV LAG_STATS расширен.",
+        "* Вердикт \"нет динамики\" при std < 1 км/ч.",
+        "",
+    ],
+    "0.54.0": [
+        "",
+        "v0.54.0",
+        "-" * 64,
+        "",
+        "ИСПРАВЛЕНО",
+        "",
+        "* Поиск GPS-лага ведётся по окну анализа"
+        "  (analyze_start / analyze_dur из JSON),"
+        "  а не по всему файлу.",
+        "* В диагностический лог добавлена строка"
+        "  «Окно анализа» с указанием диапазона.",
+        "",
+    ],
+    "0.53.9": [
+        "",
+        "v0.53.9",
+        "-" * 64,
+        "",
+        "ИСПРАВЛЕНО",
+        "",
+        "* Диагностический лог GPS-лага: таблицы"
+        "  сортируются по lag (не по |corr|).",
+        "* В каждой строке видны Va (аудио) и Vg (GPS)",
+        "  min/max/avg/std — что именно сравнивается.",
+        "* Добавлена секция 9 — парные данные на лучшем сдвиге.",
+        "* CSV дополнен секцией LAG_STATS.",
+        "",
+    ],
+    "0.53.8": [
+        "",
+        "v0.53.8",
+        "-" * 64,
+        "",
+        "НОВОЕ",
+        "",
+        "* Диагностический лог без сокращений:",
+        "  все GPS-точки, все аудио-точки,",
+        "  все сдвиги в ±5с и ±60с, сверхширокий ±300с.",
+        "* CSV-экспорт <base_ts>_gps_lag_diag.csv.",
+        "* Секция 10 — дополнительный анализ пиков.",
+        "* Шаг широкого поиска: 0.5 -> 0.1 с.",
+        "",
+    ],
+    "0.53.6": [
+        "",
+        "v0.53.6",
+        "-" * 64,
+        "",
+        "NEW",
+        "",
+        "* Диагностический лог GPS-лага:",
+        "  <base_ts>_gps_lag_diag.log рядом с видео.",
+        "* 7 секций: GPS-точки, аудио, перекрытие,",
+        "  результаты ±5с, расширенный ±60с,",
+        "  контрольные сдвиги, вердикт.",
+        "",
+    ],
     "0.53.5": [
         "",
         "v0.53.5",
@@ -232,6 +374,8 @@ DEFAULT_CONFIG = {
     "gps_lag_override": None,
     "analyze_start": 0,
     "analyze_dur": 0,
+    "gps_trim_fft_edges": True,
+    "gps_smooth_sec": 2.0,
 }
 
 
@@ -567,6 +711,21 @@ def gps_to_relative_time(gps_points, first_epoch=None):
     return [(p[0] - first_epoch, p[1], p[2], p[3], p[4]) for p in gps_points]
 
 
+def _smooth_series(v, smooth_sec, dt):
+    """Скользящее среднее окном smooth_sec секунд.
+    dt — шаг выборки (с). Возвращает массив той же длины.
+    При некорректных параметрах возвращает исходный массив.
+    """
+    v = np.asarray(v, dtype=float)
+    if smooth_sec <= 0 or len(v) < 3 or dt <= 0:
+        return v
+    win = max(1, int(round(smooth_sec / dt)))
+    if win <= 1 or win >= len(v):
+        return v
+    kernel = np.ones(win, dtype=float) / win
+    return np.convolve(v, kernel, mode='same')
+
+
 def find_gps_lag(audio_times, audio_speeds, gps_times, gps_speeds,
                  lag_range=(-5.0, 5.0), lag_step=0.1):
     """Кросс-корреляция: ищет сдвиг GPS относительно аудио."""
@@ -591,9 +750,14 @@ def find_gps_lag(audio_times, audio_speeds, gps_times, gps_speeds,
     order_a = np.argsort(aud_t)
     aud_t, aud_v = aud_t[order_a], aud_v[order_a]
 
+    # v0.55.6: GPS-скорость и аудио-скорость физически ВСЕГДА в фазе
+    # (разгон -> обе растут, торможение -> обе падают). Отрицательная
+    # корреляция — аномалия. Максимизируем именно ПОЛОЖИТЕЛЬНУЮ
+    # корреляцию, а не abs(corr): иначе при шумных сигналах можно
+    # «выиграть» противофазный пик (corr<0) и уехать в другую сторону
+    # от правильного лага (баг v0.55.4 и ранее).
     best_lag = 0.0
-    best_corr_abs = 0.0
-    best_corr_signed = 0.0
+    best_corr = -1.0   # ищем максимум положительной корреляции
     results = []
 
     for lag in np.arange(lag_range[0], lag_range[1] + lag_step, lag_step):
@@ -609,13 +773,20 @@ def find_gps_lag(audio_times, audio_speeds, gps_times, gps_speeds,
         if np.isnan(c):
             continue
         results.append((float(lag), float(c), int(mask.sum())))
-        if abs(c) > best_corr_abs:
-            best_corr_abs = abs(c)
-            best_corr_signed = c
+        if c > best_corr:
+            best_corr = c
             best_lag = float(lag)
 
+    if best_corr < 0.0:
+        # Все пики — противофазные. Ничего достоверного.
+        best_corr = 0.0
+        best_lag = 0.0
+
+    # Для отображения топ-N сортируем по МОДУЛЮ (чтобы были видны
+    # сильные анти-пики), но лучший лаг выбран выше по положительной
+    # корреляции.
     results.sort(key=lambda x: abs(x[1]), reverse=True)
-    return best_lag, best_corr_signed, results
+    return best_lag, best_corr, results
 
 
 def find_gps_window_points(gps_points, t_start, t_end):
@@ -1186,6 +1357,584 @@ def get_search_bounds(harm_freqs, n_harm, target_idx):
         f_hi = harm_freqs[target_idx] * 1.5
     return f_lo, f_hi
 
+
+
+# ==================================================================
+# v0.53.9: читаемый диагностический лог GPS-лага
+# Таблицы сортируются по lag, в строках видны Va и Vg.
+# ==================================================================
+
+def _corr_stats_at_lag(a_t, a_v, gps_t, gps_v, lag):
+    """Полная статистика корреляции на заданном сдвиге.
+    Дополнительно: n_g, dt_a, dt_g, dmean, std_ratio, rmse."""
+    shifted = gps_t + float(lag)
+    mask = (a_t >= shifted[0]) & (a_t <= shifted[-1])
+    n = int(mask.sum())
+    if n < 5:
+        return None
+    a = a_v[mask]
+    t_a = a_t[mask]
+    g = np.interp(t_a, shifted, gps_v)
+    a_std = float(a.std())
+    g_std = float(g.std())
+    if a_std < 1e-6 or g_std < 1e-6:
+        return None
+    c = float(np.corrcoef(a, g)[0, 1])
+    if np.isnan(c):
+        return None
+
+    gps_in_win = (shifted >= t_a[0]) & (shifted <= t_a[-1])
+    n_g = int(gps_in_win.sum())
+
+    if len(t_a) >= 2:
+        dt_a = float(np.median(np.diff(t_a)))
+    else:
+        dt_a = 0.0
+    if n_g >= 2:
+        gps_win_t = shifted[gps_in_win]
+        dt_g = float(np.median(np.diff(gps_win_t)))
+    else:
+        dt_g = 0.0
+
+    diff = g - a
+    rmse = float(np.sqrt(np.mean(diff * diff)))
+    dmean = float(g.mean() - a.mean())
+    std_ratio = a_std / g_std if g_std > 1e-9 else 0.0
+
+    return {
+        'lag':   float(lag),
+        'corr':  c,
+        'n':     n,
+        'n_g':   n_g,
+        'dt_a':  dt_a,
+        'dt_g':  dt_g,
+        't0':    float(t_a[0]),
+        't1':    float(t_a[-1]),
+        'a_min': float(a.min()),
+        'a_max': float(a.max()),
+        'a_avg': float(a.mean()),
+        'a_std': a_std,
+        'g_min': float(g.min()),
+        'g_max': float(g.max()),
+        'g_avg': float(g.mean()),
+        'g_std': g_std,
+        'dmean': dmean,
+        'std_ratio': std_ratio,
+        'rmse':  rmse,
+    }
+
+
+def _scan_lags(a_t, a_v, gps_t, gps_v, lag_lo, lag_hi, step):
+    """Проходит по всем lag в [lag_lo, lag_hi] с шагом step.
+    Возвращает список dict-статистик, отсортированный по lag.
+    Порядок обеспечивается итерацией по целым номерам шагов.
+    """
+    n_steps = int(round((lag_hi - lag_lo) / step)) + 1
+    out = []
+    for k in range(n_steps):
+        lag = lag_lo + k * step
+        st = _corr_stats_at_lag(a_t, a_v, gps_t, gps_v, float(lag))
+        if st is not None:
+            out.append(st)
+    return out
+
+
+def _paired_samples_at_lag(a_t, a_v, gps_t, gps_v, lag,
+                          max_points=200):
+    """Возвращает список (t, v_aud, v_gps_interp) в окне для
+    заданного сдвига. Прореживает до max_points.
+    """
+    shifted = gps_t + float(lag)
+    mask = (a_t >= shifted[0]) & (a_t <= shifted[-1])
+    if mask.sum() == 0:
+        return []
+    t_a = a_t[mask]
+    v_a = a_v[mask]
+    v_g = np.interp(t_a, shifted, gps_v)
+    n = len(t_a)
+    if n <= max_points:
+        idx = list(range(n))
+    else:
+        k = max(1, n // max_points)
+        idx = list(range(0, n, k))[:max_points]
+    return [(float(t_a[i]), float(v_a[i]), float(v_g[i]))
+            for i in idx]
+
+
+def _diag_verdict(stats, best):
+    """Строки вердикта."""
+    lines = []
+    if not stats:
+        lines.append("Ни одного сдвига не посчиталось.")
+        lines.append("Причины:")
+        lines.append("  * меньше 5 точек пересечения на всех сдвигах;")
+        lines.append("  * нулевой разброс скорости у одного из сигналов;")
+        lines.append("  * окна аудио и GPS не пересекаются по времени.")
+        return lines
+    if best is None:
+        lines.append("Есть посчитанные сдвиги, но пик не определён.")
+        return lines
+
+    _a_std = float(best.get('a_std', 0.0))
+    _g_std = float(best.get('g_std', 0.0))
+    if _a_std < 1.0 and _g_std < 1.0:
+        lines.append("В окне анализа НЕТ выраженной динамики.")
+        lines.append(f"  Va_std = {_a_std:.3f} км/ч")
+        lines.append(f"  Vg_std = {_g_std:.3f} км/ч")
+        lines.append("Обе кривые почти постоянны. Корреляция двух")
+        lines.append("плоских сигналов принципиально ненадёжна —")
+        lines.append("пик будет близок к нулю при любом сдвиге.")
+        lines.append("Что делать:")
+        lines.append("  1) Выбрать окно с разгоном/торможением.")
+        lines.append("  2) Или задать gps_lag_override вручную.")
+        return lines
+
+    a = abs(best['corr'])
+    if a < 0.3:
+        lines.append(f"Слабая корреляция (|corr|={a:.4f}).")
+        lines.append("Результат НЕ надёжен. Вероятные причины:")
+        lines.append("  * разные формы кривых аудио и GPS;")
+        lines.append("  * неверная передача КПП в параметрах авто;")
+        lines.append("  * GPS слишком редкие для динамики разгона;")
+        lines.append("  * сдвиг вне окна поиска.")
+    elif a < 0.5:
+        lines.append(f"Умеренная корреляция (|corr|={a:.4f}).")
+        lines.append("Результат под вопросом.")
+    elif a < 0.8:
+        lines.append(f"Хорошая корреляция (|corr|={a:.4f}).")
+        lines.append(f"Лаг {best['lag']:+.2f}с вероятно правильный.")
+    else:
+        lines.append(f"Сильная корреляция (|corr|={a:.4f}).")
+        lines.append(f"Лаг {best['lag']:+.2f}с надёжен.")
+    if best['corr'] < 0:
+        lines.append("ВНИМАНИЕ: корреляция отрицательная —")
+        lines.append("сигналы в противофазе (аномалия).")
+    if abs(best['lag']) >= 4.9:
+        lines.append("Пик у края окна ±5с — истинный лаг, возможно,")
+        lines.append("за пределами диапазона.")
+    return lines
+
+
+def write_gps_lag_diag(filepath, gps_points, arr_t, arr_v,
+                       best_lag, best_corr, all_results,
+                       gps_method='none',
+                       analyze_window=None):
+    """Полный диагностический лог. Таблицы сдвигов — по возрастанию lag,
+    в каждой строке видны Va и Vg (какие скорости сравниваются)."""
+    try:
+        base = os.path.splitext(os.path.basename(filepath))[0]
+        log_dir = os.path.dirname(os.path.abspath(filepath)) or '.'
+        log_path = os.path.join(log_dir, f"{base}_gps_lag_diag.log")
+        csv_path = os.path.join(log_dir, f"{base}_gps_lag_diag.csv")
+
+        gps_t = np.asarray([p[0] for p in gps_points], dtype=float)
+        gps_v = np.asarray([p[1] for p in gps_points], dtype=float)
+        gps_lat = np.asarray([p[2] for p in gps_points], dtype=float)
+        gps_lon = np.asarray([p[3] for p in gps_points], dtype=float)
+        a_t = np.asarray(arr_t, dtype=float)
+        a_v = np.asarray(arr_v, dtype=float)
+
+        sep = '=' * 118
+        sub = '-' * 118
+
+        HDR = (
+            "  "
+            + f"{'lag,с':>8s}  "
+            + f"{'corr':>9s}  "
+            + f"{'n':>5s}  "
+            + f"{'n_g':>4s}  "
+            + f"{'dt_a':>5s}  "
+            + f"{'dt_g':>5s}  "
+            + f"{'t0-t1,с':>17s}  "
+            + f"{'Va_avg':>7s}  "
+            + f"{'Vg_avg':>7s}  "
+            + f"{'dmean':>7s}  "
+            + f"{'Va_std':>7s}  "
+            + f"{'Vg_std':>7s}  "
+            + f"{'StdRt':>6s}  "
+            + f"{'RMSE':>7s}"
+        )
+        DASH = "  " + "-" * (len(HDR) - 2)
+
+        def row_fmt(st):
+            return (
+                "  "
+                + f"{st['lag']:+8.2f}  "
+                + f"{st['corr']:+9.4f}  "
+                + f"{st['n']:5d}  "
+                + f"{st['n_g']:4d}  "
+                + f"{st['dt_a']:5.2f}  "
+                + f"{st['dt_g']:5.2f}  "
+                + f"{st['t0']:7.1f}-{st['t1']:7.1f}  "
+                + f"{st['a_avg']:7.2f}  "
+                + f"{st['g_avg']:7.2f}  "
+                + f"{st['dmean']:+7.2f}  "
+                + f"{st['a_std']:7.3f}  "
+                + f"{st['g_std']:7.3f}  "
+                + f"{st['std_ratio']:6.2f}  "
+                + f"{st['rmse']:7.2f}"
+            )
+
+        # Сканируем ±5с (шаг 0.1с) — это основная таблица
+        stats_5 = _scan_lags(a_t, a_v, gps_t, gps_v, -5.0, 5.0, 0.1)
+        best5 = None
+        if stats_5:
+            best5 = max(stats_5, key=lambda r: abs(r['corr']))
+
+        # CSV
+        try:
+            with open(csv_path, 'w', encoding='utf-8') as cf:
+                cf.write("# SECTION: GPS_POINTS\n")
+                cf.write("index,t_rel_sec,speed_kmh,lat,lon\n")
+                for i in range(len(gps_points)):
+                    cf.write(f"{i},{gps_t[i]:.6f},{gps_v[i]:.6f},"
+                             f"{gps_lat[i]:.8f},{gps_lon[i]:.8f}\n")
+                cf.write("\n# SECTION: AUDIO_POINTS\n")
+                cf.write("index,t_sec,speed_kmh\n")
+                for i in range(len(a_t)):
+                    cf.write(f"{i},{a_t[i]:.6f},{a_v[i]:.6f}\n")
+                cf.write("\n# SECTION: LAG_STATS\n")
+                cf.write("lag_sec,corr,n,n_g,dt_a,dt_g,t0,t1,"
+                         "Va_avg,Vg_avg,dmean,Va_std,Vg_std,"
+                         "std_ratio,rmse\n")
+                for st in stats_5:
+                    cf.write(
+                        f"{st['lag']:.4f},{st['corr']:.6f},"
+                        f"{st['n']},{st['n_g']},"
+                        f"{st['dt_a']:.4f},{st['dt_g']:.4f},"
+                        f"{st['t0']:.4f},{st['t1']:.4f},"
+                        f"{st['a_avg']:.4f},{st['g_avg']:.4f},"
+                        f"{st['dmean']:.4f},"
+                        f"{st['a_std']:.4f},{st['g_std']:.4f},"
+                        f"{st['std_ratio']:.4f},"
+                        f"{st['rmse']:.4f}\n")
+        except Exception as e_csv:
+            print(f"  GPS-diag: ошибка CSV ({e_csv})", file=sys.stderr)
+
+        with open(log_path, 'w', encoding='utf-8') as f:
+            # ---------------- Шапка ----------------
+            f.write(sep + "\n")
+            f.write(f"GPS-LAG DIAGNOSTIC — audio_speed_calc v{VERSION}\n")
+            f.write(f"Файл: {os.path.basename(filepath)}\n")
+            f.write(f"Полный путь: {os.path.abspath(filepath)}\n")
+            f.write("Дата: "
+                    + datetime.datetime.now().strftime(
+                        '%Y-%m-%d %H:%M:%S') + "\n")
+            f.write(f"Метод GPS: {gps_method}\n")
+            if analyze_window is not None:
+                aw0, aw1 = analyze_window
+                f.write(f"Окно анализа: {aw0:.3f} … "
+                        f"{aw1:.3f} с "
+                        f"(длительность "
+                        f"{aw1 - aw0:.3f} с)\n")
+                f.write("Поиск лага и корреляция ведутся "
+                        "только внутри этого окна.\n")
+            else:
+                f.write("Окно анализа: (не задано)\n")
+            f.write(f"CSV: {os.path.basename(csv_path)}\n")
+            f.write(sep + "\n\n")
+
+            # ---------------- 0. Легенда ----------------
+            f.write(sub + "\n")
+            f.write("0. ЛЕГЕНДА И КОНВЕНЦИИ\n")
+            f.write(sub + "\n")
+            f.write("  t_аудио  — время от начала аудио-потока "
+                    "(кадр 0 STFT).\n")
+            f.write("  t_GPS    — время от первой GPS-метки в файле.\n")
+            f.write("  lag      — сдвиг, применяемый к GPS: "
+                    "shifted = t_GPS + lag.\n")
+            f.write("               lag>0  — GPS-точки сдвигаются вправо;\n")
+            f.write("               lag<0  — GPS-точки сдвигаются влево.\n")
+            f.write("  Va       — скорость по аудио (H5/H4), км/ч.\n")
+            f.write("  Vg       — скорость по GPS, интерп. на t_аудио, "
+                    "км/ч.\n")
+            f.write("  corr     — корреляция Пирсона между Va и Vg "
+                    "в окне пересечения.\n")
+            f.write("  n        — число парных точек в окне.\n")
+            f.write("  t0-t1    — начало и конец окна пересечения "
+                    "по t_аудио.\n")
+            f.write("  Va min/max/avg/std — статистика скорости по "
+                    "аудио в окне.\n")
+            f.write("  Vg min/max/avg/std — статистика скорости по GPS "
+                    "(после интерполяции).\n")
+            f.write("\n")
+
+            # ---------------- 1. GPS-точки ----------------
+            f.write(sub + "\n")
+            f.write(f"1. ВСЕ GPS-ТОЧКИ ({len(gps_points)} шт.)\n")
+            f.write(sub + "\n")
+            if len(gps_points) == 0:
+                f.write("  GPS-точек нет.\n\n")
+            else:
+                f.write(f"  {'#':>6}  {'t_GPS,с':>12}  "
+                        f"{'V,км/ч':>10}  {'lat':>15}  {'lon':>15}\n")
+                for i in range(len(gps_points)):
+                    f.write(f"  {i:>6d}  {gps_t[i]:+12.4f}  "
+                            f"{gps_v[i]:10.3f}  "
+                            f"{gps_lat[i]:+15.7f}  "
+                            f"{gps_lon[i]:+15.7f}\n")
+            f.write("\n")
+
+            # ---------------- 2. Аудио-точки ----------------
+            f.write(sub + "\n")
+            f.write(f"2. ВСЕ АУДИО-ТОЧКИ ({len(a_t)} шт.)\n")
+            f.write(sub + "\n")
+            if len(a_t) == 0:
+                f.write("  Аудио-точек нет.\n\n")
+            else:
+                f.write(f"  {'#':>6}  {'t_аудио,с':>14}  "
+                        f"{'V,км/ч':>10}\n")
+                for i in range(len(a_t)):
+                    f.write(f"  {i:>6d}  {a_t[i]:+14.4f}  "
+                            f"{a_v[i]:10.3f}\n")
+            f.write("\n")
+
+            # ---------------- 3. Статистика ----------------
+            f.write(sub + "\n")
+            f.write("3. СТАТИСТИКА СИГНАЛОВ\n")
+            f.write(sub + "\n")
+            if len(gps_t) > 0:
+                dt_gps = np.diff(gps_t) if len(gps_t) >= 2 else np.array([])
+                f.write("  --- GPS ---\n")
+                f.write(f"  Точек:          {len(gps_t)}\n")
+                f.write(f"  Диапазон t_GPS: {gps_t[0]:.3f} … "
+                        f"{gps_t[-1]:.3f} с "
+                        f"(длительность {gps_t[-1]-gps_t[0]:.3f} с)\n")
+                if len(dt_gps) > 0:
+                    med = float(np.median(dt_gps))
+                    f.write(f"  dt median:      {med:.4f} с\n")
+                    f.write(f"  dt min / max:   {dt_gps.min():.4f} / "
+                            f"{dt_gps.max():.4f} с\n")
+                    f.write(f"  Пропусков:      "
+                            f"{int((dt_gps > 3 * med).sum())}\n")
+                    f.write(f"  dt<=0:          "
+                            f"{int((dt_gps <= 0).sum())}\n")
+                f.write(f"  V min/max:      {gps_v.min():.3f} / "
+                        f"{gps_v.max():.3f} км/ч\n")
+                f.write(f"  V avg / std:    {gps_v.mean():.3f} / "
+                        f"{gps_v.std():.6f}\n")
+                n_zero = int((gps_v < 1.0).sum())
+                f.write(f"  V<1 км/ч:       {n_zero}\n")
+                n_zz = int(((gps_lat == 0) & (gps_lon == 0)).sum())
+                f.write(f"  (0,0) коорд:    {n_zz}\n")
+                f.write("\n")
+            if len(a_t) > 0:
+                f.write("  --- Аудио ---\n")
+                f.write(f"  Точек:          {len(a_t)}\n")
+                f.write(f"  Диапазон:       {a_t[0]:.3f} … "
+                        f"{a_t[-1]:.3f} с\n")
+                if len(a_t) >= 2:
+                    f.write(f"  dt median:      "
+                            f"{float(np.median(np.diff(a_t))):.4f} с\n")
+                f.write(f"  V min/max:      {a_v.min():.3f} / "
+                        f"{a_v.max():.3f} км/ч\n")
+                f.write(f"  V avg / std:    {a_v.mean():.3f} / "
+                        f"{a_v.std():.6f}\n")
+                f.write("\n")
+
+            # ---------------- 4. Перекрытие ----------------
+            f.write(sub + "\n")
+            f.write("4. ПЕРЕКРЫТИЕ ПРИ lag=0\n")
+            f.write(sub + "\n")
+            if len(a_t) > 0 and len(gps_t) > 0:
+                ov_s = max(a_t[0], gps_t[0])
+                ov_e = min(a_t[-1], gps_t[-1])
+                ov_d = ov_e - ov_s
+                f.write(f"  Аудио t:        {a_t[0]:.3f} … "
+                        f"{a_t[-1]:.3f}\n")
+                f.write(f"  GPS   t:        {gps_t[0]:.3f} … "
+                        f"{gps_t[-1]:.3f}\n")
+                f.write(f"  Перекрытие:     {ov_s:.3f} … "
+                        f"{ov_e:.3f}  ({ov_d:.3f} с)\n")
+                if ov_d <= 0:
+                    f.write("  [FAIL] Перекрытия нет.\n")
+                else:
+                    f.write(f"  Доля перекрытия: "
+                            f"{100.0 * ov_d / max(a_t[-1]-a_t[0], 1e-6):.1f}%"
+                            f" от длительности аудио\n")
+                a_std = float(a_v.std())
+                g_std = float(gps_v.std())
+                f.write(f"  std аудио:      {a_std:.6f} км/ч\n")
+                f.write(f"  std GPS:        {g_std:.6f} км/ч\n")
+                if a_std > 1e-6 and g_std > 1e-6:
+                    ratio = max(a_std, g_std) / min(a_std, g_std)
+                    f.write(f"  Отношение std:  {ratio:.4f}\n")
+                    if ratio > 5:
+                        f.write("  [WARN] Разбросы отличаются >5 раз.\n")
+                if a_std < 0.5:
+                    f.write("  [WARN] Аудио-скорость почти "
+                            "постоянна.\n")
+                if g_std < 0.5:
+                    f.write("  [WARN] GPS-скорость почти "
+                            "постоянна.\n")
+            f.write("\n")
+
+            # ---------------- 5. Таблица ±5с ----------------
+            f.write(sub + "\n")
+            f.write("5. ВСЕ СДВИГИ В ±5с (шаг 0.1с) — СОРТИРОВКА ПО lag\n")
+            f.write(sub + "\n")
+            f.write("  Каждая строка — один сдвиг.\n")
+            f.write("  Va — скорость по аудио в окне; "
+                    "Vg — скорость по GPS (интерп.) в том же окне.\n")
+            f.write("  Окно = пересечение по времени после применения "
+                    "lag.\n\n")
+            if not stats_5:
+                f.write("  [FAIL] Ни одного сдвига не посчиталось.\n")
+                f.write("  См. секцию 4 — вероятно нет перекрытия "
+                        "или нулевой std.\n")
+            else:
+                f.write(f"  Всего посчитано сдвигов: {len(stats_5)}\n\n")
+                f.write(HDR + "\n")
+                f.write(DASH + "\n")
+                for st in stats_5:
+                    mark = ""
+                    if best5 and abs(st['lag'] - best5['lag']) < 1e-9:
+                        mark = "   <== ЛУЧШИЙ"
+                    f.write(row_fmt(st) + mark + "\n")
+            f.write("\n")
+
+            # ---------------- 6. Таблица ±60с ----------------
+            f.write(sub + "\n")
+            f.write("6. ВСЕ СДВИГИ В ±60с (шаг 0.1с) — "
+                    "СОРТИРОВКА ПО lag\n")
+            f.write(sub + "\n")
+            if len(a_t) >= 5 and len(gps_t) >= 3:
+                stats_60 = _scan_lags(a_t, a_v, gps_t, gps_v,
+                                      -60.0, 60.0, 0.1)
+                if stats_60:
+                    best60 = max(stats_60,
+                                 key=lambda r: abs(r['corr']))
+                    f.write(f"  Всего посчитано сдвигов: "
+                            f"{len(stats_60)}\n\n")
+                    f.write(HDR + "\n")
+                    f.write(DASH + "\n")
+                    for st in stats_60:
+                        mark = ""
+                        if abs(st['lag'] - best60['lag']) < 1e-9:
+                            mark = "   <== ЛУЧШИЙ ±60с"
+                        f.write(row_fmt(st) + mark + "\n")
+                    f.write(f"\n  ЛУЧШИЙ ±60с: "
+                            f"lag={best60['lag']:+.4f}с, "
+                            f"corr={best60['corr']:+.6f}\n")
+                    if abs(best60['lag']) > 6.0:
+                        f.write("  [ВНИМАНИЕ] Реальный лаг вне ±5с — "
+                                "задайте gps_lag_override.\n")
+                else:
+                    f.write("  Ни одного сдвига не посчиталось.\n")
+            else:
+                f.write("  Недостаточно точек.\n")
+            f.write("\n")
+
+            # ---------------- 7. Таблица ±300с ----------------
+            f.write(sub + "\n")
+            f.write("7. СВЕРХШИРОКИЙ ПОИСК ±300с (шаг 0.5с) — "
+                    "СОРТИРОВКА ПО lag\n")
+            f.write(sub + "\n")
+            if len(a_t) >= 5 and len(gps_t) >= 3:
+                stats_300 = _scan_lags(a_t, a_v, gps_t, gps_v,
+                                       -300.0, 300.0, 0.5)
+                if stats_300:
+                    best300 = max(stats_300,
+                                  key=lambda r: abs(r['corr']))
+                    f.write(f"  Всего посчитано сдвигов: "
+                            f"{len(stats_300)}\n\n")
+                    f.write(HDR + "\n")
+                    f.write(DASH + "\n")
+                    for st in stats_300:
+                        mark = ""
+                        if abs(st['lag'] - best300['lag']) < 1e-9:
+                            mark = "   <== ЛУЧШИЙ ±300с"
+                        f.write(row_fmt(st) + mark + "\n")
+                    f.write(f"\n  ЛУЧШИЙ ±300с: "
+                            f"lag={best300['lag']:+.4f}с, "
+                            f"corr={best300['corr']:+.6f}\n")
+                    if abs(best300['lag']) > 60.0:
+                        f.write("  [ВНИМАНИЕ] Реальный лаг >60с.\n")
+                else:
+                    f.write("  Ни одного сдвига не посчиталось.\n")
+            else:
+                f.write("  Недостаточно точек.\n")
+            f.write("\n")
+
+            # ---------------- 8. Контрольные сдвиги ----------------
+            f.write(sub + "\n")
+            f.write("8. КОНТРОЛЬНЫЕ СДВИГИ — СРАВНЕНИЕ СКОРОСТЕЙ\n")
+            f.write(sub + "\n")
+            if len(a_t) >= 5 and len(gps_t) >= 3:
+                ctrl = [-60, -45, -30, -20, -15, -10, -7, -5, -3, -2,
+                        -1, 0, 1, 2, 3, 5, 7, 10, 15, 20, 30, 45, 60]
+                f.write(HDR + "\n")
+                f.write(DASH + "\n")
+                for lag in ctrl:
+                    st = _corr_stats_at_lag(a_t, a_v, gps_t, gps_v,
+                                            float(lag))
+                    if st is None:
+                        f.write(f"  {float(lag):+8.2f}  "
+                                + f"{'—':>9s}  {'—':>5s}  "
+                                + f"{'—':>4s}  {'—':>5s}  {'—':>5s}  "
+                                + f"{'—':>17s}  "
+                                + f"{'—':>7s}  {'—':>7s}  "
+                                + f"{'—':>7s}  {'—':>7s}  {'—':>7s}  "
+                                + f"{'—':>6s}  {'—':>7s}  "
+                                + "  (нет данных)\n")
+                    else:
+                        f.write(row_fmt(st) + "\n")
+            else:
+                f.write("  Недостаточно точек.\n")
+            f.write("\n")
+
+            # ---------------- 9. Парные данные ----------------
+            f.write(sub + "\n")
+            f.write("9. ПАРНЫЕ ДАННЫЕ НА ЛУЧШЕМ СДВИГЕ\n")
+            f.write(sub + "\n")
+            if best5 is not None:
+                f.write(f"  Лучший сдвиг: lag={best5['lag']:+.4f}с, "
+                        f"corr={best5['corr']:+.6f}, n={best5['n']}\n\n")
+                pairs = _paired_samples_at_lag(
+                    a_t, a_v, gps_t, gps_v, best5['lag'],
+                    max_points=200)
+                f.write(f"  {'#':>5}  {'t_аудио,с':>12}  "
+                        f"{'Va,км/ч':>10}  {'Vg,км/ч':>10}  "
+                        f"{'Δ=Vg-Va':>10}\n")
+                f.write("  " + "-" * 56 + "\n")
+                for i, (t, va, vg) in enumerate(pairs):
+                    f.write(f"  {i:>5d}  {t:12.4f}  "
+                            f"{va:10.3f}  {vg:10.3f}  "
+                            f"{vg - va:+10.3f}\n")
+            else:
+                f.write("  Лучший сдвиг не определён.\n")
+            f.write("\n")
+
+            # ---------------- 10. Вердикт ----------------
+            f.write(sub + "\n")
+            f.write("10. ВЕРДИКТ\n")
+            f.write(sub + "\n")
+            best_st = None
+            if stats_5:
+                best_st = max(stats_5, key=lambda r: abs(r['corr']))
+            for v in _diag_verdict(stats_5, best_st):
+                f.write("  " + v + "\n")
+            f.write("\n")
+
+            f.write(sep + "\n")
+            f.write("КОНЕЦ ОТЧЁТА\n")
+            f.write(f"Версия: {VERSION}\n")
+            f.write(f"CSV: {os.path.basename(csv_path)}\n")
+            f.write(sep + "\n")
+
+        return log_path
+
+    except Exception as e:
+        print(f"  GPS-diag: ошибка записи лога: {e}",
+              file=sys.stderr)
+        try:
+            import traceback
+            traceback.print_exc()
+        except Exception:
+            pass
+        return None
+
+
 class AudioSpeedAnalyzer:
 
     PHASE_TIME = 'time'
@@ -1478,8 +2227,10 @@ class AudioSpeedAnalyzer:
             if self.gps_points:
                 gps_t_arr_r = [p[0] for p in self.gps_points]
                 gps_v_arr_r = [p[1] for p in self.gps_points]
-                t_start_gps_r = f_start / fps + self.gps_lag
-                t_end_gps_r = f_end / fps + self.gps_lag
+                # v0.55.2: gps_t ∈ [a0-lag, a1-lag]
+                # (точки, попавшие в окно ПОСЛЕ сдвига)
+                t_start_gps_r = f_start / fps - self.gps_lag
+                t_end_gps_r = f_end / fps - self.gps_lag
                 gps_in_win_r, gps_before_r, gps_after_r = find_gps_window_points(
                     self.gps_points, t_start_gps_r, t_end_gps_r)
                 if not gps_in_win_r and len(gps_t_arr_r) >= 2:
@@ -1527,6 +2278,124 @@ class AudioSpeedAnalyzer:
                     f.write(f"  {i+1}. {p['name']}\n")
                     f.write(f"     Размер: {p['size']} байт   "
                             f"MD5: {p['md5']}   Дата: {p['date']}\n")
+
+    def _effective_lag(self):
+        """Эффективный лаг GPS.
+
+        Возвращает gps_lag_override из конфига, если он задан;
+        иначе — self.gps_lag (результат корреляции либо значение
+        из конфига, прочитанное в __init__).
+        """
+        _override = self.cfg.get('gps_lag_override')
+        if _override is not None:
+            try:
+                _v = float(_override)
+                # DEBUG: [GPS-lag-src]
+                print(f"[GPS-lag-src] override={_v:+.4f} (raw={_override!r})",
+                      file=sys.stderr, flush=True)
+                return _v
+            except (ValueError, TypeError):
+                pass
+        _v = float(self.gps_lag)
+        # DEBUG: [GPS-lag-src]
+        print(f"[GPS-lag-src] self.gps_lag={_v:+.4f} "
+              f"(override={_override!r})",
+              file=sys.stderr, flush=True)
+        return _v
+
+    def _gps_k5k4(self):
+        """Коэффициенты пересчёта GPS-скорости в частоту H5/H4.
+
+        v0.55.8: калибровка по СРЕДНЕМУ реальному треку (tube_h5_centers /
+        tube_h4_centers), а не по эталонным self.h5/self.h4. Если среднее
+        положение пика в окне отличается от эталона (пик "плывёт"),
+        GPS-кривая в среднем не совпадает с реальным треком, и видимый
+        отрыв на 1 км/ч получается разным для H5 и H4.
+
+        Возвращает (k5, k4).
+        """
+        # fallback — старая формула (если треки ещё не посчитаны)
+        try:
+            V_ref = self._calc_speed(self.h5, self.h4)[3]
+        except Exception:
+            V_ref = 0.0
+        if V_ref > 1e-9:
+            k5 = self.h5 / V_ref
+            k4 = self.h4 / V_ref
+        else:
+            k5, k4 = 0.0, 0.0
+
+        # v0.55.9: калибровка по среднему реальному треку, но
+        # относительно средней АУДИО-скорости, а не GPS-скорости.
+        #
+        # При gps_v = gps_v_mean кривая окажется НИЖЕ реального трека
+        # на dV×k, где dV = audio_v_mean - gps_v_mean. Именно этот
+        # отрыв и нужно показывать. Оба отрыва (H5 и H4) в единицах
+        # км/ч будут одинаковы — dV.
+        if (len(self.tube_h5_centers) > 0
+                and len(self.tube_h4_centers) > 0
+                and len(self.gps_points) > 0):
+            audio_v = []
+            for h5c, h4c in zip(self.tube_h5_centers,
+                                self.tube_h4_centers):
+                try:
+                    _, _, _, vv = self._calc_speed(h5c, h4c)
+                except Exception:
+                    vv = 0.0
+                audio_v.append(vv)
+            if audio_v:
+                audio_v_mean = float(np.mean(audio_v))
+                if audio_v_mean > 1e-9:
+                    h5m = float(np.mean(self.tube_h5_centers))
+                    h4m = float(np.mean(self.tube_h4_centers))
+                    k5 = h5m / audio_v_mean
+                    k4 = h4m / audio_v_mean
+
+        # DEBUG: [GPS-k5k4]
+        print(f"[GPS-k5k4] k5={k5:.5f} k4={k4:.5f}",
+              file=sys.stderr, flush=True)
+        return k5, k4
+
+    def _gps_shifted_arrays(self):
+        """Полный массив GPS со сдвигом shifted = gps_t + lag.
+
+        Возвращаются ВСЕ GPS-точки, включая те, что до сдвига были
+        за пределами текущего окна анализа: после сдвига они могут
+        попасть в это окно и должны участвовать в построении
+        графика GPS.
+
+        Возвращает (frames, speeds_sm, dt_med, lag_used).
+        При отсутствии GPS — (None, None, 1.0, 0.0).
+        """
+        if not self.gps_points or len(self.gps_points) < 2:
+            return None, None, 1.0, 0.0
+
+        fps = float(self.cfg['target_fps'])
+        lag_used = self._effective_lag()
+
+        gps_t = np.array([p[0] for p in self.gps_points], dtype=float)
+        gps_v = np.array([p[1] for p in self.gps_points], dtype=float)
+
+        if len(gps_t) >= 2:
+            dt_med = float(np.median(np.diff(gps_t)))
+        else:
+            dt_med = 1.0
+        if dt_med <= 0:
+            dt_med = 1.0
+
+        smooth_sec = float(self.cfg.get('gps_smooth_sec', 2.0))
+        gps_v_sm = _smooth_series(gps_v, smooth_sec, dt_med)
+
+        gps_frames = (gps_t + lag_used) * fps
+
+        # DEBUG: [GPS-shift]
+        print(f"[GPS-shift] lag_used={lag_used:+.4f}s, fps={fps}, "
+              f"n_pts={len(gps_t)}, "
+              f"gps_t[0]={gps_t[0]:+.3f}s -> frame {gps_frames[0]:.1f}, "
+              f"gps_t[-1]={gps_t[-1]:+.3f}s -> frame {gps_frames[-1]:.1f}",
+              file=sys.stderr, flush=True)
+
+        return gps_frames, gps_v_sm, dt_med, lag_used
 
     def _save_window_geometry(self):
         try:
@@ -2196,34 +3065,73 @@ class AudioSpeedAnalyzer:
             self.fig.canvas.draw_idle()
             return
 
-        k5 = self.h5 / V_ref
-        k4 = self.h4 / V_ref
+        # v0.55.8: k5/k4 теперь считаются ПОСЛЕ _gps_shifted_arrays,
+        # см. вызов _gps_k5k4() ниже.
 
-        fps = self.cfg['target_fps']
-        gps_t = np.array([p[0] for p in self.gps_points], dtype=float)
-        gps_v = np.array([p[1] for p in self.gps_points], dtype=float)
+        # v0.55.3: единый источник сдвинутых GPS-данных.
+        # Возвращаются ВСЕ GPS-точки со сдвигом shifted = gps_t + lag —
+        # включая те, что до сдвига лежали за пределами выбранного
+        # диапазона анализа. После сдвига они попадают в этот диапазон
+        # и должны участвовать в построении графика GPS.
+        gps_frames, gps_v_sm, _dt_med, _lag_used = \
+            self._gps_shifted_arrays()
+        if gps_frames is None or len(gps_frames) < 2:
+            self.fig.canvas.draw_idle()
+            return
 
-        if len(gps_t) >= 2:
-            dt_med = float(np.median(np.diff(gps_t)))
-            if dt_med <= 0:
-                dt_med = 1.0
-        else:
-            dt_med = 1.0
-        win_n = max(1, int(round(2.0 / dt_med)))
-        if win_n > 1 and win_n < len(gps_v):
-            kernel = np.ones(win_n, dtype=float) / win_n
-            gps_v_sm = np.convolve(gps_v, kernel, mode='same')
-        else:
-            gps_v_sm = gps_v
+        # v0.55.8: калибровка по среднему реальному треку.
+        k5, k4 = self._gps_k5k4()
+        if k5 <= 1e-9 or k4 <= 1e-9:
+            # fallback — эталонная калибровка
+            k5 = self.h5 / V_ref if V_ref > 1e-9 else 0.0
+            k4 = self.h4 / V_ref if V_ref > 1e-9 else 0.0
 
-        lag_used = self.gps_lag
-        _override = self.cfg.get('gps_lag_override')
-        if _override is not None:
-            try:
-                lag_used = float(_override)
-            except (ValueError, TypeError):
-                pass
-        gps_frames = (gps_t - lag_used) * fps
+        # DEBUG: [GPS-overlay]
+        print(f"[GPS-overlay] lag={_lag_used:+.4f}s, "
+              f"h5={'ON' if self.speed_overlay_h5 else 'off'}, "
+              f"h4={'ON' if self.speed_overlay_h4 else 'off'}, "
+              f"frames=[{gps_frames[0]:.1f}..{gps_frames[-1]:.1f}], "
+              f"xlim={self.ax_spec.get_xlim()}",
+              file=sys.stderr, flush=True)
+
+        # DEBUG diag: что и куда рисуем
+        _gv_min = float(gps_v_sm.min()) if len(gps_v_sm) else 0.0
+        _gv_max = float(gps_v_sm.max()) if len(gps_v_sm) else 0.0
+        _gv_avg = float(gps_v_sm.mean()) if len(gps_v_sm) else 0.0
+        _h5_track = (float(np.mean(self.tube_h5_centers))
+                     if self.tube_h5_centers else 0.0)
+        _h4_track = (float(np.mean(self.tube_h4_centers))
+                     if self.tube_h4_centers else 0.0)
+        _h5m = (float(np.mean(self.tube_h5_centers))
+                if self.tube_h5_centers else self.h5)
+        _h4m = (float(np.mean(self.tube_h4_centers))
+                if self.tube_h4_centers else self.h4)
+        _gvm = (float(np.mean([p[1] for p in self.gps_points]))
+                if self.gps_points else 0.0)
+        print(f"[GPS-curves] h5={self.h5:.3f} h4={self.h4:.3f} "
+              f"V_ref={V_ref:.3f} k5={k5:.4f} k4={k4:.4f} "
+              f"| h5_track_mean={_h5m:.1f} h4_track_mean={_h4m:.1f} "
+              f"gps_v_mean={_gvm:.2f}",
+              file=sys.stderr, flush=True)
+        print(f"[GPS-curves] gps_v_sm: min={_gv_min:.2f} "
+              f"avg={_gv_avg:.2f} max={_gv_max:.2f} (км/ч)",
+              file=sys.stderr, flush=True)
+        print(f"[GPS-curves] H5_curve Y: "
+              f"{_gv_min * k5:.1f}..{_gv_max * k5:.1f}  "
+              f"(реальный трек H5 avg={_h5_track:.1f})",
+              file=sys.stderr, flush=True)
+        print(f"[GPS-curves] H4_curve Y: "
+              f"{_gv_min * k4:.1f}..{_gv_max * k4:.1f}  "
+              f"(реальный трек H4 avg={_h4_track:.1f})",
+              file=sys.stderr, flush=True)
+        _gap5_hz = _h5_track - _gv_avg * k5
+        _gap4_hz = _h4_track - _gv_avg * k4
+        print(f"[GPS-curves] ОТРЫВ при gps_v_avg: "
+              f"H5={_gap5_hz:+.2f} Гц "
+              f"({_gap5_hz / k5:+.3f} км/ч), "
+              f"H4={_gap4_hz:+.2f} Гц "
+              f"({_gap4_hz / k4:+.3f} км/ч)",
+              file=sys.stderr, flush=True)
 
         if self.speed_overlay_h5:
             h5_curve = gps_v_sm * k5
@@ -2275,22 +3183,19 @@ class AudioSpeedAnalyzer:
         if dt_med <= 0:
             dt_med = 1.0
 
-        win_n = max(1, int(round(2.0 / dt_med)))
-        if win_n > 1 and win_n < len(gps_v):
-            kernel = np.ones(win_n, dtype=float) / win_n
-            gps_v_sm = np.convolve(gps_v, kernel, mode='same')
-        else:
-            gps_v_sm = gps_v
+        # v0.55.3: сглаживание через _smooth_series() с параметром
+        # gps_smooth_sec из конфига (было hardcoded 2.0 с).
+        smooth_sec = float(self.cfg.get('gps_smooth_sec', 2.0))
+        gps_v_sm = _smooth_series(gps_v, smooth_sec, dt_med)
 
         fps = self.cfg['target_fps']
-        lag_used = self.gps_lag
-        _override = self.cfg.get('gps_lag_override')
-        if _override is not None:
-            try:
-                lag_used = float(_override)
-            except (ValueError, TypeError):
-                pass
-        gps_frames = (gps_t - lag_used) * fps
+        lag_used = self._effective_lag()
+        # v0.55.3: shifted = gps_t + lag (см. find_gps_lag).
+        # Все GPS-точки сдвигаются одинаково — включая те, что до
+        # сдвига были за пределами видимого окна. После сдвига они
+        # могут попасть в окно и должны участвовать в построении
+        # подписей/экстремумов/графика.
+        gps_frames = (gps_t + lag_used) * fps
 
         vis = (gps_frames >= x0_view) & (gps_frames <= x1_view)
         n_vis = int(vis.sum())
@@ -2385,8 +3290,11 @@ class AudioSpeedAnalyzer:
                 V_ref = 0.0
 
             if V_ref > 1.0:
-                k5 = self.h5 / V_ref
-                k4 = self.h4 / V_ref
+                # v0.55.8: единая калибровка, что и в _draw_speed_overlay.
+                k5, k4 = self._gps_k5k4()
+                if k5 <= 1e-9 or k4 <= 1e-9:
+                    k5 = self.h5 / V_ref
+                    k4 = self.h4 / V_ref
 
                 gf_vis, gv_vis, dt_med = self._gps_view_samples(
                     x0_view, x1_view)
@@ -2617,8 +3525,11 @@ class AudioSpeedAnalyzer:
                 V_ref = 0.0
 
             if V_ref > 1.0:
-                k5 = self.h5 / V_ref
-                k4 = self.h4 / V_ref
+                # v0.55.8: единая калибровка, что и в _draw_speed_overlay.
+                k5, k4 = self._gps_k5k4()
+                if k5 <= 1e-9 or k4 <= 1e-9:
+                    k5 = self.h5 / V_ref
+                    k4 = self.h4 / V_ref
 
                 gf_vis, gv_vis, _ = self._gps_view_samples(
                     x0_view, x1_view)
@@ -3799,8 +4710,26 @@ class AudioSpeedAnalyzer:
                 audio_times_full = []
                 audio_speeds_full = []
                 try:
+                    # v0.54.0: строим аудио-сигнал только
+                    # внутри окна анализа [f_start, f_end],
+                    # а не по всему файлу.
                     step_check = 3
-                    for step_i_check in range(0, self.n_frames, step_check):
+                    # v0.55.0: обрезаем края FFT.
+                    edge_frames = 0
+                    if self.cfg.get('gps_trim_fft_edges', True):
+                        hop_l = max(1, int(self.sr / fps))
+                        edge_frames = ((self.cfg['fft_size']
+                                        + hop_l - 1) // hop_l)
+                        if f_end - f_start <= 4 * edge_frames:
+                            edge_frames = 0
+                    f_start_corr = f_start + edge_frames
+                    f_end_corr = f_end - edge_frames
+                    if f_end_corr <= f_start_corr:
+                        f_start_corr = f_start
+                        f_end_corr = f_end
+                    for step_i_check in range(f_start_corr,
+                                              f_end_corr,
+                                              step_check):
                         if step_i_check >= self.n_frames:
                             break
                         col = self.S_db[:, step_i_check]
@@ -3812,22 +4741,34 @@ class AudioSpeedAnalyzer:
                         audio_times_full.append(step_i_check / fps)
                         audio_speeds_full.append(v_tmp)
                     if len(audio_times_full) >= 10:
-                        smooth_win = max(3, int(1.0 / (step_check / fps)))
+                        # v0.55.0: единое сглаживание обоих сигналов.
+                        smooth_sec = float(
+                            self.cfg.get('gps_smooth_sec', 2.0))
                         arr_v = np.array(audio_speeds_full, dtype=float)
                         arr_t = np.array(audio_times_full, dtype=float)
-                        if len(arr_v) > smooth_win:
-                            kernel = np.ones(smooth_win) / smooth_win
-                            arr_v_smooth = np.convolve(arr_v, kernel,
-                                                       mode='same')
+                        dt_a_nominal = step_check / fps
+                        arr_v_sm = _smooth_series(
+                            arr_v, smooth_sec, dt_a_nominal)
+                        gps_t_np = np.array(gps_times, dtype=float)
+                        gps_v_np = np.array(gps_speeds, dtype=float)
+                        if len(gps_t_np) >= 2:
+                            dt_g_nom = float(np.median(
+                                np.diff(gps_t_np)))
                         else:
-                            arr_v_smooth = arr_v
-                        ds = max(1, len(arr_v_smooth)
-                                 // max(1, len(gps_times)))
-                        arr_t_ds = arr_t[::ds]
-                        arr_v_ds = arr_v_smooth[::ds]
-                        print(f"  GPS-корреляция: аудио {len(arr_v)} "
-                              f"-> сгл. {len(arr_v_smooth)} "
-                              f"-> даунс. {len(arr_v_ds)} точек")
+                            dt_g_nom = 1.0
+                        gps_v_sm = _smooth_series(
+                            gps_v_np, smooth_sec, dt_g_nom)
+                        gps_points_sm = [
+                            (float(p[0]), float(gps_v_sm[i]),
+                             float(p[2]), float(p[3]), float(p[4]))
+                            for i, p in enumerate(self.gps_points)
+                        ]
+                        print(f"  GPS-корреляция: окно анализа "
+                              f"{t_start_sec:.3f}-{t_end_sec:.3f}с, "
+                              f"шаг аудио {dt_a_nominal:.3f}с, "
+                              f"точек аудио {len(arr_v)}, "
+                              f"сглаживание {smooth_sec:.1f}с "
+                              f"(аудио и GPS)")
                         print(f"  V аудио разброс: "
                               f"{arr_v.min():.2f}..{arr_v.max():.2f} км/ч "
                               f"(std={arr_v.std():.3f})")
@@ -3836,9 +4777,37 @@ class AudioSpeedAnalyzer:
                               f"{max(gps_speeds):.2f} км/ч "
                               f"(std={np.std(gps_speeds):.3f})")
                         self.gps_lag, self.gps_corr, lag_results = \
-                            find_gps_lag(arr_t_ds.tolist(),
-                                         arr_v_ds.tolist(),
-                                         gps_times, gps_speeds)
+                            find_gps_lag(arr_t.tolist(),
+                                         arr_v_sm.tolist(),
+                                         gps_times,
+                                         gps_v_sm.tolist())
+                        # DEBUG: [GPS-lag-set]
+                        print(f"[GPS-lag-set] correlation -> "
+                              f"lag={self.gps_lag:+.4f}s, "
+                              f"corr={self.gps_corr:+.4f}",
+                              file=sys.stderr, flush=True)
+                        try:
+                            _diag_path = write_gps_lag_diag(
+                                filepath=self.filepath,
+                                gps_points=gps_points_sm,
+                                arr_t=arr_t.tolist(),
+                                arr_v=arr_v_sm.tolist(),
+                                best_lag=self.gps_lag,
+                                best_corr=self.gps_corr,
+                                all_results=lag_results,
+                                gps_method=self.gps_method,
+                                analyze_window=(
+                                    f_start / fps,
+                                    f_end / fps,
+                                ),
+                            )
+                            if _diag_path:
+                                print(f"  GPS-diag: "
+                                      f"{_diag_path}")
+                        except Exception as _e:
+                            print(f"  GPS-diag: ошибка "
+                                  f"({_e})",
+                                  file=sys.stderr)
                         if lag_results:
                             print("  Топ-5 лагов по корреляции:")
                             for l, c, nn in lag_results[:5]:
@@ -3980,7 +4949,8 @@ class AudioSpeedAnalyzer:
 
             gps_v_str = ""
             if self.gps_points:
-                t_gps = t_sec + self.gps_lag
+                # v0.55.2: gps_t = t_audio - lag
+                t_gps = t_sec - self.gps_lag
                 gps_t_arr = [p[0] for p in self.gps_points]
                 gps_v_arr = [p[1] for p in self.gps_points]
                 if gps_t_arr[0] <= t_gps <= gps_t_arr[-1]:
@@ -4033,8 +5003,9 @@ class AudioSpeedAnalyzer:
             if self.gps_points:
                 gps_t_arr = [p[0] for p in self.gps_points]
                 gps_v_arr = [p[1] for p in self.gps_points]
-                t_start_gps = t_start_sec + self.gps_lag
-                t_end_gps = t_end_sec + self.gps_lag
+                # v0.55.2: gps_t ∈ [a0-lag, a1-lag]
+                t_start_gps = t_start_sec - self.gps_lag
+                t_end_gps = t_end_sec - self.gps_lag
                 gps_in_win, gps_before, gps_after = find_gps_window_points(
                     self.gps_points, t_start_gps, t_end_gps)
                 if not gps_in_win and len(gps_t_arr) >= 2:
