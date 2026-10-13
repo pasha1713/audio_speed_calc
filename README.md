@@ -24,6 +24,7 @@
 - [Конфигурация](#конфигурация)
 - [Формулы](#формулы)
 - [Скрипты](#скрипты)
+- [Зависимости](#зависимости)
 - [FAQ](#faq)
 - [Лицензия](#лицензия)
 - [Благодарности](#благодарности)
@@ -47,7 +48,8 @@
 ### GPS-сравнение
 - Автоизвлечение GPS-меток из `.ts`-файла:
   - основной способ — `exiftool -ee3`;
-  - резервный — прямой бинарный разбор потока PID `0x0300`.
+  - резервный — прямой бинарный разбор потока PID `0x0300`
+    (встроен в основной скрипт).
 - Автоматический поиск **запаздывания GPS** относительно аудио
   через кросс-корреляцию (по положительной корреляции Пирсона).
 - Ручная переустановка лага через `gps_lag_override` в конфиге.
@@ -265,8 +267,7 @@ python audio_speed_calc.py path/to/DCIM/2026_0602_050735.TS
 
 ```
 audio_speed_calc/
-├── audio_speed_calc.py     # основной скрипт GUI и расчёта
-├── gps_parser.py           # извлечение GPS из .ts (exiftool + бинарный)
+├── audio_speed_calc.py     # основной скрипт: GUI, расчёт, GPS
 ├── sys_fingerprint.py      # MD5, сведения о ПК / диске / скрипте
 ├── requirements.txt        # Python-зависимости
 ├── README.md               # этот файл
@@ -359,10 +360,8 @@ dV = 0.377 · Rk · dn / (Io · Ik)
 
 ### `audio_speed_calc.py`
 
-Основной модуль GUI на `matplotlib` + `tkinter`.
-Класс `AudioSpeedAnalyzer` реализует всё: от извлечения аудио через
-`ffmpeg` до отрисовки спектрограммы, оверлеев, отчётов и работы с
-историей переходов.
+Основной модуль: GUI на `matplotlib` + `tkinter`, весь расчёт скорости,
+работа с GPS и системная диагностика.
 
 Ключевые точки входа:
 
@@ -372,23 +371,14 @@ dV = 0.377 · Rk · dn / (Io · Ik)
 - `_draw_speed_overlay()` / `_draw_speed_labels()` — GPS-оверлей;
 - `write_gps_lag_diag()` — диагностический лог по GPS-лагу.
 
-### `gps_parser.py`
-
-Извлечение GPS из `.ts`:
+Функции работы с GPS (внутри модуля):
 
 - `extract_gps()` — унифицированная точка входа;
-- `parse_ts_gps_exiftool()` — exiftool `-ee3 -n`;
+- `parse_gps_exiftool()` — exiftool `-ee3 -n`;
 - `parse_ts_gps()` — прямой бинарный разбор PID `0x0300`;
-- `find_gps_lag()` — кросс-корреляция;
-- `gps_to_relative_time()` — перевод в относительные секунды.
-
-Может запускаться как CLI:
-
-```bash
-python gps_parser.py путь/к/файлу.TS [-d]
-```
-
-где `-d` включает деобфускацию координат.
+- `find_gps_lag()` — кросс-корреляция аудио и GPS;
+- `gps_to_relative_time()` — перевод в относительные секунды;
+- `find_gps_window_points()` — выборка GPS-точек в окне анализа.
 
 ### `sys_fingerprint.py`
 
@@ -397,6 +387,41 @@ python gps_parser.py путь/к/файлу.TS [-d]
 - `get_disk_info()` — ФС, метка тома, модель и серийник диска
   (через WinAPI `DeviceIoControl`, `wmic`, PowerShell);
 - `get_script_info()` — размер, mtime, MD5 скрипта.
+
+---
+
+## Зависимости
+
+### Python-пакеты (pip)
+
+| Пакет        | audio_speed_calc.py | sys_fingerprint.py |
+|--------------|:-------------------:|:------------------:|
+| `numpy`      | ✔                   | —                  |
+| `matplotlib` | ✔                   | —                  |
+| `tkinter`    | ✔ (только GUI)      | —                  |
+
+Итого для установки через pip — **два пакета**: `numpy` и `matplotlib`.
+
+### Внешние программы
+
+| Программа    | audio_speed_calc.py | sys_fingerprint.py | Статус        |
+|--------------|:-------------------:|:------------------:|---------------|
+| `ffmpeg`     | ✔                   | —                  | **обязателен**|
+| `ffprobe`    | ✔                   | —                  | **обязателен**|
+| `exiftool`   | ✔ (fallback — бинарный парсер) | —    | опционален    |
+| `wmic`       | —                   | ✔ (Windows)        | опционален    |
+| `powershell` | —                   | ✔ (Windows)        | опционален    |
+| `tkinter`    | ✔                   | —                  | опционален (только для GUI-диалогов) |
+
+### Содержимое `requirements.txt`
+
+```txt
+# audio_speed_calc — Python-зависимости
+# Установка: pip install -r requirements.txt
+
+numpy>=1.20
+matplotlib>=3.4
+```
 
 ---
 
@@ -475,6 +500,18 @@ A: При корреляции аудио-сигнала края FFT-окна �
 включает обрезку краёв на длину одного FFT-окна
 (≈ 0.73 с при 32768 сэмплов и 30 fps). По умолчанию — `true`.
 
+**Q: Как разобрать GPS из `.ts`-файла без запуска GUI.**
+
+A: В основном скрипте есть функции `extract_gps()` и
+`parse_ts_gps()`. Можно вызвать их из Python-REPL:
+
+```python
+from audio_speed_calc import extract_gps, gps_to_relative_time
+pts, method = extract_gps('путь/к/файлу.TS')
+for t, v, lat, lon, brg in gps_to_relative_time(pts):
+    print(f'{t:7.1f}  {v:7.1f}  {lat:9.5f}  {lon:9.5f}  {brg:6.1f}')
+```
+
 ---
 
 ## Лицензия
@@ -487,7 +524,8 @@ MIT. См. файл [LICENSE](LICENSE).
 
 - **Sergei Franco** — оригинальный Novatek GPS extractor
   ([gist](https://gist.github.com/UndeRus/01ef8b436353f579760a60b0dea96253)),
-  на котором основан бинарный парсер `gps_parser.py`.
+  на котором основан бинарный парсер GPS, встроенный
+  в `audio_speed_calc.py`.
 - Разработчикам **exiftool** — за поддержку `-ee3` для встроенных
   GPS-меток в `.ts`.
 - Сообществу **matplotlib** — за гибкий GUI-тулкит.
