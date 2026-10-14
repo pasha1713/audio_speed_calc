@@ -1,0 +1,6986 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+audio_speed_calc.py v0.53
+Расчёт скорости по звуку из .ts-фрагментов.
+
+Изменения 0.53:
+  - NEW: кнопка «Подп.V» — подписи пиков скорости на всех включённых
+    источниках (GPS-H5, GPS-H4, реальные треки H5/H4). Каждый источник
+    своим цветом.
+  - NEW: GPS→H5 / GPS→H4 калибруются через V_ref выбранных H5/H4.
+  - NEW: цвета кривых GPS-скорости в палитре inferno.
+  - NEW: gps_lag_override читается из конфига в __init__.
+  - v0.53.1: Vmax/Vmin всегда в видимом окне (даже без локальных пиков).
+  - v0.53.1: в статусе V→Vср, добавлен Vgps ср, убран Rk.
+  - v0.53.1: график придвинут к среднему столбцу кнопок.
+  - v0.53.2: при переходах по истории (Назад/Вперёд/Удалить поз.)
+    результаты пересчитываются для нового диапазона. Защита от
+    пустого analyze_dur и от исключений при пересчёте.
+"""
+
+import os
+import sys
+import json
+import subprocess
+import argparse
+import math
+import struct
+import datetime
+import shutil
+import numpy as np
+import matplotlib
+import matplotlib.pyplot as plt
+import matplotlib.patheffects as pe
+from matplotlib.widgets import Slider, Button, SpanSelector, TextBox
+
+from sys_fingerprint import (
+    md5_file, file_mtime, get_computer_info, get_disk_info, get_script_info
+)
+
+if sys.platform == 'win32':
+    try:
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
+
+VERSION = "0.57.8"
+CONFIG_FILE = "audio_speed_config.json"
+HISTORY_LOG_FILE = "history_log.txt"
+
+
+CHANGELOG = {
+    "0.57.8": [
+        "",
+        "v0.57.8",
+        "-" * 64,
+        "",
+        "Коэффициент смятия шины вынесен в конфиг",
+        "",
+        "* Rk = c * P * H / 100000 + 0.0127 * R,",
+        "  где c — новый параметр tire_deflection_coeff.",
+        "",
+        "* Дефолт: 0.84 (радиальная легковая, 235/70 R16).",
+        "  Классическое 0.85 остаётся доступно правкой JSON.",
+        "",
+        "* Меняется в <base>_config.json:",
+        '    "tire_deflection_coeff": 0.84',
+        "",
+        "* Влияет на все V в отчёте пропорционально c.",
+        "  При переходе 0.85 -> 0.84:",
+        "  V уменьшается на 0.466 %.",
+        "",
+        "* Подбор под GPS:",
+        "  если V_аудио систематически выше V_GPS на k%,",
+        "  c_new = c_old * (1 - k/100).",
+        "",
+    ],
+    "0.57.7": [
+        "",
+        "v0.57.7",
+        "-" * 64,
+        "",
+        "ВОССТАНОВЛЕНА history-калибровка dGPS",
+        "",
+        "* _try_use_calibrated_gps_lag снова работает:",
+        "  dGPS считается по САМОМУ ДЛИННОМУ интервалу",
+        "  из истории + текущего окна, кэшируется и",
+        "  применяется к более коротким окнам.",
+        "",
+        "* Отключено было в v0.57.0 как временная мера:",
+        "  короткое окно 5с получало dGPS=+7.7с из",
+        "  51-секундной калибровки — формы кривых",
+        "  не совпадали из-за фиксированной привязки",
+        "  гармоник в корреляционном сигнале.",
+        "",
+        "* К v0.57.7 причина устранена:",
+        "  - v0.57.5 — rolling-трекинг в корреляционном",
+        "    сигнале (сигнал идентичен таблице шагов);",
+        "  - v0.57.6 — критерий поиска лага: min RMSE.",
+        "",
+        "* Кэш инвалидируется при смене H5/H4.",
+        "  В статусной строке применение калибровки",
+        "  по-прежнему помечается меткой (H).",
+        "",
+        "* Отключить новое поведение можно конфигом:",
+        "  gps_lag_from_history = false.",
+        "",
+    ],
+    "0.57.6": [
+        "",
+        "v0.57.6",
+        "-" * 64,
+        "",
+        "СМЕНА КРИТЕРИЯ поиска dGPS",
+        "",
+        "* find_gps_lag теперь ищет МИНИМУМ RMSE(|Vg - Va|),",
+        "  а не максимум корреляции Пирсона.",
+        "",
+        "* Причина: после v0.57.5 (rolling-трекинг гармоник)",
+        "  корреляционная кривая в окне ±5с стала плоской —",
+        "  множество лагов дают corr > 0.99 (плато).",
+        "  RMSE даёт более резкий минимум и лучше",
+        "  локализует истинный сдвиг.",
+        "",
+        "* При равенстве RMSE (в пределах 1e-6) —",
+        "  tie-breaker по максимуму корреляции.",
+        "",
+        "* Параболическая субшаговая локализация теперь",
+        "  уточняет минимум RMSE вместо максимума corr.",
+        "",
+        "* Формат возвращаемого results:",
+        "  (lag, corr, rmse, n_pairs) — 4 элемента.",
+        "  Сортировка: по возрастанию RMSE.",
+        "",
+    ],
+    "0.57.4": [
+        "",
+        "v0.57.4",
+        "-" * 64,
+        "",
+        "КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ критерия поиска dGPS",
+        "",
+        "* Возвращён максимум КОРРЕЛЯЦИИ ПИРСОНА (был в v0.56.x,",
+        "  ошибочно заменён на mean(|Va-Vg|) в v0.57.0).",
+        "",
+        "* Причина: mean(|Va-Vg|) учитывает разницу средних",
+        "  сигналов и разницу их амплитуд. При std(Va)=0.3 и",
+        "  std(Vg)=0.9 алгоритм выбирал сдвиг, где GPS ближе",
+        "  по среднему, а не там, где совпадают ФОРМЫ кривых.",
+        "",
+        "* Корреляция Пирсона инвариантна к сдвигу среднего и",
+        "  масштабу амплитуд, ищет именно совпадение формы.",
+        "  Совпадает с результатом диагностического лога",
+        "  _scan_lags (секция 5).",
+        "",
+        "* NEW: субшаговая локализация пика параболой через три",
+        "  точки вокруг максимума. При плоском пике (плато из",
+        "  3-5 точек) одиночный argmax даёт неустойчивый ответ",
+        "  (-1.5 или -1.4с), а парабола — середину плато (-1.45).",
+        "",
+    ],
+    "0.57.2": [
+        "",
+        "v0.57.2",
+        "-" * 64,
+        "",
+        "КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ сглаживания",
+        "",
+        "* _smooth_series использовала np.convolve(..., mode='same'),",
+        "  которая на краях дополняет массив НУЛЯМИ. Результат:",
+        "  первые и последние win/2 точек занижены в ~2 раза.",
+        "  Это создавало фиктивный «разгон» в начале окна и",
+        "  «торможение» в конце, ломало поиск dGPS.",
+        "",
+        "* Заменено на edge-padding: крайние значения копируются",
+        "  за пределы массива, свёртка считается в режиме 'valid'.",
+        "  Края сигнала теперь корректны.",
+        "",
+        "* Симптом до исправления: V_аудио падала до 52 км/ч в",
+        "  первых ~10 точках окна при истинной скорости 105 км/ч.",
+        "",
+    ],
+    "0.57.0": [
+        "",
+        "v0.57.0",
+        "-" * 64,
+        "",
+        "ПЕРЕПИСАН поиск dGPS — просто и предсказуемо",
+        "",
+        "* find_gps_lag: минимум СУММЫ |V_audio(t) - V_gps(t-lag)|",
+        "  по всем парным точкам. Шаг 0.1с, диапазон ±5с.",
+        "  Никакой корреляции Пирсона, никакого abs(corr),",
+        "  никакого адаптивного расширения.",
+        "",
+        "* _try_use_calibrated_gps_lag отключён (return False).",
+        "  Причина: короткое окно 5с получало dGPS=+7.7с из",
+        "  51-секундной калибровки. Теперь каждое окно считает",
+        "  dGPS строго по себе.",
+        "",
+        "* В консоли выводится топ-5 сдвигов по минимальной",
+        "  средней ошибке. Меньше ошибка — правее в списке.",
+        "",
+    ],
+    "0.56.8": [
+        "",
+        "v0.56.8",
+        "-" * 64,
+        "",
+        "ИСПРАВЛЕНО: поиск dGPS",
+        "",
+        "* Адаптивное расширение окна поиска:",
+        "  старт ±5с, если пик положительной корреляции",
+        "  слабый (< 0.3) — автоматический повтор в ±60с.",
+        "  Истинный лаг (например +7.7с) больше не теряется.",
+        "",
+        "* Убран fallback v0.56.7 (abs(corr) при",
+        "  best_corr < 0). Он цеплял спурийные антипики",
+        "  и возвращал ошибочный лаг (+2.9с вместо +7.7с).",
+        "  Теперь при полном отсутствии положительного",
+        "  пика возвращается lag = 0 с предупреждением.",
+        "",
+        "* Порог min_pairs = 15 отсекает вырожденные пики",
+        "  на 5–10 парных точках с нулевым разбросом GPS.",
+        "",
+    ],
+    "0.56.5": [
+        "",
+        "v0.56.5",
+        "-" * 64,
+        "",
+        "NEW: GPS из соседних файлов",
+        "",
+        "* При нехватке GPS-точек (РЭБ, помехи) — добор",
+          "  из N-1 и N+1 .ts той же серии.",
+        "* Поддержка имён 2K и 4K (суффикс A).",
+        "* Валидация точек: (0,0), эпоха вне 2020-2030,",
+          "  ускорение > предела, скорость > 300 км/ч.",
+        "* Зоны недоверия: скачки ускорения ±радиус.",
+        "* Порог корреляции: минимум doubt_min_points.",
+        "* Дедупликация по epoch на стыках файлов.",
+        "* Параметр accel_0_100_sec в prompt_car_params.",
+        "",
+    ],
+    "0.56.4": [
+        "",
+        "v0.56.4",
+        "-" * 64,
+        "",
+        "NEW: совместимость с PyInstaller (.exe)",
+        "",
+        "* _find_exec() учитывает sys.frozen и sys._MEIPASS;",
+        "  ищет бинарники рядом с .exe, в _internal/bin,",
+        "  в _MEIPASS/bin, рядом со скриптом, в PATH.",
+        "",
+        "* add_png_footer(): в .exe штампуем сам .exe,",
+        "  а не временный .py из _MEIPASS.",
+        "",
+        "* _collect_sysinfo_lines(): get_script_info()",
+        "  получает путь к .exe в замороженном режиме.",
+        "",
+    ],
+    "0.56.3": [
+        "",
+        "v0.56.3",
+        "-" * 64,
+        "",
+        "NEW: Apply-модель истории",
+        "",
+        "* История больше не пополняется автоматически на",
+        "  каждое действие. Все правки копятся в памяти, а в",
+        "  историю попадают ОДНОЙ записью по команде.",
+        "",
+        "* Кнопка «Применить» (бывшая «Сохр.поз.») + клавиша A.",
+        "  Фиксирует: оси X/Y, диапазон анализа, H5/H4,",
+        "  алгоритм, Шаг, Цвет, Пик, Ширину, режим оверлея.",
+        "",
+        "* Кнопки «Назад» / «Вперёд» при наличии неприменённых",
+        "  правок спрашивают: Да (применить) / Нет (потерять) /",
+        "  Отмена.",
+        "",
+        "* В статусной строке маркер * рядом с «Ист: N/M» —",
+        "  признак неприменённых правок.",
+        "",
+        "ИСПРАВЛЕНО",
+        "",
+        "* _reset_zoom больше НЕ стирает историю. «Сброс» и",
+        "  Shift+Z — обычные изменения состояния, фиксируются",
+        "  через Apply.",
+        "",
+        "* Кнопки «Сб.время», «Сб.част», «Сброс» — убраны",
+        "  авто-push и логика _last_reset_action.",
+        "",
+        "* При старте, если история пуста — создаётся стартовая",
+        "  запись, чтобы кнопка Назад сразу работала.",
+        "",
+    ],
+    "0.56.2": [
+        "",
+        "v0.56.2",
+        "-" * 64,
+        "",
+        "ИСПРАВЛЕНО",
+        "",
+        "* _step_back при pointer==0 больше НЕ вызывает",
+        "  _reset_zoom — история не стирается при попытке",
+        "  шагнуть назад с первой позиции.",
+        "",
+        "* _btn_delete_pos: pointer остаётся на индексе",
+        "  удалённой записи (т.е. на следующей по списку),",
+        "  а не уезжает на предыдущую.",
+        "",
+        "* _btn_save_pos: всегда создаёт новую запись",
+        "  (force=True), даже если состояние совпадает",
+        "  с текущей. Раньше молча ничего не сохранялось.",
+        "",
+        "* _push_history: сравнение совпадения идёт с",
+        "  ТЕКУЩЕЙ записью (по zoom_pointer), а не с",
+        "  последней в списке. Ложных срабатываний нет.",
+        "",
+        "* _step_forward: обновляет статусную строку.",
+        "",
+    ],
+    "0.56.1": [
+        "",
+        "v0.56.1",
+        "-" * 64,
+        "",
+        "NEW",
+        "",
+        "* Автоматическая калибровка dGPS по САМОМУ ДЛИННОМУ",
+        "  интервалу из истории (view_history + текущее окно).",
+        "  Логика:",
+        "    1) находим запись с максимальным analyze_dur;",
+        "    2) считаем корреляцию аудио<->GPS именно на ней;",
+        "    3) кэшируем результат и применяем ко всем",
+        "       остальным (более коротким) интервалам.",
+        "",
+        "* Кэш инвалидируется при смене H5/H4.",
+        "",
+        "* Новая опция конфига: gps_lag_from_history (bool).",
+        "  false — старое поведение (считать по текущему окну).",
+        "",
+        "* В статусной строке dgps помечается как (H) при",
+        "  использовании калиброванного значения.",
+        "",
+    ],
+    "0.56.0": [
+        "",
+        "v0.56.0",
+        "-" * 64,
+        "",
+        "ИСПРАВЛЕНО",
+        "",
+        "* Убрано автосохранение конфига при закрытии окна.",
+        "  Кнопка «Выход», клавиша Q и крестик окна больше",
+        "  НЕ пишут JSON на диск. Только клавиша S.",
+        "",
+        "* Убрано автосохранение конфига после PNG.",
+        "",
+        "* Убрано автосохранение конфига после ввода",
+        "  параметров авто в консоли.",
+        "",
+        "* Убрана автозапись в history_log.txt при запуске.",
+        "",
+        "NEW",
+        "",
+        "* Кнопка-дискета (floppy disk) в тулбаре перехвачена",
+        "  и вызывает нашу функцию сохранения PNG — то же,",
+        "  что клавиша P: диалог выбора пути, штамп, запись",
+        "  в <base>_speed_report_algoN.txt.",
+        "",
+    ],
+    "0.55.3": [
+        "",
+        "v0.55.3",
+        "-" * 64,
+        "",
+        "ИСПРАВЛЕНО",
+        "",
+        "* Выравнивание GPS-графика по шкале времени аудио:",
+        "  корректно учитываются GPS-точки, которые до сдвига",
+        "  (shifted = gps_t + lag) находились ЗА пределами",
+        "  выбранного диапазона анализа, но после сдвига в него",
+        "  попадают.",
+        "* Единый источник эффективного лага — _effective_lag()",
+        "  (устраняет расхождения между отрисовкой и расчётами).",
+        "* _gps_shifted_arrays() — полный массив GPS со сдвигом;",
+        "  используется для отрисовки графика GPS.",
+        "* Сглаживание сигналов — через _smooth_series() с",
+        "  параметром gps_smooth_sec из конфига",
+        "  (было hardcoded 2.0 с).",
+        "",
+    ],
+    "0.53.7": [
+        "",
+        "v0.53.7",
+        "-" * 64,
+        "",
+        "ИСПРАВЛЕНО",
+        "",
+        "* Диагностический лог GPS-лага: полный"
+        "  отчёт без сокращений.",
+        "* Шаг корреляции в широком поиске: 0.5 -> 0.1 с.",
+        "* Секции 4 и 5 печатают ВСЕ проверенные сдвиги",
+        "  (было: топ-10 и каждая 4-я точка).",
+        "",
+    ],
+    "0.55.2": [
+        "",
+        "v0.55.2",
+        "-" * 64,
+        "",
+        "КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ",
+        "",
+        "* Исправлен знак GPS-лага в 5 местах.",
+        "  Соглашение find_gps_lag: shifted = gps_t + lag.",
+        "* Отрисовка GPS-кривой: (gps_t + lag) * fps",
+        "  (было (gps_t - lag) * fps).",
+        "* Поиск GPS-точек в окне: gps_t ∈ [a0-lag, a1-lag]",
+        "  (было [a0+lag, a1+lag]).",
+        "* GPS-скорость в момент аудио t: gps_t = t - lag",
+        "  (было gps_t = t + lag).",
+        "* Следствие: в набор Vgps ср теперь попадают точки,",
+        "  которые были ЗА пределами окна анализа и попали в",
+        "  него только после сдвига (например, стартовая ramp).",
+        "",
+    ],
+    "0.55.1": [
+        "",
+        "v0.55.1",
+        "-" * 64,
+        "",
+        "ИСПРАВЛЕНО",
+        "",
+        "* Корректная глубина обрезки краёв FFT.",
+        "  Было fft_size//(2*hop) = 11 кадров (0.37 с),",
+        "  стало ceil(fft_size/hop) = 22 кадра (0.73 с).",
+        "  Полу-окно не убирает краевой артефакт hanning",
+        "  полностью; целое окно — корректно.",
+        "",
+    ],
+    "0.55.0": [
+        "",
+        "v0.55.0",
+        "-" * 64,
+        "",
+        "КРУПНЫЙ ПАТЧ",
+        "",
+        "* Обрезка краёв FFT (gps_trim_fft_edges).",
+        "* Единое сглаживание обоих сигналов"
+        "  (gps_smooth_sec, дефолт 2.0с).",
+        "* Диагностический лог: колонки n_g, dt_a, dt_g,"
+        "  dmean, StdRt, RMSE; CSV LAG_STATS расширен.",
+        "* Вердикт \"нет динамики\" при std < 1 км/ч.",
+        "",
+    ],
+    "0.54.0": [
+        "",
+        "v0.54.0",
+        "-" * 64,
+        "",
+        "ИСПРАВЛЕНО",
+        "",
+        "* Поиск GPS-лага ведётся по окну анализа"
+        "  (analyze_start / analyze_dur из JSON),"
+        "  а не по всему файлу.",
+        "* В диагностический лог добавлена строка"
+        "  «Окно анализа» с указанием диапазона.",
+        "",
+    ],
+    "0.53.9": [
+        "",
+        "v0.53.9",
+        "-" * 64,
+        "",
+        "ИСПРАВЛЕНО",
+        "",
+        "* Диагностический лог GPS-лага: таблицы"
+        "  сортируются по lag (не по |corr|).",
+        "* В каждой строке видны Va (аудио) и Vg (GPS)",
+        "  min/max/avg/std — что именно сравнивается.",
+        "* Добавлена секция 9 — парные данные на лучшем сдвиге.",
+        "* CSV дополнен секцией LAG_STATS.",
+        "",
+    ],
+    "0.53.8": [
+        "",
+        "v0.53.8",
+        "-" * 64,
+        "",
+        "НОВОЕ",
+        "",
+        "* Диагностический лог без сокращений:",
+        "  все GPS-точки, все аудио-точки,",
+        "  все сдвиги в ±5с и ±60с, сверхширокий ±300с.",
+        "* CSV-экспорт <base_ts>_gps_lag_diag.csv.",
+        "* Секция 10 — дополнительный анализ пиков.",
+        "* Шаг широкого поиска: 0.5 -> 0.1 с.",
+        "",
+    ],
+    "0.53.6": [
+        "",
+        "v0.53.6",
+        "-" * 64,
+        "",
+        "NEW",
+        "",
+        "* Диагностический лог GPS-лага:",
+        "  <base_ts>_gps_lag_diag.log рядом с видео.",
+        "* 7 секций: GPS-точки, аудио, перекрытие,",
+        "  результаты ±5с, расширенный ±60с,",
+        "  контрольные сдвиги, вердикт.",
+        "",
+    ],
+    "0.53.5": [
+        "",
+        "v0.53.5",
+        "-" * 64,
+        "",
+        "ИСПРАВЛЕНО",
+        "",
+        "* Подписи GPS-скорости (Подп.V) и маркеры Vmax/Vmin",
+        "  больше не пропадают в узких окнах анализа.",
+        "  При < 3 GPS-точках в видимом диапазоне скорость",
+        "  интерполируется на границах окна и в центре.",
+        "  (метод _gps_view_samples)",
+        "",
+    ],
+    "0.53": [
+        "",
+        "v0.53",
+        "-" * 64,
+        "",
+        "NEW",
+        "",
+        "* Кнопка «Подп.V» — залипающий тумблер в среднем столбце.",
+        "  Включает подписи пиков скорости на всех активных источниках.",
+        "  Повторное нажатие выключает.",
+        "",
+        "* Цвета подписей:",
+        "    маджента — GPS-H5",
+        "    голубой  — GPS-H4",
+        "    жёлтый   — реальный трек H5",
+        "    зелёный  — реальный трек H4",
+        "",
+        "* Кривые GPS→H5 / GPS→H4 калибруются через V_ref",
+        "  выбранных H5/H4 (self.h5 / self.h4).",
+        "",
+        "* Цвета кривых:",
+        "    GPS-H5 — маджента #ff00cc",
+        "    GPS-H4 — голубой  #00ccff",
+        "  Плюс чёрная обводка через path_effects.",
+        "",
+        "* gps_lag_override читается из конфига в __init__.",
+        "",
+        "ДОПОЛНЕНИЯ 0.53.1",
+        "",
+        "* Vmax и Vmin в видимом диапазоне времени показываются",
+        "  всегда — маркеры с подписями, даже если локальных пиков",
+        "  в окне нет.",
+        "* В статусной строке V переименован в Vср;",
+        "  добавлено Vgps ср; Rk убран.",
+        "* Графическая область придвинута к среднему столбцу кнопок.",
+        "",
+        "ИСПРАВЛЕНО 0.53.2",
+        "",
+        "* При переходах по истории (Назад/Вперёд/Удалить поз.)",
+        "  Vср / Vgps ср / Δgps пересчитываются для нового",
+        "  восстановленного диапазона. Пустой analyze_dur (0)",
+        "  больше не приводит к отсутствию расчёта — берётся",
+        "  весь доступный диапазон кадров.",
+        "* _draw_speed_overlay больше не падает, если V_ref <= 1.",
+        "",
+    ],
+    "0.52": [
+        "",
+        "v0.52",
+        "-" * 64,
+        "",
+        "NEW",
+        "",
+        "* Журнал изменений формируется скриптом автоматически.",
+        "* Средний столбец кнопок GPS→H5 / GPS→H4.",
+        "* per-entry хранение настроек слайдеров в view_history.",
+        "* analyze_start/analyze_dur пишутся в JSON.",
+        "",
+        "ИСПРАВЛЕНО",
+        "",
+        "* _sync_fields пишет tb_step как «%.3f».",
+        "* _btn_delete_pos удаляет ТЕКУЩУЮ позицию.",
+        "* _push_history ищет дубликаты по всей истории.",
+        "",
+    ],
+    "0.51": [
+        "",
+        "v0.51",
+        "-" * 64,
+        "",
+        "КРИТИЧЕСКИЕ ИСПРАВЛЕНИЯ",
+        "",
+        "* _sync_fields и все последующие методы возвращены в класс.",
+        "* Единый формат истории зума (dict) + zoom_pointer.",
+        "* ALGO_NAMES вместо self.ALGO_NAMES.",
+        "* Инициализация v_min/dv_min/... перед if all_v.",
+        "* save_config снова вызывается при закрытии, по S и P.",
+        "* _on_span корректно ставит analyze_dur.",
+        "* _reset_zoom/_btn_reset_* сбрасывают zoom_pointer.",
+        "* GPS: корректный UTC вместо time.mktime.",
+        "* GPS exiftool: единицы через GPSSpeedRef.",
+        "* ?/Z ловятся и как shift+/ и shift+z.",
+        "",
+    ],
+}
+
+
+def update_history_log(log_dir=None):
+    """Дописывает запись о текущей VERSION в history_log.txt.
+
+    Если файла нет — создаёт с заголовком.
+    Если запись для текущей VERSION уже есть — ничего не делает.
+    Ошибки записи не валят программу, только печатают в stderr.
+    """
+    if log_dir is None:
+        log_dir = os.path.dirname(os.path.abspath(__file__)) or '.'
+    path = os.path.join(log_dir, HISTORY_LOG_FILE)
+
+    if os.path.exists(path):
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            marker = "v" + VERSION
+            for line in content.splitlines():
+                if line.strip() == marker:
+                    return
+        except Exception:
+            pass
+    else:
+        try:
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write("=" * 64 + "\n")
+                f.write("audio_speed_calc.py — журнал изменений\n")
+                f.write("=" * 64 + "\n")
+        except Exception as e:
+            print(f"Не удалось создать {path}: {e}", file=sys.stderr)
+            return
+
+    lines = CHANGELOG.get(VERSION)
+    if not lines:
+        return
+
+    try:
+        with open(path, 'a', encoding='utf-8') as f:
+            for line in lines:
+                f.write(line + "\n")
+        print(f"Журнал обновлён: {path} (v{VERSION})", file=sys.stderr)
+    except Exception as e:
+        print(f"Не удалось обновить {path}: {e}", file=sys.stderr)
+
+
+DEFAULT_CONFIG = {
+    "freq_min": 20,
+    "freq_max": 600,
+    "harmonic_5_freq": None,
+    "harmonic_4_freq": None,
+    "harmonic_line_width": 3,
+    "color_steps": 10,
+    "time_step": 0.1,
+    "report_duration": 60,
+    "sample_rate": 44100,
+    "fft_size": 32768,
+    "target_fps": 30,
+    "last_png_dir": None,
+    "view_x_start": None,
+    "view_x_end": None,
+    "view_y_start": None,
+    "view_y_end": None,
+    "peak_search_hz": 5.0,
+    # v0.57.9: пороги взаимного расположения подписей скорости.
+    # Доли от видимого диапазона осей X и Y. Больше -> подписей
+    # меньше, но они никогда не наезжают друг на друга.
+    "label_pad_x_frac": 0.10,
+    "label_pad_y_frac": 0.06,
+    "algorithm": 2,
+    "cylinders": 4,
+    "stroke": 2,
+    "tire_width": 235,
+    "tire_profile": 70,
+    "rim_diameter": 16,
+    "final_drive": 4.875,
+    "gear_ratio": 0.802,
+    # v0.57.8: коэффициент смятия профиля шины под нагрузкой.
+    # Rk = tire_deflection_coeff * P * H / 100000 + 0.0127 * R.
+    # Дефолт 0.84 — для радиальной легковой шины в штатном
+    # нагруженном состоянии (235/70 R16).
+    "tire_deflection_coeff": 0.84,
+    "win_x": None,
+    "win_y": None,
+    "win_w": None,
+    "win_h": None,
+    "spec_mode": "time",
+    "view_history": [],
+    "overlay_mode": 0,
+    "gps_lag_override": None,
+    "analyze_start": 0,
+    "analyze_dur": 0,
+    "gps_trim_fft_edges": True,
+    "gps_smooth_sec": 2.0,
+    "gps_lag_from_history": True,
+    # v0.56.5: соседние файлы
+    "neighbor_gps_enabled": True,
+    "neighbor_extend_sec": 30.0,
+    "neighbor_dedup_enabled": True,
+    "neighbor_dedup_k": 3,
+    # v0.56.5: валидация GPS-точек
+    "gps_epoch_min": "2020-01-01",
+    "gps_epoch_max": "2030-01-01",
+    "gps_speed_max_kmh": 300.0,
+    # v0.56.5: зоны недоверия
+    "doubt_zones_enabled": True,
+    "doubt_radius_sec": 1.5,
+    "doubt_min_points": 15,
+    "doubt_accel_safety_factor": 2.0,
+    "doubt_decel_max_g": 0.8,
+    "accel_0_100_sec": 12.0,
+}
+
+
+def add_png_footer(fig, y_pos=0.99):
+    """Штамп в левый верхний угол (v0.56.4).
+
+    В .exe штампуем сам .exe, а не .py из _MEIPASS.
+    """
+    try:
+        if getattr(sys, "frozen", False):
+            script_path = os.path.abspath(sys.executable)
+        else:
+            script_path = os.path.abspath(__file__)
+        script_mtime = datetime.datetime.fromtimestamp(
+            os.path.getmtime(script_path))
+        script_md5 = md5_file(script_path)[:8]
+    except Exception:
+        script_path = 'audio_speed_calc.py'
+        script_mtime = datetime.datetime.now()
+        script_md5 = '--------'
+    now_str = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    script_str = script_mtime.strftime('%Y-%m-%d %H:%M:%S')
+    footer = '%s v%s | MD5: %s | Скрипт от: %s | PNG: %s' % (
+        os.path.basename(script_path), VERSION, script_md5, script_str, now_str)
+    txt = fig.text(0.02, y_pos, footer, ha='left', va='top', fontsize=6,
+                   color='gray', family='monospace',
+                   bbox=dict(boxstyle='round,pad=0.3', facecolor='white',
+                             alpha=0.8, edgecolor='gray', linewidth=0.5))
+    return txt
+
+
+def load_config(path):
+    if os.path.exists(path):
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                cfg = json.load(f)
+            merged = dict(DEFAULT_CONFIG)
+            merged.update(cfg)
+            return merged
+        except Exception as e:
+            print(f"Предупреждение: не удалось загрузить конфиг ({e}), defaults",
+                  file=sys.stderr)
+    return dict(DEFAULT_CONFIG)
+
+
+def save_config(cfg, path):
+    try:
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(cfg, f, indent=2, ensure_ascii=False)
+        print(f"Настройки сохранены: {path}", file=sys.stderr)
+    except Exception as e:
+        print(f"Ошибка сохранения конфига: {e}", file=sys.stderr)
+
+def _find_exec(name):
+    """Поиск ffmpeg/ffprobe/exiftool (v0.56.4).
+
+    Порядок:
+      1) рядом с .exe (frozen);
+      2) в _MEIPASS/bin (frozen);
+      3) рядом с .py (обычный запуск);
+      4) в PATH.
+    """
+    suffix = '.exe' if sys.platform == 'win32' else ''
+    candidates = []
+
+    if getattr(sys, "frozen", False):
+        exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+        candidates.append(os.path.join(exe_dir, name + suffix))
+        candidates.append(os.path.join(exe_dir, 'bin',
+                                       name + suffix))
+        candidates.append(os.path.join(exe_dir, '_internal', 'bin',
+                                       name + suffix))
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            candidates.append(
+                os.path.join(meipass, name + suffix))
+            candidates.append(os.path.join(meipass, 'bin',
+                                           name + suffix))
+
+    try:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+    except NameError:
+        script_dir = os.getcwd()
+    candidates.append(os.path.join(script_dir, name + suffix))
+    candidates.append(os.path.join(script_dir, 'bin', name + suffix))
+
+    path_exe = shutil.which(name)
+    if path_exe:
+        candidates.append(path_exe)
+
+    for c in candidates:
+        if c and os.path.isfile(c):
+            return c
+    return None
+
+
+_FFMPEG_PATH = None
+_FFPROBE_PATH = None
+
+
+def _init_ffmpeg():
+    global _FFMPEG_PATH, _FFPROBE_PATH
+    _FFMPEG_PATH = _find_exec('ffmpeg')
+    _FFPROBE_PATH = _find_exec('ffprobe')
+
+
+def _epoch_from_utc(dt_str):
+    """'2026-06-02T05:07:35Z' -> epoch (UTC), независимо от TZ машины."""
+    s = dt_str.rstrip('Z')
+    dt_obj = datetime.datetime.strptime(s, "%Y-%m-%dT%H:%M:%S")
+    return int(dt_obj.replace(tzinfo=datetime.timezone.utc).timestamp())
+
+
+def fix_time(dt):
+    return "%04d-%02d-%02dT%02d:%02d:%02dZ" % (
+        dt['Year'] + 2000, dt['Month'], dt['Day'],
+        dt['Hour'], dt['Minute'], dt['Second'])
+
+
+def fix_coordinates(hemi, raw):
+    degrees = int(raw / 100)
+    minutes = raw - (degrees * 100)
+    result = degrees + minutes / 60.0
+    if hemi in ('S', 'W'):
+        result = -result
+    return result
+
+
+def fix_speed(speed):
+    return speed * 1.852  # узлы -> км/ч
+
+
+def deobfuscate_coord(latitude, longitude):
+    latitude = (latitude - 187.98217) / 3.0
+    longitude = (longitude - 2199.19876) * 0.5
+    return latitude, longitude
+
+
+def get_gps_offset(data):
+    """Поиск маркера A + (N|S) + (E|W); offset на 24 байта назад."""
+    pointer = len(data) - 3
+    while pointer >= 24:
+        try:
+            active, lat_hemi, lon_hemi = struct.unpack_from('<sss', data, pointer)
+            if (active == b'A'
+                    and lat_hemi in (b'N', b'S')
+                    and lon_hemi in (b'E', b'W')):
+                return pointer - 24
+        except struct.error:
+            pass
+        pointer -= 1
+    return -1
+
+
+def get_gps_data(data, deobfuscate=False):
+    """Возвращает dict с GPS-точкой или None."""
+    gps = {
+        'Epoch': None,
+        'DT': {'Year': None, 'Month': None, 'Day': None,
+               'Hour': None, 'Minute': None, 'Second': None, 'DT': None},
+        'Loc': {'Lat': {'Raw': None, 'Hemi': None, 'Float': None},
+                'Lon': {'Raw': None, 'Hemi': None, 'Float': None},
+                'Speed': None, 'Bearing': None},
+    }
+    if not data:
+        return None
+    if data[0:1] in (b'\x05', b'\xF0'):
+        return None
+
+    offset = get_gps_offset(data)
+    if offset < 0:
+        return None
+    try:
+        gps['DT']['Hour'], gps['DT']['Minute'], gps['DT']['Second'] = \
+            struct.unpack_from('<III', data, offset)
+        offset += 12
+        gps['DT']['Year'], gps['DT']['Month'], gps['DT']['Day'] = \
+            struct.unpack_from('<III', data, offset)
+        offset += 12
+        active, lat_hemi, lon_hemi = struct.unpack_from('<sss', data, offset)
+        offset += 4
+        gps['Loc']['Lat']['Raw'], gps['Loc']['Lon']['Raw'] = \
+            struct.unpack_from('<ff', data, offset)
+        offset += 8
+        gps['Loc']['Speed'], gps['Loc']['Bearing'] = \
+            struct.unpack_from('<ff', data, offset)
+        gps['Loc']['Lat']['Hemi'] = lat_hemi.decode('ascii')
+        gps['Loc']['Lon']['Hemi'] = lon_hemi.decode('ascii')
+    except (struct.error, UnicodeDecodeError):
+        return None
+
+    if deobfuscate:
+        gps['Loc']['Lat']['Raw'], gps['Loc']['Lon']['Raw'] = deobfuscate_coord(
+            gps['Loc']['Lat']['Raw'], gps['Loc']['Lon']['Raw'])
+
+    gps['Loc']['Lat']['Float'] = fix_coordinates(
+        gps['Loc']['Lat']['Hemi'], gps['Loc']['Lat']['Raw'])
+    gps['Loc']['Lon']['Float'] = fix_coordinates(
+        gps['Loc']['Lon']['Hemi'], gps['Loc']['Lon']['Raw'])
+    gps['Loc']['Speed'] = fix_speed(gps['Loc']['Speed'])
+    gps['DT']['DT'] = fix_time(gps['DT'])
+
+    try:
+        gps['Epoch'] = _epoch_from_utc(gps['DT']['DT'])
+    except ValueError:
+        return None
+    return gps
+
+
+def parse_ts_gps(filepath, deobfuscate=False):
+    """Прямой бинарный разбор TS (PID 0x0300).
+    Возвращает [(epoch, speed_kmh, lat, lon, bearing), ...]."""
+    results = []
+    TS_PKT = 188
+    GPS_PID = 0x0300
+    PES_HDR = b'\x00\x00\x01\xBF'
+    try:
+        with open(filepath, 'rb') as f:
+            data = f.read()
+    except Exception:
+        return results
+
+    pos = 0
+    partial = b''
+    while pos + TS_PKT <= len(data):
+        if data[pos] != 0x47:
+            pos += 1
+            continue
+        pkt = data[pos:pos + TS_PKT]
+        pos += TS_PKT
+        pid = ((pkt[1] & 0x1F) << 8) | pkt[2]
+        if pid != GPS_PID:
+            continue
+        payload_start = 4
+        if pkt[3] & 0x20:
+            af_len = pkt[4]
+            payload_start = 5 + af_len
+        if payload_start >= TS_PKT:
+            continue
+        payload = pkt[payload_start:]
+        if not payload:
+            continue
+
+        pes_pos = payload.find(PES_HDR)
+        if pes_pos >= 0:
+            pes_data = payload[pes_pos + 4:]
+            if partial:
+                pes_data = partial + pes_data
+                partial = b''
+            gps = get_gps_data(pes_data, deobfuscate)
+            if gps and gps['Loc']['Speed'] is not None:
+                results.append((
+                    gps['Epoch'],
+                    gps['Loc']['Speed'],
+                    gps['Loc']['Lat']['Float'] if gps['Loc']['Lat']['Float'] is not None else 0.0,
+                    gps['Loc']['Lon']['Float'] if gps['Loc']['Lon']['Float'] is not None else 0.0,
+                    gps['Loc']['Bearing'] if gps['Loc']['Bearing'] is not None else 0.0,
+                ))
+        else:
+            if partial:
+                combined = partial + payload
+                gps = get_gps_data(combined, deobfuscate)
+                if gps and gps['Loc']['Speed'] is not None:
+                    results.append((
+                        gps['Epoch'],
+                        gps['Loc']['Speed'],
+                        gps['Loc']['Lat']['Float'] if gps['Loc']['Lat']['Float'] is not None else 0.0,
+                        gps['Loc']['Lon']['Float'] if gps['Loc']['Lon']['Float'] is not None else 0.0,
+                        gps['Loc']['Bearing'] if gps['Loc']['Bearing'] is not None else 0.0,
+                    ))
+                    partial = b''
+                else:
+                    partial = combined[-14:]
+            else:
+                partial = payload[-14:] if len(payload) >= 14 else payload
+    return results
+
+_EXIFTOOL_PATH = None
+
+
+def _init_exiftool():
+    global _EXIFTOOL_PATH
+    _EXIFTOOL_PATH = _find_exec('exiftool')
+
+
+def _to_float(s):
+    s = (s or '').strip()
+    if not s:
+        return None
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+_SPEED_TO_KMH = {'K': 1.0, 'M': 1.609344, 'N': 1.852}
+
+
+def parse_gps_exiftool(filepath):
+    """Извлечение GPS через exiftool -ee3 -n с учётом GPSSpeedRef."""
+    if _EXIFTOOL_PATH is None:
+        return None
+    fmt = ('$GPSDateTime\t$GPSSpeed\t$GPSSpeedRef\t'
+           '$GPSLatitude\t$GPSLongitude\t$GPSTrack\n')
+    cmd = [_EXIFTOOL_PATH, '-ee3', '-n', '-p', fmt, filepath]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=120,
+                           encoding='utf-8', errors='replace')
+        if r.returncode != 0:
+            return None
+    except Exception:
+        return None
+
+    results = []
+    for line in r.stdout.strip().splitlines():
+        parts = line.strip().split('\t')
+        if len(parts) < 6:
+            continue
+        dt_str = parts[0].strip()
+        speed_raw = _to_float(parts[1])
+        speed_ref = (parts[2].strip() or 'K').upper()
+        lat = _to_float(parts[3])
+        lon = _to_float(parts[4])
+        bearing = _to_float(parts[5])
+        if lat is None or lon is None:
+            continue
+
+        speed_kmh = 0.0
+        if speed_raw is not None:
+            speed_kmh = speed_raw * _SPEED_TO_KMH.get(speed_ref, 1.0)
+
+        dt_norm = dt_str.replace(':', '-', 2).replace(' ', 'T')
+        if dt_norm.endswith('Z'):
+            dt_norm = dt_norm[:-1]
+        try:
+            dt_obj = datetime.datetime.strptime(dt_norm, "%Y-%m-%dT%H:%M:%S")
+        except ValueError:
+            continue
+        epoch = int(dt_obj.replace(tzinfo=datetime.timezone.utc).timestamp())
+
+        results.append((epoch, speed_kmh, lat, lon,
+                        bearing if bearing is not None else 0.0))
+    return results
+
+
+def extract_gps(filepath):
+    """exiftool -> прямой разбор -> пусто."""
+    _init_exiftool()
+    if _EXIFTOOL_PATH:
+        pts = parse_gps_exiftool(filepath)
+        if pts:
+            return pts, 'exiftool'
+    pts = parse_ts_gps(filepath)
+    if pts:
+        return pts, 'binary'
+    return [], 'none'
+
+
+def gps_to_relative_time(gps_points, first_epoch=None):
+    """[(epoch, speed, lat, lon, bearing), ...]
+    -> [(t_rel, speed, lat, lon, bearing), ...]."""
+    if not gps_points:
+        return []
+    if first_epoch is None:
+        first_epoch = gps_points[0][0]
+    return [(p[0] - first_epoch, p[1], p[2], p[3], p[4]) for p in gps_points]
+# ==================================================================
+# v0.56.5: работа с GPS-точками, соседними файлами, зонами недоверия
+# ==================================================================
+
+def parse_ts_filename(basename):
+    """Разбирает имя .ts: возвращает (prefix, index, suffix).
+
+    Поддерживаемые форматы (после v0.56.5):
+      2K:  20260602050735_000048.TS
+      4K:  20260602042558_000187A.TS
+
+    prefix — часть до индекса (цифры даты-времени и разделитель);
+    index  — целое число;
+    suffix — хвост после индекса (.TS, A.TS и т. п.).
+
+    Возвращает (prefix, index, suffix) или None, если шаблон не
+    распознан.
+    """
+    import re
+    # Ищем последнюю группу из 6 цифр перед необязательной
+    # буквой A и расширением.
+    m = re.search(
+        r"^(?P<prefix>.+?)(?P<index>\d{6})(?P<suffix>[A-Z]?\.TS)$",
+        basename,
+        re.IGNORECASE,
+    )
+    if not m:
+        return None
+    try:
+        idx = int(m.group("index"))
+    except ValueError:
+        return None
+    return (m.group("prefix"), idx, m.group("suffix").upper())
+
+
+def find_neighbor_files(filepath, max_shift=1):
+    """Возвращает список (shift, path) для N-1, N+1.
+
+    v0.56.6: матчинг по (suffix, index ± shift), БЕЗ требования
+    одинакового timestamp в префиксе. Timestamp используется
+    только как tiebreaker, если совпало несколько имён.
+    """
+    import re as _re
+    dirpath = os.path.dirname(os.path.abspath(filepath))
+    basename = os.path.basename(filepath)
+    parsed = parse_ts_filename(basename)
+    if parsed is None:
+        return []
+    prefix, idx, suffix = parsed
+
+    # Свой timestamp (14 цифр) для tiebreaker.
+    _m = _re.search(r"(\d{14})", prefix)
+    ts_self = int(_m.group(1)) if _m else None
+
+    try:
+        entries = os.listdir(dirpath)
+    except Exception:
+        return []
+
+    # Собираем кандидатов: {index: [(timestamp_int, name), ...]}
+    candidates = {}
+    for name in entries:
+        p = parse_ts_filename(name)
+        if p is None:
+            continue
+        p_prefix, p_idx, p_suffix = p
+        if p_suffix != suffix:
+            continue
+        _m2 = _re.search(r"(\d{14})", p_prefix)
+        p_ts = int(_m2.group(1)) if _m2 else None
+        candidates.setdefault(p_idx, []).append((p_ts, name))
+
+    def _pick(cands):
+        if not cands:
+            return None
+        if ts_self is None:
+            return cands[0][1]
+        best = None
+        best_diff = None
+        for p_ts, name in cands:
+            if p_ts is None:
+                continue
+            d = abs(p_ts - ts_self)
+            if best_diff is None or d < best_diff:
+                best_diff = d
+                best = name
+        if best is None:
+            return cands[0][1]
+        return best
+
+    neighbors = []
+    for shift in range(1, max_shift + 1):
+        for sign in (-1, +1):
+            want_idx = idx + sign * shift
+            if want_idx < 0:
+                continue
+            cands = candidates.get(want_idx)
+            chosen = _pick(cands)
+            if chosen:
+                neighbors.append((sign * shift,
+                                  os.path.join(dirpath, chosen)))
+                print("  [neighbor] shift=%+d idx=%d -> %s" 
+                      % (sign * shift, want_idx, chosen),
+                      file=sys.stderr)
+            else:
+                print("  [neighbor] shift=%+d idx=%d -> нет файла" 
+                      % (sign * shift, want_idx),
+                      file=sys.stderr)
+    return neighbors
+
+
+def _parse_epoch_bound(s, fallback_epoch):
+    """Парсит дату вида YYYY-MM-DD в epoch (UTC)."""
+    try:
+        dt = datetime.datetime.strptime(s, "%Y-%m-%d")
+        return int(dt.replace(
+            tzinfo=datetime.timezone.utc).timestamp())
+    except Exception:
+        return fallback_epoch
+
+
+def is_gps_point_valid(epoch, speed, lat, lon, cfg):
+    """v0.56.5: одна ли точка GPS физически осмысленна.
+
+    Проверки:
+      * координаты не (0, 0);
+      * широта -90..90, долгота -180..180;
+      * epoch в окне [gps_epoch_min, gps_epoch_max];
+      * скорость 0..gps_speed_max_kmh;
+    """
+    if epoch is None:
+        return False
+    if lat is None or lon is None:
+        return False
+    # (0,0) — фикса нет
+    if abs(lat) < 1e-6 and abs(lon) < 1e-6:
+        return False
+    if not (-90.0 <= lat <= 90.0):
+        return False
+    if not (-180.0 <= lon <= 180.0):
+        return False
+
+    _t_min = _parse_epoch_bound(
+        str(cfg.get("gps_epoch_min", "2020-01-01")), 1577836800)
+    _t_max = _parse_epoch_bound(
+        str(cfg.get("gps_epoch_max", "2030-01-01")), 1893456000)
+    if not (_t_min <= epoch <= _t_max):
+        return False
+
+    _v_max = float(cfg.get("gps_speed_max_kmh", 300.0))
+    if speed is None or speed < 0.0 or speed > _v_max:
+        return False
+    return True
+
+
+def validate_gps_points(points, cfg):
+    """Фильтрует список точек, оставляя только валидные.
+
+    points = [(t_rel, speed, lat, lon, bearing), ...]
+    cfg    = конфиг с порогами.
+
+    Возвращает (valid_points, stats).
+    stats = {"total": N, "valid": M, "dropped": K,
+             "reason_zero": K1, "reason_range": K2,
+             "reason_epoch": K3, "reason_speed": K4}.
+    """
+    valid = []
+    stats = {
+        "total": len(points),
+        "valid": 0,
+        "dropped": 0,
+        "reason_zero": 0,
+        "reason_range": 0,
+        "reason_epoch": 0,
+        "reason_speed": 0,
+    }
+    _t_min = _parse_epoch_bound(
+        str(cfg.get("gps_epoch_min", "2020-01-01")), 1577836800)
+    _t_max = _parse_epoch_bound(
+        str(cfg.get("gps_epoch_max", "2030-01-01")), 1893456000)
+    _v_max = float(cfg.get("gps_speed_max_kmh", 300.0))
+
+    for p in points:
+        # p = (t_rel, speed, lat, lon, bearing)
+        # epoch отсутствует в этом формате — проверяем по всем
+        # полям, кроме epoch. epoch-проверка делается ДО
+        # перевода в относительное время.
+        lat = p[2]
+        lon = p[3]
+        spd = p[1]
+        bad = False
+        if abs(lat) < 1e-6 and abs(lon) < 1e-6:
+            stats["reason_zero"] += 1
+            bad = True
+        elif not (-90.0 <= lat <= 90.0) or \
+                not (-180.0 <= lon <= 180.0):
+            stats["reason_range"] += 1
+            bad = True
+        elif spd is None or spd < 0.0 or spd > _v_max:
+            stats["reason_speed"] += 1
+            bad = True
+        if bad:
+            stats["dropped"] += 1
+            continue
+        valid.append(p)
+    stats["valid"] = len(valid)
+    return valid, stats
+
+
+def find_doubt_zones(points, cfg):
+    """v0.56.5: определяет зоны недоверия по скачкам ускорения.
+
+    points = [(t_rel, speed, lat, lon, bearing), ...]
+    Возвращает список (t_start, t_end, reason).
+
+    Алгоритм (вариант C из обсуждения):
+      1) для каждой пары (i, i+1) считаем a = dv/dt;
+      2) если |a| > a_max — помечаем интервал
+         [t_mid - R, t_mid + R], где R = doubt_radius_sec;
+      3) объединяем пересекающиеся интервалы.
+    """
+    if not cfg.get("doubt_zones_enabled", True):
+        return []
+    if len(points) < 3:
+        return []
+
+    t0_100 = float(cfg.get("accel_0_100_sec", 12.0))
+    if t0_100 <= 0.1:
+        t0_100 = 12.0
+    a_accel_base = (100.0 / 3.6) / t0_100   # м/с²
+    k = float(cfg.get("doubt_accel_safety_factor", 2.0))
+    a_accel = a_accel_base * k
+    a_decel = float(cfg.get("doubt_decel_max_g", 0.8)) * 9.81
+    a_max = max(a_accel, a_decel)
+
+    R = float(cfg.get("doubt_radius_sec", 1.5))
+
+    raw_zones = []
+    for i in range(len(points) - 1):
+        t_a = points[i][0]
+        t_b = points[i + 1][0]
+        v_a = points[i][1]
+        v_b = points[i + 1][1]
+        dt = t_b - t_a
+        if dt <= 1e-6:
+            continue
+        # переводим км/ч в м/с
+        a = ((v_b - v_a) / 3.6) / dt
+        if abs(a) > a_max:
+            t_mid = (t_a + t_b) / 2.0
+            raw_zones.append((t_mid - R, t_mid + R,
+                              "a=%.2f м/с²" % a))
+
+    if not raw_zones:
+        return []
+
+    # Объединение пересекающихся интервалов
+    raw_zones.sort(key=lambda z: z[0])
+    merged = [raw_zones[0]]
+    for z in raw_zones[1:]:
+        last = merged[-1]
+        if z[0] <= last[1]:
+            merged[-1] = (last[0], max(last[1], z[1]), last[2])
+        else:
+            merged.append(z)
+    return merged
+
+
+def mask_gps_points(points, zones):
+    """v0.56.5: массив весов 0/1 по точкам.
+
+    1 = точка участвует в корреляции,
+    0 = точка в зоне недоверия, исключается.
+    """
+    if not zones:
+        return [1] * len(points)
+    mask = []
+    for p in points:
+        t = p[0]
+        in_zone = False
+        for (z0, z1, _r) in zones:
+            if z0 <= t <= z1:
+                in_zone = True
+                break
+        mask.append(0 if in_zone else 1)
+    return mask
+
+
+def merge_gps_from_neighbors(filepath, cfg, 
+                              current_points_epoch):
+    """v0.56.5: склейка GPS из N-1, N, N+1.
+
+    current_points_epoch = [(epoch, speed, lat, lon, bearing), ...]
+    Возвращает (merged_epoch_points, info).
+
+    info = {"current": N, "added_prev": M1, "added_next": M2,
+            "prev_file": name1, "next_file": name2,
+            "prev_total": T1, "next_total": T2,
+            "extend_sec": R}.
+    """
+    info = {
+        "current": len(current_points_epoch),
+        "added_prev": 0,
+        "added_next": 0,
+        "prev_file": None,
+        "next_file": None,
+        "prev_total": 0,
+        "next_total": 0,
+        "extend_sec": float(cfg.get("neighbor_extend_sec", 30.0)),
+    }
+    if not cfg.get("neighbor_gps_enabled", True):
+        return list(current_points_epoch), info
+    if not current_points_epoch:
+        return list(current_points_epoch), info
+
+    R = float(cfg.get("neighbor_extend_sec", 30.0))
+
+    # Диапазон текущего файла по epoch
+    cur_ep = [p[0] for p in current_points_epoch]
+    cur_t_min = min(cur_ep)
+    cur_t_max = max(cur_ep)
+
+    neighbors = find_neighbor_files(filepath, max_shift=1)
+    if not neighbors:
+        return list(current_points_epoch), info
+
+    merged = list(current_points_epoch)
+
+    for shift, npath in neighbors:
+        try:
+            nb_raw, nb_method = extract_gps(npath)
+        except Exception as e:
+            print("  Сосед %+d: ошибка извлечения GPS (%s)" 
+                  % (shift, e), file=sys.stderr)
+            continue
+        if not nb_raw:
+            print("  Сосед %+d: GPS не найден (%s)" 
+                  % (shift, os.path.basename(npath)),
+                  file=sys.stderr)
+            continue
+
+        # Валидация
+        nb_valid = [p for p in nb_raw
+                     if is_gps_point_valid(
+                         p[0], p[1], p[2], p[3], cfg)]
+        nb_dropped = len(nb_raw) - len(nb_valid)
+
+        if shift < 0:
+            info["prev_file"] = os.path.basename(npath)
+            info["prev_total"] = len(nb_raw)
+        else:
+            info["next_file"] = os.path.basename(npath)
+            info["next_total"] = len(nb_raw)
+
+        # Обрезка по времени
+        if shift < 0:
+            lo = cur_t_min - R
+            hi = cur_t_min
+        else:
+            lo = cur_t_max
+            hi = cur_t_max + R
+        nb_in_window = [p for p in nb_valid
+                        if lo <= p[0] <= hi]
+
+        if not nb_in_window:
+            print("  Сосед %+d: %s, GPS=%d (valid=%d, "
+                  "drop=%d), в окно попало 0" 
+                  % (shift, os.path.basename(npath), len(nb_raw),
+                     len(nb_valid), nb_dropped),
+                  file=sys.stderr)
+            continue
+
+        if shift < 0:
+            info["added_prev"] = len(nb_in_window)
+        else:
+            info["added_next"] = len(nb_in_window)
+
+        print("  Сосед %+d: %s, GPS=%d (valid=%d, drop=%d), "
+              "в окно +%d точек" 
+              % (shift, os.path.basename(npath), len(nb_raw),
+                 len(nb_valid), nb_dropped, len(nb_in_window)),
+              file=sys.stderr)
+
+        merged.extend(nb_in_window)
+
+    # Дедупликация по epoch + lat + lon (вариант B из обсуждения)
+    if cfg.get("neighbor_dedup_enabled", True):
+        seen = set()
+        result = []
+        K = int(cfg.get("neighbor_dedup_k", 3))
+        # Сортируем по epoch, потом по модулю shift не важно
+        merged.sort(key=lambda p: p[0])
+        for p in merged:
+            key = (int(p[0]), round(p[2], 5), round(p[3], 5))
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append(p)
+        dup_removed = len(merged) - len(result)
+        if dup_removed > 0:
+            print("  Дедупликация: удалено %d дублей" % dup_removed,
+                  file=sys.stderr)
+        merged = result
+
+    return merged, info
+
+
+
+
+def _smooth_series(v, smooth_sec, dt):
+    """Скользящее среднее окном smooth_sec секунд.
+
+    v0.57.2: edge-padding вместо mode='same'.
+    Было: np.convolve(v, kernel, mode='same') — края массива
+    дополняются нулями, первые/последние win/2 точек занижены
+    примерно в 2 раза. Это создавало фиктивный «разгон» на
+    старте окна и «торможение» на конце.
+
+    Стало: крайние значения копируются за пределы массива
+    (mode='edge'), свёртка в режиме 'valid'. Края корректны.
+
+    dt — шаг выборки (с). Возвращает массив той же длины.
+    """
+    v = np.asarray(v, dtype=float)
+    if smooth_sec <= 0 or len(v) < 3 or dt <= 0:
+        return v
+    win = max(1, int(round(smooth_sec / dt)))
+    if win <= 1 or win >= len(v):
+        return v
+    pad_left = win // 2
+    pad_right = win - pad_left - 1
+    vp = np.pad(v, (pad_left, pad_right), mode='edge')
+    kernel = np.ones(win, dtype=float) / win
+    return np.convolve(vp, kernel, mode='valid')
+
+
+def _parabolic_peak_lag(lags, corrs, i_peak):
+    """v0.57.4: субшаговая локализация пика корреляции.
+
+    Через три точки (i_peak-1, i_peak, i_peak+1) проводится
+    парабола и вычисляется её вершина:
+
+        x0 = x2 + 0.5*step*(y1 - y3)/(y1 - 2*y2 + y3)
+
+    Возвращает уточнённый lag. Если i_peak на краю массива или
+    знаменатель близок к нулю — возвращает lags[i_peak].
+    """
+    n = len(lags)
+    if i_peak <= 0 or i_peak >= n - 1:
+        return float(lags[i_peak])
+
+    x1 = float(lags[i_peak - 1])
+    x2 = float(lags[i_peak])
+    x3 = float(lags[i_peak + 1])
+    y1 = float(corrs[i_peak - 1])
+    y2 = float(corrs[i_peak])
+    y3 = float(corrs[i_peak + 1])
+
+    denom = y1 - 2.0 * y2 + y3
+    if abs(denom) < 1e-12:
+        return x2
+
+    step = 0.5 * ((x2 - x1) + (x3 - x2))
+    offset = 0.5 * step * (y1 - y3) / denom
+
+    half = 0.5 * abs(step)
+    if offset > half:
+        offset = half
+    elif offset < -half:
+        offset = -half
+
+    return x2 + offset
+
+
+def find_gps_lag(audio_times, audio_speeds, gps_times, gps_speeds,
+                 lag_range=(-5.0, 5.0), lag_step=0.1,
+                 point_weights=None):
+    """Поиск сдвига GPS относительно аудио.
+
+    v0.57.6: критерий — МИНИМУМ RMSE(Vg - Va).
+
+    После v0.57.5 (rolling-трекинг гармоник в корреляционном
+    сигнале) кривая corr(lag) в окне ±5с стала плоской:
+    множество лагов дают corr > 0.99, вершина не выражена.
+    RMSE даёт более резкий минимум.
+
+    При равенстве RMSE (в пределах 1e-6) — tie-breaker по
+    максимуму корреляции.
+
+    Возвращает:
+        best_lag   : float
+        best_corr  : float  (corr на ближайшем дискретном лаге)
+        results    : [(lag, corr, rmse, n_pairs), ...]
+                     сортировка по возрастанию RMSE.
+    """
+    if len(gps_times) < 3 or len(audio_times) < 3:
+        return 0.0, 0.0, []
+
+    if point_weights is not None \
+            and len(point_weights) == len(gps_times):
+        gps_times = [gps_times[i]
+                     for i in range(len(gps_times))
+                     if point_weights[i]]
+        gps_speeds = [gps_speeds[i]
+                      for i in range(len(gps_speeds))
+                      if point_weights[i]]
+        if len(gps_times) < 3:
+            return 0.0, 0.0, []
+
+    gps_t = np.asarray(gps_times, dtype=float)
+    gps_v = np.asarray(gps_speeds, dtype=float)
+    aud_t = np.asarray(audio_times, dtype=float)
+    aud_v = np.asarray(audio_speeds, dtype=float)
+
+    ok_a = ~(np.isnan(aud_v) | np.isinf(aud_v))
+    aud_t, aud_v = aud_t[ok_a], aud_v[ok_a]
+    ok_g = ~(np.isnan(gps_v) | np.isinf(gps_v))
+    gps_t, gps_v = gps_t[ok_g], gps_v[ok_g]
+
+    if len(gps_t) < 3 or len(aud_t) < 3:
+        return 0.0, 0.0, []
+
+    order_g = np.argsort(gps_t)
+    gps_t, gps_v = gps_t[order_g], gps_v[order_g]
+    order_a = np.argsort(aud_t)
+    aud_t, aud_v = aud_t[order_a], aud_v[order_a]
+
+    min_pairs = 3
+    best_lag = 0.0
+    best_corr = 0.0
+    best_rmse = float('inf')
+    results = []
+
+    n_lags = int(round((lag_range[1] - lag_range[0]) / lag_step)) + 1
+    for k in range(n_lags):
+        lag = lag_range[0] + k * lag_step
+        shifted = gps_t + lag
+
+        mask = (aud_t >= shifted[0]) & (aud_t <= shifted[-1])
+        n_pairs = int(mask.sum())
+        if n_pairs < min_pairs:
+            continue
+
+        g = np.interp(aud_t[mask], shifted, gps_v)
+        a = aud_v[mask]
+
+        a_std = float(a.std())
+        g_std = float(g.std())
+        if a_std < 1e-6 or g_std < 1e-6:
+            continue
+
+        c = float(np.corrcoef(a, g)[0, 1])
+        if np.isnan(c):
+            continue
+
+        diff = g - a
+        rmse = float(np.sqrt(np.mean(diff * diff)))
+
+        results.append((float(lag), float(c), float(rmse), int(n_pairs)))
+
+        # v0.57.6: критерий — минимум RMSE.
+        # Tie-breaker при равенстве RMSE — максимум corr.
+        if (rmse < best_rmse - 1e-6) or \
+           (abs(rmse - best_rmse) <= 1e-6 and c > best_corr):
+            best_rmse = rmse
+            best_corr = c
+            best_lag = float(lag)
+
+    if len(results) >= 3:
+        _by_lag = sorted(results, key=lambda r: r[0])
+        _lags = [r[0] for r in _by_lag]
+        _corrs = [r[1] for r in _by_lag]
+        _rmses = [r[2] for r in _by_lag]
+        _i_min = int(np.argmin(_rmses))
+        best_lag = float(_parabolic_peak_lag(_lags, _rmses, _i_min))
+        best_corr = float(_corrs[_i_min])
+
+    results.sort(key=lambda x: (x[2], -x[1]))
+    if not results:
+        return 0.0, 0.0, results
+    return best_lag, best_corr, results
+
+
+def find_gps_window_points(gps_points, t_start, t_end):
+    """GPS-точки в окне и ближайшие до/после."""
+    if not gps_points:
+        return [], None, None
+    in_win, before, after = [], None, None
+    for gt, gv in ((p[0], p[1]) for p in gps_points):
+        if t_start <= gt <= t_end:
+            in_win.append((gt, gv, 0.0))
+        elif gt < t_start:
+            if before is None or gt > before[0]:
+                before = (gt, gv, t_start - gt)
+        elif gt > t_end:
+            if after is None or gt < after[0]:
+                after = (gt, gv, gt - t_end)
+    return in_win, before, after
+
+
+def _find_peaks_simple(signal, min_distance=5):
+    """Простые локальные максимумы в 1D-массиве."""
+    n = len(signal)
+    if n < 3:
+        return []
+    peaks = []
+    for i in range(1, n - 1):
+        if signal[i] > signal[i - 1] and signal[i] > signal[i + 1]:
+            peaks.append(i)
+    if not peaks:
+        return []
+    filtered = [peaks[0]]
+    for p in peaks[1:]:
+        if p - filtered[-1] >= min_distance:
+            filtered.append(p)
+        else:
+            if signal[p] > signal[filtered[-1]]:
+                filtered[-1] = p
+    return filtered
+
+
+def _find_extrema_simple(signal, min_distance=5, invert=False):
+    """Локальные экстремумы: максимумы (invert=False) или минимумы
+    (invert=True). Логика та же, что у _find_peaks_simple."""
+    if invert:
+        return _find_peaks_simple(-signal, min_distance=min_distance)
+    return _find_peaks_simple(signal, min_distance=min_distance)
+
+def get_ts_duration(filepath):
+    if _FFPROBE_PATH is None:
+        return None, None
+    for stream_sel, label in [('v:0', 'video stream'), ('a:0', 'audio stream')]:
+        cmd = [_FFPROBE_PATH, '-v', 'error',
+               '-select_streams', stream_sel,
+               '-show_entries', 'stream=duration',
+               '-of', 'default=noprint_wrappers=1:nokey=1',
+               filepath]
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=30,
+                               encoding='utf-8', errors='replace')
+            if r.returncode == 0 and r.stdout.strip():
+                for line in r.stdout.strip().splitlines():
+                    line = line.strip()
+                    if line:
+                        try:
+                            val = float(line)
+                            if val > 0:
+                                return val, f'ffprobe ({label})'
+                        except ValueError:
+                            continue
+        except Exception:
+            pass
+    for entries in ['format=duration', 'stream=duration']:
+        cmd = [_FFPROBE_PATH, '-v', 'error',
+               '-show_entries', entries,
+               '-of', 'default=noprint_wrappers=1:nokey=1',
+               filepath]
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=30,
+                               encoding='utf-8', errors='replace')
+            if r.returncode == 0 and r.stdout.strip():
+                for line in r.stdout.strip().splitlines():
+                    line = line.strip()
+                    if line:
+                        try:
+                            val = float(line)
+                            if val > 0:
+                                return val, f'ffprobe ({entries})'
+                        except ValueError:
+                            continue
+        except Exception:
+            pass
+    return None, None
+
+
+def extract_audio(filepath, start_sec, duration_sec, sample_rate=44100):
+    if _FFMPEG_PATH is None:
+        print("ffmpeg не найден. Положите ffmpeg.exe рядом со скриптом или в bin/.")
+        return None, sample_rate
+    cmd = [
+        _FFMPEG_PATH, '-nostdin',
+        '-ss', f'{start_sec:.3f}',
+        '-t', f'{duration_sec:.3f}',
+        '-i', filepath,
+        '-vn', '-ac', '1', '-ar', str(sample_rate),
+        '-f', 'f32le', 'pipe:1'
+    ]
+    try:
+        r = subprocess.run(cmd, capture_output=True, timeout=600)
+        if r.returncode != 0:
+            stderr = r.stderr.decode('utf-8', errors='replace')[:300]
+            print(f"ffmpeg: {stderr}")
+            return None, sample_rate
+        audio = np.frombuffer(r.stdout, dtype=np.float32).copy()
+        if len(audio) == 0:
+            print("ffmpeg: пустой аудиопоток")
+            return None, sample_rate
+        return audio, sample_rate
+    except FileNotFoundError:
+        print("ffmpeg не найден. Установите ffmpeg.")
+        return None, sample_rate
+    except subprocess.TimeoutExpired:
+        print("Таймаут ffmpeg")
+        return None, sample_rate
+
+
+_window_cache = {}
+
+
+def _get_window(fft_size):
+    if fft_size not in _window_cache:
+        _window_cache[fft_size] = np.hanning(fft_size)
+    return _window_cache[fft_size]
+
+
+def compute_stft(audio, sr, fft_size=32768, target_fps=30, window=None):
+    hop = max(1, int(sr / target_fps))
+    if window is None:
+        window = _get_window(fft_size)
+    n_frames = len(audio) // hop
+    freqs = np.fft.rfftfreq(fft_size, 1.0 / sr)
+    times = np.arange(n_frames) * hop / sr
+
+    if n_frames == 0:
+        S_db = np.zeros((len(freqs), 0), dtype=np.float32)
+        return freqs, times, S_db
+
+    pad_len = (n_frames - 1) * hop + fft_size
+    if pad_len > len(audio):
+        audio = np.pad(audio, (0, pad_len - len(audio)))
+
+    frames = np.lib.stride_tricks.sliding_window_view(audio, fft_size)[::hop][:n_frames]
+    windowed = frames * window[np.newaxis, :]
+    S = np.abs(np.fft.rfft(windowed, axis=1)).T
+    S_db = 20 * np.log10(S + 1e-10)
+    return freqs, times, S_db.astype(np.float32)
+
+
+def interp_crossing(freqs, spectrum, idx_above, idx_below, db_threshold):
+    db_a = float(spectrum[idx_above])
+    db_b = float(spectrum[idx_below])
+    if abs(db_b - db_a) < 1e-10:
+        return float(freqs[idx_above])
+    frac = (db_threshold - db_a) / (db_b - db_a)
+    return float(freqs[idx_above] + frac * (freqs[idx_below] - freqs[idx_above]))
+
+
+def find_peak_near(freqs, spectrum_col, expected_freq, search_halfwidth_hz,
+                   f_lo=None, f_hi=None):
+    expected_idx = int(np.argmin(np.abs(freqs - expected_freq)))
+    lo_freq = expected_freq - search_halfwidth_hz
+    hi_freq = expected_freq + search_halfwidth_hz
+    if f_lo is not None:
+        lo_freq = max(lo_freq, f_lo)
+    if f_hi is not None:
+        hi_freq = min(hi_freq, f_hi)
+    lo_idx = int(np.argmin(np.abs(freqs - lo_freq)))
+    hi_idx = int(np.argmin(np.abs(freqs - hi_freq)))
+    if lo_idx == hi_idx:
+        return float(freqs[expected_idx])
+    segment = spectrum_col[lo_idx:hi_idx + 1]
+    peak_offset = int(np.argmax(segment))
+    peak_idx = lo_idx + peak_offset
+    if 0 < peak_idx < len(freqs) - 1:
+        y_left = float(spectrum_col[peak_idx - 1])
+        y_peak = float(spectrum_col[peak_idx])
+        y_right = float(spectrum_col[peak_idx + 1])
+        denom = y_left - 2.0 * y_peak + y_right
+        if abs(denom) > 1e-10:
+            delta = 0.5 * (y_left - y_right) / denom
+            delta = max(-0.5, min(0.5, delta))
+            df = float(freqs[peak_idx + 1] - freqs[peak_idx])
+            return float(freqs[peak_idx]) + delta * df
+    return float(freqs[peak_idx])
+
+
+def _search_threshold(freqs, spectrum_col, target_freq, db_threshold,
+                      f_lo=None, f_hi=None):
+    target_idx = int(np.argmin(np.abs(freqs - target_freq)))
+    if f_lo is None:
+        f_lo = freqs[0]
+    if f_hi is None:
+        f_hi = freqs[-1]
+    lo_idx = int(np.argmin(np.abs(freqs - f_lo)))
+    hi_idx = int(np.argmin(np.abs(freqs - f_hi)))
+
+    last_above = target_idx
+    for i in range(target_idx, hi_idx + 1):
+        if spectrum_col[i] >= db_threshold:
+            last_above = i
+        else:
+            break
+    if last_above + 1 <= hi_idx and last_above + 1 < len(freqs):
+        h_max = interp_crossing(freqs, spectrum_col, last_above, last_above + 1, db_threshold)
+    else:
+        h_max = float(freqs[last_above])
+
+    last_below = target_idx
+    for i in range(target_idx, lo_idx - 1, -1):
+        if spectrum_col[i] >= db_threshold:
+            last_below = i
+        else:
+            break
+    if last_below - 1 >= lo_idx and last_below - 1 >= 0:
+        h_min = interp_crossing(freqs, spectrum_col, last_below, last_below - 1, db_threshold)
+    else:
+        h_min = float(freqs[last_below])
+
+    if h_min > h_max:
+        h_min, h_max = h_max, h_min
+    return h_min, h_max
+
+ALGO_NAMES = {
+    1: "Абсолютный порог dB",
+    2: "Индекс палитры",
+    3: "Относительный от пика",
+    4: "Адаптивный от шума",
+    5: "Половинная мощность (-3 dB)",
+    6: "RMS-интегрирование",
+}
+
+ALGO_TITLES = {
+    1: "Алгоритм 1 (dB) — Абсолютный порог",
+    2: "Алгоритм 2 (Пал) — Индекс палитры",
+    3: "Алгоритм 3 (Отн) — Относительный от пика",
+    4: "Алгоритм 4 (Шум) — Адаптивный от шума",
+    5: "Алгоритм 5 (-3dB) — Половинная мощность",
+    6: "Алгоритм 6 (RMS) — RMS-интегрирование",
+}
+
+ALGO_HELPS = {
+    1: [
+        "Цвет,инд (1-255):",
+        "  Абсолютный индекс палитры.",
+        "  Порог = vmin + (цвет/255)*(vmax-vmin).",
+        "  Больше значение -> выше порог ->",
+        "  границы СУЖАЮТСЯ.",
+        "  Влияет: vmin, vmax (от палитры).",
+        "",
+        "Пик,Гц (1-30):",
+        "  Полуширина поиска центра гармоники.",
+        "  Меньше -> жёстче трекинг,",
+        "  но риск потерять сместившуюся гармонику.",
+    ],
+    2: [
+        "Цвет,инд (1-255):",
+        "  Сдвиг индекса палитры от центра вниз.",
+        "  Порог = индекс_центра - цвет.",
+        "  Больше значение -> ниже порог ->",
+        "  границы РАСШИРЯЮТСЯ.",
+        "  Влияет: vmin, vmax, dB центра.",
+        "",
+        "Пик,Гц (1-30):",
+        "  Полуширина поиска центра гармоники.",
+        "  Меньше -> жёстче трекинг,",
+        "  но риск потерять сместившуюся гармонику.",
+    ],
+    3: [
+        "Цвет,инд (1-255):",
+        "  Децибелы ниже пика.",
+        "  Порог = dB_пика - цвет.",
+        "  Больше значение -> ниже порог ->",
+        "  границы РАСШИРЯЮТСЯ.",
+        "  Не зависит от палитры (vmin/vmax).",
+        "",
+        "Пик,Гц (1-30):",
+        "  Полуширина поиска центра гармоники.",
+        "  Меньше -> жёстче трекинг,",
+        "  но риск потерять сместившуюся гармонику.",
+    ],
+    4: [
+        "Цвет,инд (1-255):",
+        "  Множитель сигмы шума.",
+        "  Порог = медиана_шума + цвет * сигма.",
+        "  Больше значение -> выше порог ->",
+        "  границы СУЖАЮТСЯ.",
+        "  Шум оценивается по краям полосы (по 20%).",
+        "  Не зависит от палитры (vmin/vmax).",
+        "",
+        "Пик,Гц (1-30):",
+        "  Полуширина поиска центра гармоники.",
+        "  Меньше -> жёстче трекинг,",
+        "  но риск потерять сместившуюся гармонику.",
+    ],
+    5: [
+        "Цвет,инд (1-255):",
+        "  Доля от 3 dB (классический -3 dB).",
+        "  Порог = dB_пика - (цвет/255)*3.",
+        "  255 = полный спад на 3 dB.",
+        "  Больше значение -> ниже порог ->",
+        "  границы РАСШИРЯЮТСЯ.",
+        "  Не зависит от палитры (vmin/vmax).",
+        "",
+        "Пик,Гц (1-30):",
+        "  Полуширина поиска центра гармоники.",
+        "  Меньше -> жёстче трекинг,",
+        "  но риск потерять сместившуюся гармонику.",
+    ],
+    6: [
+        "Цвет,инд (1-255):",
+        "  Доля суммарной мощности (255=100%).",
+        "  Накопление линейной мощности от центра",
+        "  наружу до заданной доли.",
+        "  Больше значение -> границы РАСШИРЯЮТСЯ.",
+        "  Не зависит от палитры (vmin/vmax).",
+        "  Не использует порог в dB.",
+        "",
+        "Пик,Гц (1-30):",
+        "  Полуширина поиска центра гармоники.",
+        "  Меньше -> жёстче трекинг,",
+        "  но риск потерять сместившуюся гармонику.",
+    ],
+}
+
+HELP_LEFT_LINES = [
+    "ПОМОЩЬ — audio_speed_calc v0.53",
+    "",
+    "МЫШЬ:",
+    "  Drag — выбор диапазона + масштаб",
+    "  Клик — выбор гармоники H5/H4",
+    "",
+    "СОСТОЯНИЕ (статусная строка):",
+    "  [N/5]  — текущий шаг",
+    "  Ист: N/M — позиция в истории / всего",
+    "  Шаг=X.XXXс — текущий шаг расчёта",
+    "",
+    "КНОПКИ СЛЕВА:",
+    "  Спектр — режим time/power",
+    "  5я/4я — выбор гармоник",
+    "",
+    "КНОПКИ СЕРЕДИНА (v0.53):",
+    "  GPS→H5 — кривая H5 из GPS",
+    "  GPS→H4 — кривая H4 из GPS",
+    "  Подп.V — подписи пиков скорости",
+    "  Повторное нажатие — выкл.",
+    "",
+    "ЦВЕТА ПОДПИСЕЙ:",
+    "  маджента — GPS-H5",
+    "  голубой  — GPS-H4",
+    "  жёлтый   — реал.H5",
+    "  зелёный  — реал.H4",
+    "",
+    "КНОПКИ АЛГОРИТМОВ:",
+    "  1.dB  2.Пал  3.Отн",
+    "  4.Шум 5.-3dB 6.RMS",
+    "  ? — справка по алгоритму",
+    "",
+    "СЛАЙДЕРЫ И ПОЛЯ:",
+    "  Fmin/Fmax — диапазон частот",
+    "  Ширина — полосы гармоник",
+    "  Шаг,с — шаг расчёта (0.01-5.0)",
+    "  Цвет — градаций палитры (1-255)",
+    "  Пик,Гц — поиск пика (1-30)",
+    "",
+    "dGPS-КАЛИБРОВКА (v0.56.1):",
+    "  Авто по самому длинному интервалу",
+    "  из истории. В статусе — метка (H).",
+    "  Отключить: gps_lag_from_history=false",
+]
+
+HELP_RIGHT_LINES = [
+    "ОВЕРЛЕЙ:",
+    "  Прям. — линии H5/H4 min/max",
+    "  Факт. — кривые по шагам",
+    "  Оба   — и линии, и кривые",
+    "  Выкл  — ничего",
+    "",
+    "НАВИГАЦИЯ ПО ИСТОРИИ:",
+    "  Назад / Вперед — по позициям",
+    "  Применить (A) — зафиксировать",
+    "     все правки ОДНОЙ записью",
+    "  Удалить поз. — стереть текущую",
+    "  Сб.время / Сб.част / Сброс",
+    "",
+    "ИНДИКАТОР ПРАВОК:",
+    "  Ист: N/M * — есть правки,",
+    "     не зафиксированные Apply.",
+    "  При Назад/Вперёд с правками —",
+    "     диалог Да/Нет/Отмена.",
+    "",
+    "КЛАВИШИ:",
+    "  ? — помощь (это окно)",
+    "  Q — выход   S — сохранить конфиг",
+    "  P — PNG-скриншот со штампом",
+    "  A — применить правки (Apply)",
+    "  Z — шаг назад по истории",
+    "  Shift+Z — общий сброс",
+    "  Esc — отмена / фаза TIME",
+    "  1..6 — запуск алгоритма",
+    "  Tab / Shift+Tab — поля ввода",
+    "",
+    "ЧТО ХРАНИТ ИСТОРИЯ:",
+    "  Оси X/Y, диапазон анализа,",
+    "  H5/H4, алгоритм, Шаг, Цвет,",
+    "  Пик, Ширину, режим оверлея.",
+    "",
+    "ЛОГИКА РАСЧЁТА:",
+    "  f0 = (H5/5 + H4/4) / 2",
+    "  V = 0.377·Rk·n / (Io·Ik)",
+    "  Rk = c_def·P·H/1e5 + 0.0127·R",
+    "  dn = 60·df·stroke / cyl",
+    "",
+    "ФАЙЛЫ:",
+    "  <file>_config.json — настройки",
+    "  <file>_speed_report_algoN.txt — отчёт",
+    "  <file>_spec_YYYYMMDD_HHMMSS.png — PNG",
+    "  history_log.txt — журнал версий",
+    "",
+    "GPS ИЗ СОСЕДЕЙ (v0.56.5):",
+    "  При нехватке GPS-точек (РЭБ) —",
+    "  добор из N-1 и N+1 .ts той же серии.",
+    "  Отключить: neighbor_gps_enabled=false",
+    "",
+    "ЗОНЫ НЕДОВЕРИЯ (v0.56.5):",
+    "  Точки с аномальным ускорением",
+    "  исключаются из корреляции.",
+    "  Настройки: doubt_radius_sec,",
+    "  doubt_min_points, accel_0_100_sec.",
+    "",
+    "КОЭФ. СМЯТИЯ ШИНЫ (v0.57.8):",
+    "  tire_deflection_coeff в config.",
+    "  Rk = c_def·P·H/1e5 + 0.0127·R.",
+    "  Дефолт 0.84 (235/70 R16).",
+    "  Подбор: если Vа > Vgps на k%,",
+    "  c_new = c_old · (1 - k/100).",
+]
+
+
+def find_range_1(freqs, spectrum_col, target_freq, color_steps,
+                 vmin, vmax, cmap_n=256, f_lo=None, f_hi=None):
+    norm = matplotlib.colors.Normalize(vmin=vmin, vmax=vmax)
+    idx_threshold = max(0, min(cmap_n - 1, int(color_steps)))
+    db_threshold = float(norm.inverse(idx_threshold / (cmap_n - 1)))
+    return _search_threshold(freqs, spectrum_col, target_freq, db_threshold, f_lo, f_hi)
+
+
+def find_range_2(freqs, spectrum_col, target_freq, color_steps,
+                 vmin, vmax, cmap_n=256, f_lo=None, f_hi=None):
+    target_idx = int(np.argmin(np.abs(freqs - target_freq)))
+    db_center = spectrum_col[target_idx]
+    norm = matplotlib.colors.Normalize(vmin=vmin, vmax=vmax)
+    idx_center = int(norm(db_center) * (cmap_n - 1))
+    idx_threshold = max(0, idx_center - int(color_steps))
+    db_threshold = float(norm.inverse(idx_threshold / (cmap_n - 1)))
+    return _search_threshold(freqs, spectrum_col, target_freq, db_threshold, f_lo, f_hi)
+
+
+def find_range_3(freqs, spectrum_col, target_freq, color_steps,
+                 vmin, vmax, cmap_n=256, f_lo=None, f_hi=None):
+    target_idx = int(np.argmin(np.abs(freqs - target_freq)))
+    db_center = float(spectrum_col[target_idx])
+    db_threshold = db_center - float(color_steps)
+    return _search_threshold(freqs, spectrum_col, target_freq, db_threshold, f_lo, f_hi)
+
+
+def find_range_4(freqs, spectrum_col, target_freq, color_steps,
+                 vmin, vmax, cmap_n=256, f_lo=None, f_hi=None):
+    if f_lo is None:
+        f_lo = freqs[0]
+    if f_hi is None:
+        f_hi = freqs[-1]
+    lo_idx = int(np.argmin(np.abs(freqs - f_lo)))
+    hi_idx = int(np.argmin(np.abs(freqs - f_hi)))
+    target_idx = int(np.argmin(np.abs(freqs - target_freq)))
+    band = hi_idx - lo_idx
+    noise_n = max(3, band // 5)
+    noise_lo = spectrum_col[lo_idx:lo_idx + noise_n]
+    noise_hi = spectrum_col[hi_idx - noise_n:hi_idx + 1]
+    noise = np.concatenate([noise_lo, noise_hi])
+    noise_median = float(np.median(noise))
+    noise_std = float(np.std(noise))
+    if noise_std < 1e-6:
+        noise_std = 1.0
+    db_threshold = noise_median + float(color_steps) * noise_std
+    db_center = float(spectrum_col[target_idx])
+    if db_threshold >= db_center:
+        db_threshold = db_center - 1.0
+    return _search_threshold(freqs, spectrum_col, target_freq, db_threshold, f_lo, f_hi)
+
+
+def find_range_5(freqs, spectrum_col, target_freq, color_steps,
+                 vmin, vmax, cmap_n=256, f_lo=None, f_hi=None):
+    target_idx = int(np.argmin(np.abs(freqs - target_freq)))
+    db_center = float(spectrum_col[target_idx])
+    db_drop = float(color_steps) / 255.0 * 3.0
+    db_threshold = db_center - db_drop
+    return _search_threshold(freqs, spectrum_col, target_freq, db_threshold, f_lo, f_hi)
+
+
+def find_range_6(freqs, spectrum_col, target_freq, color_steps,
+                 vmin, vmax, cmap_n=256, f_lo=None, f_hi=None):
+    target_idx = int(np.argmin(np.abs(freqs - target_freq)))
+    if f_lo is None:
+        f_lo = freqs[0]
+    if f_hi is None:
+        f_hi = freqs[-1]
+    lo_idx = int(np.argmin(np.abs(freqs - f_lo)))
+    hi_idx = int(np.argmin(np.abs(freqs - f_hi)))
+
+    power = np.power(10.0, spectrum_col / 20.0)
+    fraction = max(0.01, min(1.0, float(color_steps) / 255.0))
+    total_power = float(np.sum(power[lo_idx:hi_idx + 1]))
+    if total_power < 1e-10:
+        return float(freqs[target_idx]), float(freqs[target_idx])
+
+    cumsum = 0.0
+    h_max_idx = target_idx
+    for i in range(target_idx, hi_idx + 1):
+        cumsum += power[i]
+        if cumsum / total_power >= fraction:
+            h_max_idx = i
+            break
+        h_max_idx = i
+
+    cumsum = 0.0
+    h_min_idx = target_idx
+    for i in range(target_idx, lo_idx - 1, -1):
+        cumsum += power[i]
+        if cumsum / total_power >= fraction:
+            h_min_idx = i
+            break
+        h_min_idx = i
+
+    if h_max_idx > target_idx and h_max_idx - 1 >= 0:
+        cumsum_before = float(np.sum(power[target_idx:h_max_idx]))
+        cumsum_after = cumsum_before + float(power[h_max_idx])
+        target_cum = fraction * total_power
+        if cumsum_after - cumsum_before > 1e-10:
+            frac = (target_cum - cumsum_before) / (cumsum_after - cumsum_before)
+            frac = max(0.0, min(1.0, frac))
+            h_max = float(freqs[h_max_idx - 1] + frac *
+                          (freqs[h_max_idx] - freqs[h_max_idx - 1]))
+        else:
+            h_max = float(freqs[h_max_idx])
+    else:
+        h_max = float(freqs[h_max_idx])
+
+    if h_min_idx < target_idx and h_min_idx + 1 < len(freqs):
+        cumsum_before = float(np.sum(power[h_min_idx + 1:target_idx + 1]))
+        cumsum_after = cumsum_before + float(power[h_min_idx])
+        target_cum = fraction * total_power
+        if cumsum_after - cumsum_before > 1e-10:
+            frac = (target_cum - cumsum_before) / (cumsum_after - cumsum_before)
+            frac = max(0.0, min(1.0, frac))
+            h_min = float(freqs[h_min_idx + 1] + frac *
+                          (freqs[h_min_idx] - freqs[h_min_idx + 1]))
+        else:
+            h_min = float(freqs[h_min_idx])
+    else:
+        h_min = float(freqs[h_min_idx])
+
+    return h_min, h_max
+
+
+_FIND_RANGE_FUNCS = {
+    1: find_range_1, 2: find_range_2, 3: find_range_3,
+    4: find_range_4, 5: find_range_5, 6: find_range_6,
+}
+
+
+def find_range_dispatch(algo, freqs, spectrum_col, target_freq, color_steps,
+                        vmin, vmax, cmap_n=256, f_lo=None, f_hi=None):
+    func = _FIND_RANGE_FUNCS.get(algo, find_range_2)
+    return func(freqs, spectrum_col, target_freq, color_steps,
+                vmin, vmax, cmap_n, f_lo, f_hi)
+
+
+def get_search_bounds(harm_freqs, n_harm, target_idx):
+    n = len(harm_freqs)
+    if n <= 1:
+        return None, None
+    target_idx = max(0, min(target_idx, n - 1))
+    if target_idx > 0:
+        f_lo = (harm_freqs[target_idx - 1] + harm_freqs[target_idx]) / 2
+    else:
+        f_lo = harm_freqs[target_idx] / 2 if harm_freqs[target_idx] > 0 else None
+    if target_idx < n - 1:
+        f_hi = (harm_freqs[target_idx] + harm_freqs[target_idx + 1]) / 2
+    else:
+        f_hi = harm_freqs[target_idx] * 1.5
+    return f_lo, f_hi
+
+
+
+# ==================================================================
+# v0.53.9: читаемый диагностический лог GPS-лага
+# Таблицы сортируются по lag, в строках видны Va и Vg.
+# ==================================================================
+
+def _corr_stats_at_lag(a_t, a_v, gps_t, gps_v, lag):
+    """Полная статистика корреляции на заданном сдвиге.
+    Дополнительно: n_g, dt_a, dt_g, dmean, std_ratio, rmse."""
+    shifted = gps_t + float(lag)
+    mask = (a_t >= shifted[0]) & (a_t <= shifted[-1])
+    n = int(mask.sum())
+    if n < 5:
+        return None
+    a = a_v[mask]
+    t_a = a_t[mask]
+    g = np.interp(t_a, shifted, gps_v)
+    a_std = float(a.std())
+    g_std = float(g.std())
+    if a_std < 1e-6 or g_std < 1e-6:
+        return None
+    c = float(np.corrcoef(a, g)[0, 1])
+    if np.isnan(c):
+        return None
+
+    gps_in_win = (shifted >= t_a[0]) & (shifted <= t_a[-1])
+    n_g = int(gps_in_win.sum())
+
+    if len(t_a) >= 2:
+        dt_a = float(np.median(np.diff(t_a)))
+    else:
+        dt_a = 0.0
+    if n_g >= 2:
+        gps_win_t = shifted[gps_in_win]
+        dt_g = float(np.median(np.diff(gps_win_t)))
+    else:
+        dt_g = 0.0
+
+    diff = g - a
+    rmse = float(np.sqrt(np.mean(diff * diff)))
+    dmean = float(g.mean() - a.mean())
+    std_ratio = a_std / g_std if g_std > 1e-9 else 0.0
+
+    return {
+        'lag':   float(lag),
+        'corr':  c,
+        'n':     n,
+        'n_g':   n_g,
+        'dt_a':  dt_a,
+        'dt_g':  dt_g,
+        't0':    float(t_a[0]),
+        't1':    float(t_a[-1]),
+        'a_min': float(a.min()),
+        'a_max': float(a.max()),
+        'a_avg': float(a.mean()),
+        'a_std': a_std,
+        'g_min': float(g.min()),
+        'g_max': float(g.max()),
+        'g_avg': float(g.mean()),
+        'g_std': g_std,
+        'dmean': dmean,
+        'std_ratio': std_ratio,
+        'rmse':  rmse,
+    }
+
+
+def _scan_lags(a_t, a_v, gps_t, gps_v, lag_lo, lag_hi, step):
+    """Проходит по всем lag в [lag_lo, lag_hi] с шагом step.
+    Возвращает список dict-статистик, отсортированный по lag.
+    Порядок обеспечивается итерацией по целым номерам шагов.
+    """
+    n_steps = int(round((lag_hi - lag_lo) / step)) + 1
+    out = []
+    for k in range(n_steps):
+        lag = lag_lo + k * step
+        st = _corr_stats_at_lag(a_t, a_v, gps_t, gps_v, float(lag))
+        if st is not None:
+            out.append(st)
+    return out
+
+
+def _paired_samples_at_lag(a_t, a_v, gps_t, gps_v, lag,
+                          max_points=200):
+    """Возвращает список (t, v_aud, v_gps_interp) в окне для
+    заданного сдвига. Прореживает до max_points.
+    """
+    shifted = gps_t + float(lag)
+    mask = (a_t >= shifted[0]) & (a_t <= shifted[-1])
+    if mask.sum() == 0:
+        return []
+    t_a = a_t[mask]
+    v_a = a_v[mask]
+    v_g = np.interp(t_a, shifted, gps_v)
+    n = len(t_a)
+    if n <= max_points:
+        idx = list(range(n))
+    else:
+        k = max(1, n // max_points)
+        idx = list(range(0, n, k))[:max_points]
+    return [(float(t_a[i]), float(v_a[i]), float(v_g[i]))
+            for i in idx]
+
+
+def _diag_verdict(stats, best):
+    """Строки вердикта."""
+    lines = []
+    if not stats:
+        lines.append("Ни одного сдвига не посчиталось.")
+        lines.append("Причины:")
+        lines.append("  * меньше 5 точек пересечения на всех сдвигах;")
+        lines.append("  * нулевой разброс скорости у одного из сигналов;")
+        lines.append("  * окна аудио и GPS не пересекаются по времени.")
+        return lines
+    if best is None:
+        lines.append("Есть посчитанные сдвиги, но пик не определён.")
+        return lines
+
+    _a_std = float(best.get('a_std', 0.0))
+    _g_std = float(best.get('g_std', 0.0))
+    if _a_std < 1.0 and _g_std < 1.0:
+        lines.append("В окне анализа НЕТ выраженной динамики.")
+        lines.append(f"  Va_std = {_a_std:.3f} км/ч")
+        lines.append(f"  Vg_std = {_g_std:.3f} км/ч")
+        lines.append("Обе кривые почти постоянны. Корреляция двух")
+        lines.append("плоских сигналов принципиально ненадёжна —")
+        lines.append("пик будет близок к нулю при любом сдвиге.")
+        lines.append("Что делать:")
+        lines.append("  1) Выбрать окно с разгоном/торможением.")
+        lines.append("  2) Или задать gps_lag_override вручную.")
+        return lines
+
+    a = abs(best['corr'])
+    if a < 0.3:
+        lines.append(f"Слабая корреляция (|corr|={a:.4f}).")
+        lines.append("Результат НЕ надёжен. Вероятные причины:")
+        lines.append("  * разные формы кривых аудио и GPS;")
+        lines.append("  * неверная передача КПП в параметрах авто;")
+        lines.append("  * GPS слишком редкие для динамики разгона;")
+        lines.append("  * сдвиг вне окна поиска.")
+    elif a < 0.5:
+        lines.append(f"Умеренная корреляция (|corr|={a:.4f}).")
+        lines.append("Результат под вопросом.")
+    elif a < 0.8:
+        lines.append(f"Хорошая корреляция (|corr|={a:.4f}).")
+        lines.append(f"Лаг {best['lag']:+.2f}с вероятно правильный.")
+    else:
+        lines.append(f"Сильная корреляция (|corr|={a:.4f}).")
+        lines.append(f"Лаг {best['lag']:+.2f}с надёжен.")
+    if best['corr'] < 0:
+        lines.append("ВНИМАНИЕ: корреляция отрицательная —")
+        lines.append("сигналы в противофазе (аномалия).")
+    if abs(best['lag']) >= 4.9:
+        lines.append("Пик у края окна ±5с — истинный лаг, возможно,")
+        lines.append("за пределами диапазона.")
+    return lines
+
+
+def write_gps_lag_diag(filepath, gps_points, arr_t, arr_v,
+                       best_lag, best_corr, all_results,
+                       gps_method='none',
+                       analyze_window=None):
+    """Полный диагностический лог. Таблицы сдвигов — по возрастанию lag,
+    в каждой строке видны Va и Vg (какие скорости сравниваются)."""
+    try:
+        base = os.path.splitext(os.path.basename(filepath))[0]
+        log_dir = os.path.dirname(os.path.abspath(filepath)) or '.'
+        log_path = os.path.join(log_dir, f"{base}_gps_lag_diag.log")
+        csv_path = os.path.join(log_dir, f"{base}_gps_lag_diag.csv")
+
+        gps_t = np.asarray([p[0] for p in gps_points], dtype=float)
+        gps_v = np.asarray([p[1] for p in gps_points], dtype=float)
+        gps_lat = np.asarray([p[2] for p in gps_points], dtype=float)
+        gps_lon = np.asarray([p[3] for p in gps_points], dtype=float)
+        a_t = np.asarray(arr_t, dtype=float)
+        a_v = np.asarray(arr_v, dtype=float)
+
+        sep = '=' * 118
+        sub = '-' * 118
+
+        HDR = (
+            "  "
+            + f"{'lag,с':>8s}  "
+            + f"{'corr':>9s}  "
+            + f"{'n':>5s}  "
+            + f"{'n_g':>4s}  "
+            + f"{'dt_a':>5s}  "
+            + f"{'dt_g':>5s}  "
+            + f"{'t0-t1,с':>17s}  "
+            + f"{'Va_avg':>7s}  "
+            + f"{'Vg_avg':>7s}  "
+            + f"{'dmean':>7s}  "
+            + f"{'Va_std':>7s}  "
+            + f"{'Vg_std':>7s}  "
+            + f"{'StdRt':>6s}  "
+            + f"{'RMSE':>7s}"
+        )
+        DASH = "  " + "-" * (len(HDR) - 2)
+
+        def row_fmt(st):
+            return (
+                "  "
+                + f"{st['lag']:+8.2f}  "
+                + f"{st['corr']:+9.4f}  "
+                + f"{st['n']:5d}  "
+                + f"{st['n_g']:4d}  "
+                + f"{st['dt_a']:5.2f}  "
+                + f"{st['dt_g']:5.2f}  "
+                + f"{st['t0']:7.1f}-{st['t1']:7.1f}  "
+                + f"{st['a_avg']:7.2f}  "
+                + f"{st['g_avg']:7.2f}  "
+                + f"{st['dmean']:+7.2f}  "
+                + f"{st['a_std']:7.3f}  "
+                + f"{st['g_std']:7.3f}  "
+                + f"{st['std_ratio']:6.2f}  "
+                + f"{st['rmse']:7.2f}"
+            )
+
+        # Сканируем ±5с (шаг 0.1с) — это основная таблица
+        stats_5 = _scan_lags(a_t, a_v, gps_t, gps_v, -5.0, 5.0, 0.1)
+        best5 = None
+        if stats_5:
+            best5 = max(stats_5, key=lambda r: abs(r['corr']))
+
+        # CSV
+        try:
+            with open(csv_path, 'w', encoding='utf-8') as cf:
+                cf.write("# SECTION: GPS_POINTS\n")
+                cf.write("index,t_rel_sec,speed_kmh,lat,lon\n")
+                for i in range(len(gps_points)):
+                    cf.write(f"{i},{gps_t[i]:.6f},{gps_v[i]:.6f},"
+                             f"{gps_lat[i]:.8f},{gps_lon[i]:.8f}\n")
+                cf.write("\n# SECTION: AUDIO_POINTS\n")
+                cf.write("index,t_sec,speed_kmh\n")
+                for i in range(len(a_t)):
+                    cf.write(f"{i},{a_t[i]:.6f},{a_v[i]:.6f}\n")
+                cf.write("\n# SECTION: LAG_STATS\n")
+                cf.write("lag_sec,corr,n,n_g,dt_a,dt_g,t0,t1,"
+                         "Va_avg,Vg_avg,dmean,Va_std,Vg_std,"
+                         "std_ratio,rmse\n")
+                for st in stats_5:
+                    cf.write(
+                        f"{st['lag']:.4f},{st['corr']:.6f},"
+                        f"{st['n']},{st['n_g']},"
+                        f"{st['dt_a']:.4f},{st['dt_g']:.4f},"
+                        f"{st['t0']:.4f},{st['t1']:.4f},"
+                        f"{st['a_avg']:.4f},{st['g_avg']:.4f},"
+                        f"{st['dmean']:.4f},"
+                        f"{st['a_std']:.4f},{st['g_std']:.4f},"
+                        f"{st['std_ratio']:.4f},"
+                        f"{st['rmse']:.4f}\n")
+        except Exception as e_csv:
+            print(f"  GPS-diag: ошибка CSV ({e_csv})", file=sys.stderr)
+
+        with open(log_path, 'w', encoding='utf-8') as f:
+            # ---------------- Шапка ----------------
+            f.write(sep + "\n")
+            f.write(f"GPS-LAG DIAGNOSTIC — audio_speed_calc v{VERSION}\n")
+            f.write(f"Файл: {os.path.basename(filepath)}\n")
+            f.write(f"Полный путь: {os.path.abspath(filepath)}\n")
+            f.write("Дата: "
+                    + datetime.datetime.now().strftime(
+                        '%Y-%m-%d %H:%M:%S') + "\n")
+            f.write(f"Метод GPS: {gps_method}\n")
+            if analyze_window is not None:
+                aw0, aw1 = analyze_window
+                f.write(f"Окно анализа: {aw0:.3f} … "
+                        f"{aw1:.3f} с "
+                        f"(длительность "
+                        f"{aw1 - aw0:.3f} с)\n")
+                f.write("Поиск лага и корреляция ведутся "
+                        "только внутри этого окна.\n")
+            else:
+                f.write("Окно анализа: (не задано)\n")
+            f.write(f"CSV: {os.path.basename(csv_path)}\n")
+            f.write(sep + "\n\n")
+
+            # ---------------- 0. Легенда ----------------
+            f.write(sub + "\n")
+            f.write("0. ЛЕГЕНДА И КОНВЕНЦИИ\n")
+            f.write(sub + "\n")
+            f.write("  t_аудио  — время от начала аудио-потока "
+                    "(кадр 0 STFT).\n")
+            f.write("  t_GPS    — время от первой GPS-метки в файле.\n")
+            f.write("  lag      — сдвиг, применяемый к GPS: "
+                    "shifted = t_GPS + lag.\n")
+            f.write("               lag>0  — GPS-точки сдвигаются вправо;\n")
+            f.write("               lag<0  — GPS-точки сдвигаются влево.\n")
+            f.write("  Va       — скорость по аудио (H5/H4), км/ч.\n")
+            f.write("  Vg       — скорость по GPS, интерп. на t_аудио, "
+                    "км/ч.\n")
+            f.write("  corr     — корреляция Пирсона между Va и Vg "
+                    "в окне пересечения.\n")
+            f.write("  n        — число парных точек в окне.\n")
+            f.write("  t0-t1    — начало и конец окна пересечения "
+                    "по t_аудио.\n")
+            f.write("  Va min/max/avg/std — статистика скорости по "
+                    "аудио в окне.\n")
+            f.write("  Vg min/max/avg/std — статистика скорости по GPS "
+                    "(после интерполяции).\n")
+            f.write("\n")
+
+            # ---------------- 1. GPS-точки ----------------
+            f.write(sub + "\n")
+            f.write(f"1. ВСЕ GPS-ТОЧКИ ({len(gps_points)} шт.)\n")
+            f.write(sub + "\n")
+            if len(gps_points) == 0:
+                f.write("  GPS-точек нет.\n\n")
+            else:
+                f.write(f"  {'#':>6}  {'t_GPS,с':>12}  "
+                        f"{'V,км/ч':>10}  {'lat':>15}  {'lon':>15}\n")
+                for i in range(len(gps_points)):
+                    f.write(f"  {i:>6d}  {gps_t[i]:+12.4f}  "
+                            f"{gps_v[i]:10.3f}  "
+                            f"{gps_lat[i]:+15.7f}  "
+                            f"{gps_lon[i]:+15.7f}\n")
+            f.write("\n")
+
+            # ---------------- 2. Аудио-точки ----------------
+            f.write(sub + "\n")
+            f.write(f"2. ВСЕ АУДИО-ТОЧКИ ({len(a_t)} шт.)\n")
+            f.write(sub + "\n")
+            if len(a_t) == 0:
+                f.write("  Аудио-точек нет.\n\n")
+            else:
+                f.write(f"  {'#':>6}  {'t_аудио,с':>14}  "
+                        f"{'V,км/ч':>10}\n")
+                for i in range(len(a_t)):
+                    f.write(f"  {i:>6d}  {a_t[i]:+14.4f}  "
+                            f"{a_v[i]:10.3f}\n")
+            f.write("\n")
+
+            # ---------------- 3. Статистика ----------------
+            f.write(sub + "\n")
+            f.write("3. СТАТИСТИКА СИГНАЛОВ\n")
+            f.write(sub + "\n")
+            if len(gps_t) > 0:
+                dt_gps = np.diff(gps_t) if len(gps_t) >= 2 else np.array([])
+                f.write("  --- GPS ---\n")
+                f.write(f"  Точек:          {len(gps_t)}\n")
+                f.write(f"  Диапазон t_GPS: {gps_t[0]:.3f} … "
+                        f"{gps_t[-1]:.3f} с "
+                        f"(длительность {gps_t[-1]-gps_t[0]:.3f} с)\n")
+                if len(dt_gps) > 0:
+                    med = float(np.median(dt_gps))
+                    f.write(f"  dt median:      {med:.4f} с\n")
+                    f.write(f"  dt min / max:   {dt_gps.min():.4f} / "
+                            f"{dt_gps.max():.4f} с\n")
+                    f.write(f"  Пропусков:      "
+                            f"{int((dt_gps > 3 * med).sum())}\n")
+                    f.write(f"  dt<=0:          "
+                            f"{int((dt_gps <= 0).sum())}\n")
+                f.write(f"  V min/max:      {gps_v.min():.3f} / "
+                        f"{gps_v.max():.3f} км/ч\n")
+                f.write(f"  V avg / std:    {gps_v.mean():.3f} / "
+                        f"{gps_v.std():.6f}\n")
+                n_zero = int((gps_v < 1.0).sum())
+                f.write(f"  V<1 км/ч:       {n_zero}\n")
+                n_zz = int(((gps_lat == 0) & (gps_lon == 0)).sum())
+                f.write(f"  (0,0) коорд:    {n_zz}\n")
+                f.write("\n")
+            if len(a_t) > 0:
+                f.write("  --- Аудио ---\n")
+                f.write(f"  Точек:          {len(a_t)}\n")
+                f.write(f"  Диапазон:       {a_t[0]:.3f} … "
+                        f"{a_t[-1]:.3f} с\n")
+                if len(a_t) >= 2:
+                    f.write(f"  dt median:      "
+                            f"{float(np.median(np.diff(a_t))):.4f} с\n")
+                f.write(f"  V min/max:      {a_v.min():.3f} / "
+                        f"{a_v.max():.3f} км/ч\n")
+                f.write(f"  V avg / std:    {a_v.mean():.3f} / "
+                        f"{a_v.std():.6f}\n")
+                f.write("\n")
+
+            # ---------------- 4. Перекрытие ----------------
+            f.write(sub + "\n")
+            f.write("4. ПЕРЕКРЫТИЕ ПРИ lag=0\n")
+            f.write(sub + "\n")
+            if len(a_t) > 0 and len(gps_t) > 0:
+                ov_s = max(a_t[0], gps_t[0])
+                ov_e = min(a_t[-1], gps_t[-1])
+                ov_d = ov_e - ov_s
+                f.write(f"  Аудио t:        {a_t[0]:.3f} … "
+                        f"{a_t[-1]:.3f}\n")
+                f.write(f"  GPS   t:        {gps_t[0]:.3f} … "
+                        f"{gps_t[-1]:.3f}\n")
+                f.write(f"  Перекрытие:     {ov_s:.3f} … "
+                        f"{ov_e:.3f}  ({ov_d:.3f} с)\n")
+                if ov_d <= 0:
+                    f.write("  [FAIL] Перекрытия нет.\n")
+                else:
+                    f.write(f"  Доля перекрытия: "
+                            f"{100.0 * ov_d / max(a_t[-1]-a_t[0], 1e-6):.1f}%"
+                            f" от длительности аудио\n")
+                a_std = float(a_v.std())
+                g_std = float(gps_v.std())
+                f.write(f"  std аудио:      {a_std:.6f} км/ч\n")
+                f.write(f"  std GPS:        {g_std:.6f} км/ч\n")
+                if a_std > 1e-6 and g_std > 1e-6:
+                    ratio = max(a_std, g_std) / min(a_std, g_std)
+                    f.write(f"  Отношение std:  {ratio:.4f}\n")
+                    if ratio > 5:
+                        f.write("  [WARN] Разбросы отличаются >5 раз.\n")
+                if a_std < 0.5:
+                    f.write("  [WARN] Аудио-скорость почти "
+                            "постоянна.\n")
+                if g_std < 0.5:
+                    f.write("  [WARN] GPS-скорость почти "
+                            "постоянна.\n")
+            f.write("\n")
+
+            # ---------------- 5. Таблица ±5с ----------------
+            f.write(sub + "\n")
+            f.write("5. ВСЕ СДВИГИ В ±5с (шаг 0.1с) — СОРТИРОВКА ПО lag\n")
+            f.write(sub + "\n")
+            f.write("  Каждая строка — один сдвиг.\n")
+            f.write("  Va — скорость по аудио в окне; "
+                    "Vg — скорость по GPS (интерп.) в том же окне.\n")
+            f.write("  Окно = пересечение по времени после применения "
+                    "lag.\n\n")
+            if not stats_5:
+                f.write("  [FAIL] Ни одного сдвига не посчиталось.\n")
+                f.write("  См. секцию 4 — вероятно нет перекрытия "
+                        "или нулевой std.\n")
+            else:
+                f.write(f"  Всего посчитано сдвигов: {len(stats_5)}\n\n")
+                f.write(HDR + "\n")
+                f.write(DASH + "\n")
+                for st in stats_5:
+                    mark = ""
+                    if best5 and abs(st['lag'] - best5['lag']) < 1e-9:
+                        mark = "   <== ЛУЧШИЙ"
+                    f.write(row_fmt(st) + mark + "\n")
+            f.write("\n")
+
+            # ---------------- 6. Таблица ±60с ----------------
+            f.write(sub + "\n")
+            f.write("6. ВСЕ СДВИГИ В ±60с (шаг 0.1с) — "
+                    "СОРТИРОВКА ПО lag\n")
+            f.write(sub + "\n")
+            if len(a_t) >= 5 and len(gps_t) >= 3:
+                stats_60 = _scan_lags(a_t, a_v, gps_t, gps_v,
+                                      -60.0, 60.0, 0.1)
+                if stats_60:
+                    best60 = max(stats_60,
+                                 key=lambda r: abs(r['corr']))
+                    f.write(f"  Всего посчитано сдвигов: "
+                            f"{len(stats_60)}\n\n")
+                    f.write(HDR + "\n")
+                    f.write(DASH + "\n")
+                    for st in stats_60:
+                        mark = ""
+                        if abs(st['lag'] - best60['lag']) < 1e-9:
+                            mark = "   <== ЛУЧШИЙ ±60с"
+                        f.write(row_fmt(st) + mark + "\n")
+                    f.write(f"\n  ЛУЧШИЙ ±60с: "
+                            f"lag={best60['lag']:+.4f}с, "
+                            f"corr={best60['corr']:+.6f}\n")
+                    if abs(best60['lag']) > 6.0:
+                        f.write("  [ВНИМАНИЕ] Реальный лаг вне ±5с — "
+                                "задайте gps_lag_override.\n")
+                else:
+                    f.write("  Ни одного сдвига не посчиталось.\n")
+            else:
+                f.write("  Недостаточно точек.\n")
+            f.write("\n")
+
+            # ---------------- 7. Таблица ±300с ----------------
+            f.write(sub + "\n")
+            f.write("7. СВЕРХШИРОКИЙ ПОИСК ±300с (шаг 0.5с) — "
+                    "СОРТИРОВКА ПО lag\n")
+            f.write(sub + "\n")
+            if len(a_t) >= 5 and len(gps_t) >= 3:
+                stats_300 = _scan_lags(a_t, a_v, gps_t, gps_v,
+                                       -300.0, 300.0, 0.5)
+                if stats_300:
+                    best300 = max(stats_300,
+                                  key=lambda r: abs(r['corr']))
+                    f.write(f"  Всего посчитано сдвигов: "
+                            f"{len(stats_300)}\n\n")
+                    f.write(HDR + "\n")
+                    f.write(DASH + "\n")
+                    for st in stats_300:
+                        mark = ""
+                        if abs(st['lag'] - best300['lag']) < 1e-9:
+                            mark = "   <== ЛУЧШИЙ ±300с"
+                        f.write(row_fmt(st) + mark + "\n")
+                    f.write(f"\n  ЛУЧШИЙ ±300с: "
+                            f"lag={best300['lag']:+.4f}с, "
+                            f"corr={best300['corr']:+.6f}\n")
+                    if abs(best300['lag']) > 60.0:
+                        f.write("  [ВНИМАНИЕ] Реальный лаг >60с.\n")
+                else:
+                    f.write("  Ни одного сдвига не посчиталось.\n")
+            else:
+                f.write("  Недостаточно точек.\n")
+            f.write("\n")
+
+            # ---------------- 8. Контрольные сдвиги ----------------
+            f.write(sub + "\n")
+            f.write("8. КОНТРОЛЬНЫЕ СДВИГИ — СРАВНЕНИЕ СКОРОСТЕЙ\n")
+            f.write(sub + "\n")
+            if len(a_t) >= 5 and len(gps_t) >= 3:
+                ctrl = [-60, -45, -30, -20, -15, -10, -7, -5, -3, -2,
+                        -1, 0, 1, 2, 3, 5, 7, 10, 15, 20, 30, 45, 60]
+                f.write(HDR + "\n")
+                f.write(DASH + "\n")
+                for lag in ctrl:
+                    st = _corr_stats_at_lag(a_t, a_v, gps_t, gps_v,
+                                            float(lag))
+                    if st is None:
+                        f.write(f"  {float(lag):+8.2f}  "
+                                + f"{'—':>9s}  {'—':>5s}  "
+                                + f"{'—':>4s}  {'—':>5s}  {'—':>5s}  "
+                                + f"{'—':>17s}  "
+                                + f"{'—':>7s}  {'—':>7s}  "
+                                + f"{'—':>7s}  {'—':>7s}  {'—':>7s}  "
+                                + f"{'—':>6s}  {'—':>7s}  "
+                                + "  (нет данных)\n")
+                    else:
+                        f.write(row_fmt(st) + "\n")
+            else:
+                f.write("  Недостаточно точек.\n")
+            f.write("\n")
+
+            # ---------------- 9. Парные данные ----------------
+            f.write(sub + "\n")
+            f.write("9. ПАРНЫЕ ДАННЫЕ НА ЛУЧШЕМ СДВИГЕ\n")
+            f.write(sub + "\n")
+            if best5 is not None:
+                f.write(f"  Лучший сдвиг: lag={best5['lag']:+.4f}с, "
+                        f"corr={best5['corr']:+.6f}, n={best5['n']}\n\n")
+                pairs = _paired_samples_at_lag(
+                    a_t, a_v, gps_t, gps_v, best5['lag'],
+                    max_points=200)
+                f.write(f"  {'#':>5}  {'t_аудио,с':>12}  "
+                        f"{'Va,км/ч':>10}  {'Vg,км/ч':>10}  "
+                        f"{'Δ=Vg-Va':>10}\n")
+                f.write("  " + "-" * 56 + "\n")
+                for i, (t, va, vg) in enumerate(pairs):
+                    f.write(f"  {i:>5d}  {t:12.4f}  "
+                            f"{va:10.3f}  {vg:10.3f}  "
+                            f"{vg - va:+10.3f}\n")
+            else:
+                f.write("  Лучший сдвиг не определён.\n")
+            f.write("\n")
+
+            # ---------------- 10. Вердикт ----------------
+            f.write(sub + "\n")
+            f.write("10. ВЕРДИКТ\n")
+            f.write(sub + "\n")
+            best_st = None
+            if stats_5:
+                best_st = max(stats_5, key=lambda r: abs(r['corr']))
+            for v in _diag_verdict(stats_5, best_st):
+                f.write("  " + v + "\n")
+            f.write("\n")
+
+            # ---------------- 11. Зоны недоверия ----------------
+            f.write(sub + "\n")
+            f.write("11. ЗОНЫ НЕДОВЕРИЯ (v0.56.5)\n")
+            f.write(sub + "\n")
+            _zones = getattr(self, "gps_doubt_zones", []) \
+                if "self" in dir() else []
+            # в контексте функции write_gps_lag_diag self нет,
+            # поэтому работаем с переданными аргументами
+            f.write("  См. консольный вывод.\n")
+            f.write("  Точки с аномальным ускорением "
+                    "исключены из корреляции.\n")
+            f.write("\n")
+
+            f.write(sep + "\n")
+            f.write("КОНЕЦ ОТЧЁТА\n")
+            f.write(f"Версия: {VERSION}\n")
+            f.write(f"CSV: {os.path.basename(csv_path)}\n")
+            f.write(sep + "\n")
+
+        return log_path
+
+    except Exception as e:
+        print(f"  GPS-diag: ошибка записи лога: {e}",
+              file=sys.stderr)
+        try:
+            import traceback
+            traceback.print_exc()
+        except Exception:
+            pass
+        return None
+
+
+class AudioSpeedAnalyzer:
+
+    PHASE_TIME = 'time'
+    PHASE_H5 = 'h5'
+    PHASE_H4 = 'h4'
+    PHASE_DONE = 'done'
+
+    def __init__(self, filepath, config, config_path):
+        self.filepath = filepath
+        self.cfg = config
+        self.config_path = config_path
+        self.audio = None
+        self.sr = config['sample_rate']
+        self.duration = 0
+        self.freqs = None
+        self.times = None
+        self.S_db = None
+        self.n_frames = 0
+        self.frame_idx = None
+        self.analyze_start = 0
+        self.analyze_dur = 0
+        self.h5 = config.get('harmonic_5_freq')
+        self.h4 = config.get('harmonic_4_freq')
+        self.f0 = None
+        self.n_harm = 0
+        self.harm_freqs = []
+        self.phase = self.PHASE_TIME
+        self.line_width = int(config.get('harmonic_line_width', 3))
+        self.color_steps = int(config.get('color_steps', 10))
+        self.help_visible = False
+        self.time_marker = None
+        self.time_span = None
+        self.span_selector = None
+        self.harm_lines = []
+        self.harm_bands = []
+        self.harm_labels = []
+        self.spec_img = None
+        self._cbar = None
+        self._spec_vmin = None
+        self._spec_vmax = None
+        self._xaxis_fps = config['target_fps']
+        self.h5_min = None
+        self.h5_max = None
+        self.h4_min = None
+        self.h4_max = None
+        self.range_lines = []
+        self.range_labels = []
+        self.cursor_text = None
+        self.drag_text = None
+        self._drag_start_frame = None
+        self.zoom_history = []
+        self.zoom_pointer = -1
+        self._last_reset_action = None
+        self.tb_x_start = None
+        self.tb_x_end = None
+        self.tb_dx = None
+        self.tb_y_min = None
+        self.tb_y_max = None
+        self.tb_width = None
+        self.tb_step = None
+        self.tb_color = None
+        self.tb_peak = None
+        self._syncing_fields = False
+        self._tb_list = []
+        self._updating_axes = False
+        self._tb_focused_idx = -1
+        self.tube_t = []
+        self.tube_h5_mins = []
+        self.tube_h5_maxs = []
+        self.tube_h4_mins = []
+        self.tube_h4_maxs = []
+        self.tube_collections = []
+        self.tube_center_lines = []
+        self.tube_h5_centers = []
+        self.tube_h4_centers = []
+        self.overlay_objects = []
+        self._algo_help_visible_num = None
+        self._algo_help_obj = None
+        self.peak_search_hz = float(config.get('peak_search_hz', 5.0))
+        self.algorithm = int(config.get('algorithm', 2))
+        self.last_algo = self.algorithm
+        self._algo_run_done = False
+        self.overlay_mode = int(config.get('overlay_mode', 0))
+        self._algo_results = {}
+        self.gps_points = []
+        self.gps_method = 'none'
+        self.gps_lag = 0.0
+        self.gps_corr = 0.0
+        self._png_list = []
+        self._footer_text = None
+        self._sys_info_printed = False
+        self._closing = False
+
+        # v0.53: оверлей GPS-скорости и подписи пиков
+        self.speed_overlay_h5 = False
+        self.speed_overlay_h4 = False
+        self._speed_lines = []
+        self.speed_labels_on = False
+        self._speed_label_objs = []
+
+        # v0.53.1: Vmax/Vmin в окне + GPS-средняя для статуса
+        self.gps_v_avg = None
+        self._extreme_objs = []
+
+        # v0.53.2: защита от повторного входа в пересчёт
+        self._recalc_in_progress = False
+
+        # v0.56.1: кэш калибровки dGPS по длинному интервалу
+        self.gps_lag_calibrated = None
+        self.gps_corr_calibrated = 0.0
+        self.gps_lag_calib_h5 = None
+        self.gps_lag_calib_h4 = None
+        self.gps_lag_calib_info = None
+
+        # v0.56.5: расширение GPS за счёт соседних файлов
+        self.gps_points_full = []          # с точками соседей
+        self.gps_neighbor_info = None      # статистика добора
+        self.gps_doubt_zones = []          # зоны недоверия
+        self.gps_weights = []              # веса 0/1
+        self.gps_valid_stats = None        # сколько выброшено
+
+        _override_init = config.get('gps_lag_override')
+        if _override_init is not None:
+            try:
+                self.gps_lag = float(_override_init)
+            except (ValueError, TypeError):
+                pass
+
+        sm = config.get('spec_mode', 'time')
+        if sm == 'freq':
+            sm = 'power'
+        self.spec_mode = sm
+
+    # ---------- расчёт скорости ----------
+
+    def _calc_speed(self, h5_c, h4_c):
+        cyl = self.cfg['cylinders']
+        stroke = self.cfg['stroke']
+        P = self.cfg['tire_width']
+        H = self.cfg['tire_profile']
+        R = self.cfg['rim_diameter']
+        Io = self.cfg['final_drive']
+        Ik = self.cfg['gear_ratio']
+
+        f5 = h5_c / 5.0
+        f4 = h4_c / 4.0
+        f = (f5 + f4) / 2.0
+        n = 60.0 * f * stroke / cyl
+        _c_def = float(self.cfg.get('tire_deflection_coeff', 0.84))
+        Rk = _c_def * P * H / 100000.0 + 0.0127 * R
+        self.cfg['_rk'] = Rk
+        V = 0.377 * Rk * n / (Io * Ik)
+        return f, n, Rk, V
+
+    def _calc_speed_error(self, h5_min, h5_max, h4_min, h4_max, f, V):
+        df = (abs(h5_max - h5_min) / 5.0 + abs(h4_max - h4_min) / 4.0) / 2.0 / 2.0
+        cyl = self.cfg['cylinders']
+        stroke = self.cfg['stroke']
+        Rk = self.cfg.get('_rk', 0.0)
+        Io = self.cfg['final_drive']
+        Ik = self.cfg['gear_ratio']
+        dn = 60.0 * df * stroke / cyl
+        dV = abs(0.377 * Rk * dn / (Io * Ik)) if (Io * Ik) > 0 else 0.0
+        return df, dV
+
+    def _write_speed_report(self, filepath, algo, f_start, f_end, step_sec,
+                            color_steps, peak_hz, vmin, vmax,
+                            f_lo5, f_hi5, f_lo4, f_hi4,
+                            step_data, h5_glob_min, h5_glob_max,
+                            h4_glob_min, h4_glob_max,
+                            v_min, v_max, v_avg, dv_min, dv_max, dv_avg,
+                            f0_val, n_min, n_max, Rk_val):
+        cyl = self.cfg['cylinders']
+        stroke = self.cfg['stroke']
+        P = self.cfg['tire_width']
+        H = self.cfg['tire_profile']
+        R = self.cfg['rim_diameter']
+        Io = self.cfg['final_drive']
+        Ik = self.cfg['gear_ratio']
+        fps = self.cfg['target_fps']
+
+        sep = "=" * 60
+        with open(filepath, 'w', encoding='utf-8') as f:
+            f.write(f"Отчёт расчёта скорости — audio_speed_calc v{VERSION}\n")
+            f.write(f"Файл: {os.path.basename(self.filepath)}\n")
+            f.write(f"Длительность: {self.duration:.3f} сек "
+                    f"(кадров: {self.n_frames})\n")
+            f.write(f"Алгоритм: {algo} ({ALGO_NAMES.get(algo, '?')})\n\n")
+
+            # --- Диапазон анализа ---
+            f.write(sep + "\n")
+            f.write("ДИАПАЗОН АНАЛИЗА\n")
+            f.write(sep + "\n")
+            f.write(f"  Кадры:     {f_start}-{f_end}  "
+                    f"({f_end - f_start} кадров)\n")
+            f.write(f"  Время:     {f_start/fps:.3f}-{f_end/fps:.3f}с  "
+                    f"({(f_end - f_start)/fps:.3f}с)\n")
+            f.write(f"  FPS:       {fps}\n")
+            step_actual_frames_r0 = int(round(step_sec * fps))
+            step_actual_sec_r0 = step_actual_frames_r0 / fps
+            f.write(f"  Шаг:       {step_sec:.3f} сек "
+                    f"(~{step_sec * fps:.1f} кадров, "
+                    f"факт {step_actual_frames_r0} кадр = "
+                    f"{step_actual_sec_r0:.3f}с)\n")
+            f.write(f"  Шагов:     {len(step_data)}\n")
+            f.write(sep + "\n\n")
+
+            now_dt = datetime.datetime.now().strftime('%d.%m.%Y %H:%M:%S')
+            f.write(f"Дата и время анализа: {now_dt}\n")
+            _, sections = self._collect_sysinfo_lines()
+            for title, slines in sections:
+                f.write(sep + "\n")
+                f.write(title + "\n")
+                f.write(sep + "\n")
+                for sl in slines:
+                    f.write(sl + "\n")
+            f.write(sep + "\n\n")
+            f.write(f"Кадры: {f_start}-{f_end}  "
+                    f"Время: {f_start/fps:.3f}-{f_end/fps:.3f}с\n")
+            step_actual_frames_r = int(round(step_sec * fps))
+            step_actual_sec_r = step_actual_frames_r / fps
+            f.write(f"Шаг: {step_sec:.3f} сек (~{step_sec * fps:.1f} кадров, "
+                    f"факт {step_actual_frames_r} кадр = "
+                    f"{step_actual_sec_r:.3f}с)\n\n")
+
+            f.write("Параметры автомобиля:\n")
+            f.write(f"  Цилиндров: {cyl}\n")
+            f.write(f"  Тактность: {stroke} "
+                    f"({'4-такт' if stroke == 2 else '2-такт'})\n")
+            f.write(f"  Шина: {P}/{H} R{R}\n")
+            f.write(f"  Главная пара: {Io}\n")
+            f.write(f"  Передача: {Ik}\n\n")
+
+            f.write("Формулы:\n")
+            f.write("  f5 = H5ц / 5\n")
+            f.write("  f4 = H4ц / 4\n")
+            f.write("  f  = (f5 + f4) / 2\n")
+            f.write("  n  = 60 * f * stroke / cylinders\n")
+            _c_rep = float(
+                self.cfg.get('tire_deflection_coeff', 0.84))
+            f.write("  Rk = c_def * P * H / 100000 + 0.0127 * R"
+                    "  (c_def=%.4f)\n" % _c_rep)
+            f.write("  V  = 0.377 * Rk * n / (Io * Ik)\n")
+            f.write("  df = ((H5max-H5min)/5 + (H4max-H4min)/4) / 2 / 2\n")
+            f.write("  dn = 60 * df * stroke / cyl\n")
+            f.write("  dV = 0.377 * Rk * dn / (Io * Ik)\n\n")
+
+            _c_rep2 = float(
+                self.cfg.get('tire_deflection_coeff', 0.84))
+            f.write(f"Rk = {_c_rep2:.4f} * {P} * {H} / 100000 + "
+                    f"0.0127 * {R} = {Rk_val:.4f} м\n\n")
+
+            f.write("Пошаговый расчёт:\n")
+            f.write(f"{'N':>3s}  {'Время,с':>8s}  {'H5 min':>10s}  "
+                    f"{'H5 max':>10s}  {'H4 min':>10s}  {'H4 max':>10s}  "
+                    f"{'H5ц':>8s}  {'H4ц':>8s}  {'f,Гц':>8s}  "
+                    f"{'n,об/мин':>10s}  {'V,км/ч':>8s}  {'±V,км/ч':>8s}\n")
+            f.write("-" * 120 + "\n")
+
+            for i, sd in enumerate(step_data):
+                t_sec = sd['t_sec']
+                h5mn, h5mx = sd['h5_min'], sd['h5_max']
+                h4mn, h4mx = sd['h4_min'], sd['h4_max']
+                h5c, h4c = sd['h5_c'], sd['h4_c']
+                f_val, n_val = sd['f'], sd['n']
+                v_val, dv_val = sd['V'], sd['dV']
+
+                f.write(f"{i+1:3d}  {t_sec:8.3f}  {h5mn:10.3f}  "
+                        f"{h5mx:10.3f}  {h4mn:10.3f}  {h4mx:10.3f}  "
+                        f"{h5c:8.3f}  {h4c:8.3f}  {f_val:8.3f}  "
+                        f"{n_val:10.0f}  {v_val:8.2f}  {dv_val:8.2f}\n")
+
+                f5 = h5c / 5.0
+                f4 = h4c / 4.0
+                f0 = (f5 + f4) / 2.0
+                n0 = 60.0 * f0 * stroke / cyl
+                df_val = (abs(h5mx - h5mn) / 5.0
+                          + abs(h4mx - h4mn) / 4.0) / 2.0 / 2.0
+                f.write("     Подстановка:\n")
+                f.write(f"       f5 = {h5c:.3f}/5 = {f5:.3f} Гц\n")
+                f.write(f"       f4 = {h4c:.3f}/4 = {f4:.3f} Гц\n")
+                f.write(f"       f  = ({f5:.3f}+{f4:.3f})/2 = {f0:.3f} Гц\n")
+                f.write(f"       n  = 60*{f0:.3f}*{stroke}/{cyl} = "
+                        f"{n0:.0f} об/мин\n")
+                f.write(f"       V  = 0.377*{Rk_val:.4f}*{n0:.0f}/"
+                        f"({Io}*{Ik}) = {v_val:.2f} км/ч\n")
+                f.write(f"       df = (({h5mx:.3f}-{h5mn:.3f})/5 + "
+                        f"({h4mx:.3f}-{h4mn:.3f})/4) / 2 / 2 = "
+                        f"{df_val:.3f} Гц\n")
+                dn0 = 60.0 * df_val * stroke / cyl
+                dV0 = abs(0.377 * Rk_val * dn0 / (Io * Ik)) \
+                    if (Io * Ik) > 0 else 0.0
+                f.write(f"       dn = 60*{df_val:.3f}*{stroke}/{cyl} = "
+                        f"{dn0:.0f} об/мин\n")
+                f.write(f"       dV = 0.377*{Rk_val:.4f}*{dn0:.0f}/"
+                        f"({Io}*{Ik}) = {dV0:.2f} км/ч\n")
+                f.write(f"       ИТОГ ШАГА: V = {v_val:.2f} ± "
+                        f"{dV0:.2f} км/ч\n\n")
+
+            f.write("\nИТОГ (за весь отрезок):\n")
+            f.write(f"  H5: {h5_glob_min:.3f} - {h5_glob_max:.3f} Гц\n")
+            f.write(f"  H4: {h4_glob_min:.3f} - {h4_glob_max:.3f} Гц\n")
+            f.write(f"  V min  = {v_min:.2f} ± {dv_min:.2f} км/ч\n")
+            f.write(f"  V max  = {v_max:.2f} ± {dv_max:.2f} км/ч\n")
+            f.write(f"  V ср   = {v_avg:.2f} ± {dv_avg:.2f} км/ч\n")
+            f.write(f"  n      = {n_min:.0f} - {n_max:.0f} об/мин\n")
+            f.write(f"  f0     = {f0_val:.3f} Гц\n")
+            f.write(f"  Rk     = {Rk_val:.4f} м\n")
+
+            if self.gps_points:
+                gps_t_arr_r = [p[0] for p in self.gps_points]
+                gps_v_arr_r = [p[1] for p in self.gps_points]
+                # v0.55.2: gps_t ∈ [a0-lag, a1-lag]
+                # (точки, попавшие в окно ПОСЛЕ сдвига)
+                t_start_gps_r = f_start / fps - self.gps_lag
+                t_end_gps_r = f_end / fps - self.gps_lag
+                gps_in_win_r, gps_before_r, gps_after_r = find_gps_window_points(
+                    self.gps_points, t_start_gps_r, t_end_gps_r)
+                if not gps_in_win_r and len(gps_t_arr_r) >= 2:
+                    t_mid_r = (t_start_gps_r + t_end_gps_r) / 2
+                    if gps_t_arr_r[0] <= t_mid_r <= gps_t_arr_r[-1]:
+                        gps_in_win_r = [(t_mid_r, float(np.interp(
+                            t_mid_r, gps_t_arr_r, gps_v_arr_r)), 0.0)]
+                f.write("\nGPS-СРАВНЕНИЕ:\n")
+                f.write(f"  Метод: {self.gps_method}\n")
+                f.write(f"  GPS-меток в файле: {len(self.gps_points)}\n")
+                f.write(f"  Запаздывание GPS: {self.gps_lag:+.3f} сек "
+                        f"(корреляция: {self.gps_corr:.3f})\n")
+                f.write(f"  Окно аудио: {f_start/fps:.3f}-{f_end/fps:.3f}с\n")
+                f.write(f"  Окно GPS (с поправкой): "
+                        f"{t_start_gps_r:.3f}-{t_end_gps_r:.3f}с\n")
+                f.write("  Соседние GPS-точки:\n")
+                if gps_before_r:
+                    f.write(f"    [{gps_before_r[0]:.3f}с] "
+                            f"{gps_before_r[1]:.1f} км/ч  "
+                            f"({gps_before_r[2]:.3f}с до окна)\n")
+                for pt in gps_in_win_r:
+                    f.write(f"    [{pt[0]:.3f}с] {pt[1]:.1f} км/ч  "
+                            f"(в окне)\n")
+                if gps_after_r:
+                    f.write(f"    [{gps_after_r[0]:.3f}с] "
+                            f"{gps_after_r[1]:.1f} км/ч  "
+                            f"({gps_after_r[2]:.3f}с после окна)\n")
+                if gps_in_win_r:
+                    gps_avg_r = sum(p[1] for p in gps_in_win_r) \
+                        / len(gps_in_win_r)
+                    f.write(f"  V аудио (ср): {v_avg:.2f} км/ч\n")
+                    f.write(f"  V GPS  (ср): {gps_avg_r:.2f} км/ч "
+                            f"(интерполяция по "
+                            f"{len(gps_in_win_r)} точкам)\n")
+                    f.write(f"  dV: {v_avg - gps_avg_r:+.2f} км/ч\n")
+                else:
+                    f.write("  GPS-точек в окне не найдено\n")
+
+            png_list = getattr(self, '_png_list', [])
+            if png_list:
+                f.write("\n" + sep + "\n")
+                f.write(f"  СКРИНШОТЫ ({len(png_list)} шт.)\n")
+                f.write(sep + "\n")
+                for i, p in enumerate(png_list):
+                    f.write(f"  {i+1}. {p['name']}\n")
+                    f.write(f"     Размер: {p['size']} байт   "
+                            f"MD5: {p['md5']}   Дата: {p['date']}\n")
+
+    def _effective_lag(self):
+        """Эффективный лаг GPS.
+
+        Возвращает gps_lag_override из конфига, если он задан;
+        иначе — self.gps_lag (результат корреляции либо значение
+        из конфига, прочитанное в __init__).
+        """
+        _override = self.cfg.get('gps_lag_override')
+        if _override is not None:
+            try:
+                _v = float(_override)
+                # DEBUG: [GPS-lag-src]
+                print(f"[GPS-lag-src] override={_v:+.4f} (raw={_override!r})",
+                      file=sys.stderr, flush=True)
+                return _v
+            except (ValueError, TypeError):
+                pass
+        _v = float(self.gps_lag)
+        # DEBUG: [GPS-lag-src]
+        print(f"[GPS-lag-src] self.gps_lag={_v:+.4f} "
+              f"(override={_override!r})",
+              file=sys.stderr, flush=True)
+        return _v
+
+    def _gps_k5k4(self):
+        """Коэффициенты пересчёта GPS-скорости в частоту H5/H4.
+
+        v0.55.8: калибровка по СРЕДНЕМУ реальному треку (tube_h5_centers /
+        tube_h4_centers), а не по эталонным self.h5/self.h4. Если среднее
+        положение пика в окне отличается от эталона (пик "плывёт"),
+        GPS-кривая в среднем не совпадает с реальным треком, и видимый
+        отрыв на 1 км/ч получается разным для H5 и H4.
+
+        Возвращает (k5, k4).
+        """
+        # fallback — старая формула (если треки ещё не посчитаны)
+        try:
+            V_ref = self._calc_speed(self.h5, self.h4)[3]
+        except Exception:
+            V_ref = 0.0
+        if V_ref > 1e-9:
+            k5 = self.h5 / V_ref
+            k4 = self.h4 / V_ref
+        else:
+            k5, k4 = 0.0, 0.0
+
+        # v0.55.9: калибровка по среднему реальному треку, но
+        # относительно средней АУДИО-скорости, а не GPS-скорости.
+        #
+        # При gps_v = gps_v_mean кривая окажется НИЖЕ реального трека
+        # на dV×k, где dV = audio_v_mean - gps_v_mean. Именно этот
+        # отрыв и нужно показывать. Оба отрыва (H5 и H4) в единицах
+        # км/ч будут одинаковы — dV.
+        if (len(self.tube_h5_centers) > 0
+                and len(self.tube_h4_centers) > 0
+                and len(self.gps_points) > 0):
+            audio_v = []
+            for h5c, h4c in zip(self.tube_h5_centers,
+                                self.tube_h4_centers):
+                try:
+                    _, _, _, vv = self._calc_speed(h5c, h4c)
+                except Exception:
+                    vv = 0.0
+                audio_v.append(vv)
+            if audio_v:
+                audio_v_mean = float(np.mean(audio_v))
+                if audio_v_mean > 1e-9:
+                    h5m = float(np.mean(self.tube_h5_centers))
+                    h4m = float(np.mean(self.tube_h4_centers))
+                    k5 = h5m / audio_v_mean
+                    k4 = h4m / audio_v_mean
+
+        # DEBUG: [GPS-k5k4]
+        print(f"[GPS-k5k4] k5={k5:.5f} k4={k4:.5f}",
+              file=sys.stderr, flush=True)
+        return k5, k4
+
+    def _gps_shifted_arrays(self):
+        """Полный массив GPS со сдвигом shifted = gps_t + lag.
+
+        Возвращаются ВСЕ GPS-точки, включая те, что до сдвига были
+        за пределами текущего окна анализа: после сдвига они могут
+        попасть в это окно и должны участвовать в построении
+        графика GPS.
+
+        Возвращает (frames, speeds_sm, dt_med, lag_used).
+        При отсутствии GPS — (None, None, 1.0, 0.0).
+        """
+        if not self.gps_points or len(self.gps_points) < 2:
+            return None, None, 1.0, 0.0
+
+        fps = float(self.cfg['target_fps'])
+        lag_used = self._effective_lag()
+
+        gps_t = np.array([p[0] for p in self.gps_points], dtype=float)
+        gps_v = np.array([p[1] for p in self.gps_points], dtype=float)
+
+        if len(gps_t) >= 2:
+            dt_med = float(np.median(np.diff(gps_t)))
+        else:
+            dt_med = 1.0
+        if dt_med <= 0:
+            dt_med = 1.0
+
+        smooth_sec = float(self.cfg.get('gps_smooth_sec', 2.0))
+        gps_v_sm = _smooth_series(gps_v, smooth_sec, dt_med)
+
+        gps_frames = (gps_t + lag_used) * fps
+
+        # DEBUG: [GPS-shift]
+        print(f"[GPS-shift] lag_used={lag_used:+.4f}s, fps={fps}, "
+              f"n_pts={len(gps_t)}, "
+              f"gps_t[0]={gps_t[0]:+.3f}s -> frame {gps_frames[0]:.1f}, "
+              f"gps_t[-1]={gps_t[-1]:+.3f}s -> frame {gps_frames[-1]:.1f}",
+              file=sys.stderr, flush=True)
+
+        return gps_frames, gps_v_sm, dt_med, lag_used
+
+    def _save_window_geometry(self):
+        try:
+            mgr = self.fig.canvas.manager
+            win = mgr.window
+            import re
+            if hasattr(win, 'geometry'):
+                geo = win.geometry()
+                m = re.match(r'(\d+)x(\d+)\+(-?\d+)\+(-?\d+)', geo)
+                if m:
+                    self.cfg['win_w'] = int(m.group(1))
+                    self.cfg['win_h'] = int(m.group(2))
+                    self.cfg['win_x'] = int(m.group(3))
+                    self.cfg['win_y'] = int(m.group(4))
+                    return
+            if hasattr(win, 'geometry'):
+                g = win.geometry()
+                self.cfg['win_w'] = int(g.width())
+                self.cfg['win_h'] = int(g.height())
+                self.cfg['win_x'] = int(g.x())
+                self.cfg['win_y'] = int(g.y())
+        except Exception:
+            pass
+
+    def _restore_window_geometry(self):
+        w = self.cfg.get('win_w')
+        h = self.cfg.get('win_h')
+        x = self.cfg.get('win_x')
+        y = self.cfg.get('win_y')
+        if w is None or h is None:
+            return
+        try:
+            mgr = self.fig.canvas.manager
+            win = mgr.window
+            if hasattr(win, 'geometry') and not hasattr(win, 'setGeometry'):
+                win.geometry(f"{w}x{h}+{x}+{y}")
+            elif hasattr(win, 'setGeometry'):
+                win.setGeometry(x, y, w, h)
+        except Exception:
+            pass
+
+    def run(self):
+        _init_ffmpeg()
+        if _FFMPEG_PATH:
+            print(f"ffmpeg: {_FFMPEG_PATH}")
+        else:
+            print("ffmpeg не найден. Положите ffprobe.exe и ffmpeg.exe "
+                  "рядом со скриптом или в папку bin/.")
+            return
+        if _FFPROBE_PATH:
+            print(f"ffprobe: {_FFPROBE_PATH}")
+        else:
+            print("Предупреждение: ffprobe не найден — длительность "
+                  "будет определена по факту.")
+
+        dur, dur_source = get_ts_duration(self.filepath)
+        if dur:
+            self.duration = dur
+            print(f"Файл: {os.path.basename(self.filepath)}  "
+                  f"длительность: {dur:.3f} сек ({dur_source})")
+            extract_dur = self.duration
+        else:
+            print("Длительность неизвестна (ffprobe), извлекаем полностью...")
+            extract_dur = 3600.0
+
+        print(f"Извлечение аудио (до {extract_dur:.0f} сек)...")
+        self.audio, self.sr = extract_audio(self.filepath, 0, extract_dur,
+                                            self.sr)
+        if self.audio is None or len(self.audio) == 0:
+            print("Не удалось извлечь аудио.")
+            return
+
+        actual_dur = len(self.audio) / self.sr
+        self.duration = actual_dur
+        if dur is None:
+            print(f"  {len(self.audio)} сэмплов, {actual_dur:.3f} сек, "
+                  f"SR={self.sr} (фактический замер аудио)")
+        else:
+            diff_ms = abs(dur - actual_dur) * 1000
+            print(f"  {len(self.audio)} сэмплов, {actual_dur:.3f} сек, "
+                  f"SR={self.sr}")
+            if diff_ms > 1:
+                print(f"  (ffprobe: {dur:.3f} сек, факт: {actual_dur:.3f} "
+                      f"сек — расхождение {diff_ms:.0f} мс)")
+
+        print("Вычисление спектрограммы...")
+        self.freqs, self.times, self.S_db = compute_stft(
+            self.audio, self.sr,
+            self.cfg['fft_size'], self.cfg['target_fps']
+        )
+        self.n_frames = len(self.times)
+        self.frame_idx = np.arange(self.n_frames)
+        print(f"  Кадров: {self.n_frames}")
+
+        self.gps_points = []
+        self.gps_method = 'none'
+        self.gps_lag = 0.0
+        self.gps_corr = 0.0
+
+        _override_before = self.cfg.get('gps_lag_override')
+        if _override_before is not None:
+            try:
+                self.gps_lag = float(_override_before)
+            except (ValueError, TypeError):
+                pass
+
+        try:
+            gps_raw, self.gps_method = extract_gps(self.filepath)
+            if gps_raw:
+                # v0.56.5: сначала валидация точек текущего файла
+                gps_valid, vstats = validate_gps_points(gps_raw,
+                                                         self.cfg)
+                self.gps_valid_stats = vstats
+                if vstats["dropped"] > 0:
+                    print("GPS: отброшено %d из %d точек "
+                          "(0=%d, range=%d, epoch=%d, speed=%d)" 
+                          % (vstats["dropped"], vstats["total"],
+                             vstats["reason_zero"],
+                             vstats["reason_range"],
+                             vstats["reason_epoch"],
+                             vstats["reason_speed"]),
+                          file=sys.stderr)
+                # v0.56.5: добор из соседних файлов
+                merged_epoch, ninfo = merge_gps_from_neighbors(
+                    self.filepath, self.cfg, gps_valid)
+                self.gps_neighbor_info = ninfo
+                # Перевод в относительное время
+                self.gps_points_full = gps_to_relative_time(
+                    merged_epoch)
+                # Для обратной совместимости: gps_points — это
+                # то же самое (вся склейка), но без смещения
+                # (t_rel от первой точки объединённого массива).
+                # Для корреляции используется именно полный массив.
+                self.gps_points = self.gps_points_full
+
+                print(f"GPS: {len(self.gps_points)} меток "
+                      f"({self.gps_method})")
+                if ninfo and (ninfo["added_prev"] or ninfo["added_next"]):
+                    print("  Сосед -1: %s, +%d точек" 
+                          % (ninfo["prev_file"] or "-",
+                             ninfo["added_prev"]),
+                          file=sys.stderr)
+                    print("  Сосед +1: %s, +%d точек" 
+                          % (ninfo["next_file"] or "-",
+                             ninfo["added_next"]),
+                          file=sys.stderr)
+                if self.gps_points:
+                    first = self.gps_points[0]
+                    last = self.gps_points[-1]
+                    print(f"  Первая точка: t={first[0]:.1f}с, "
+                          f"V={first[1]:.1f} км/ч")
+                    print(f"  Последняя точка: t={last[0]:.1f}с, "
+                          f"V={last[1]:.1f} км/ч")
+            else:
+                print("GPS: меток не найдено")
+        except Exception as e:
+            print(f"GPS: ошибка извлечения ({e})")
+            import traceback
+            traceback.print_exc()
+            self.gps_points = []
+
+        hop = max(1, int(self.sr / self.cfg['target_fps']))
+        frame_dur = hop / self.sr
+        self.analyze_dur = int(self.cfg['report_duration'] / frame_dur)
+        if self.analyze_dur < 1:
+            self.analyze_dur = self.n_frames
+
+        self._png_list = []
+        self._footer_text = None
+        self._sys_info_printed = False
+        self.build_gui()
+        self._restore_window_geometry()
+
+        if self.h5 and self.h4:
+            self.calc_harmonics()
+            self.draw_harmonics()
+            self.phase = self.PHASE_DONE
+            self.update_status()
+
+        self._restore_view()
+        # v0.56.3: если истории нет — создаём стартовую запись,
+        # чтобы кнопка Назад сразу имела куда возвращаться.
+        if not self.zoom_history:
+            self._push_history(force=True)
+        self._update_overlay_buttons()
+        self._update_algo_buttons()
+        if self.harm_freqs:
+            self.draw_harmonics()
+        self.draw_ranges()
+        self.draw_tubes()
+
+        self.update_status()
+        self.fig.canvas.draw_idle()
+        plt.show()
+
+    def build_gui(self):
+        saved_w = self.cfg.get('win_w')
+        saved_h = self.cfg.get('win_h')
+        dpi = 100
+        if saved_w and saved_h and saved_w > 100 and saved_h > 100:
+            fw = saved_w / dpi
+            fh = max(3, (saved_h - 28) / dpi)
+        else:
+            try:
+                import tkinter as tk
+                root = tk.Tk()
+                sw = root.winfo_screenwidth()
+                sh = root.winfo_screenheight()
+                root.destroy()
+                fw = min(15, sw / 100)
+                fh = min(9, sh / 100)
+            except Exception:
+                fw, fh = 15, 9
+
+        self.fig, self.ax_spec = plt.subplots(1, 1, figsize=(fw, fh))
+        self.fig.suptitle(
+            f'audio_speed_calc v{VERSION} — '
+            f'{os.path.basename(self.filepath)}',
+            fontsize=10, y=0.98
+        )
+        # v0.53.3: слайдеры убраны, средний столбец слит с правым,
+        # график расширен вправо (до кнопок) и вниз (до статуса).
+        self.fig.subplots_adjust(left=0.08, right=0.83,
+                                 top=0.94, bottom=0.13)
+
+        self._draw_spectrogram()
+
+        self.ax_spec.set_autoscalex_on(False)
+        self.ax_spec.set_autoscaley_on(False)
+
+        self.span_selector = SpanSelector(
+            self.ax_spec, self._on_span, 'horizontal',
+            useblit=True,
+            props=dict(alpha=0.3, facecolor='red'),
+            interactive=True, drag_from_anywhere=False
+        )
+
+        btn_x = 0.84
+        btn_w = 0.14
+        btn_h = 0.032
+        btn_gap = 0.002
+        btn_help_w = 0.025
+        btn_main_w = btn_w - btn_help_w - 0.002
+        btn_labels = [
+            ('Спектр', '_on_toggle_spec', False, None),
+            ('5я гармоника', '_btn_h5', False, None),
+            ('4я гармоника', '_btn_h4', False, None),
+            ('1.dB', lambda _, n=1: self._on_run(None, n), True, None),
+            ('2.Пал', lambda _, n=2: self._on_run(None, n), True, None),
+            ('3.Отн', lambda _, n=3: self._on_run(None, n), True, None),
+            ('4.Шум', lambda _, n=4: self._on_run(None, n), True, None),
+            ('5.-3dB', lambda _, n=5: self._on_run(None, n), True, None),
+            ('6.RMS', lambda _, n=6: self._on_run(None, n), True, None),
+            ('Прям.', lambda _, n=0: self._set_overlay_mode(n), False, 0),
+            ('Факт.', lambda _, n=1: self._set_overlay_mode(n), False, 1),
+            ('Оба', lambda _, n=2: self._set_overlay_mode(n), False, 2),
+            ('Выкл', lambda _, n=3: self._set_overlay_mode(n), False, 3),
+            ('Сб.время', '_btn_reset_time', False, None),
+            ('Сб.част', '_btn_reset_freq', False, None),
+            ('Сброс', '_btn_reset_all', False, None),
+            ('Назад', '_btn_back', False, None),
+            ('Вперед', '_step_forward', False, None),
+            ('Удалить поз.', '_btn_delete_pos', False, None),
+            ('Применить', '_btn_apply', False, None),
+            ('Выход', '_btn_exit', False, None),
+        ]
+        n_btns = len(btn_labels)
+
+        # Верх правого столбца поднят на 2 кнопки (v0.53.3)
+        y_top = 0.876 + 2 * (btn_h + btn_gap)
+
+        # --- 3 кнопки GPS-оверлея вверху правого столбца ---
+        btn_mid_defs = [
+            ('GPS→H5', 'h5'),
+            ('GPS→H4', 'h4'),
+            ('Подп.V', 'labels'),
+        ]
+        for i, (label, which) in enumerate(btn_mid_defs):
+            y = y_top - i * (btn_h + btn_gap)
+            ax_btn = self.fig.add_axes([btn_x, y, btn_w, btn_h])
+            b = Button(ax_btn, label)
+            b.label.set_fontsize(8)
+            if which == 'labels':
+                b.on_clicked(lambda _: self._on_toggle_speed_labels())
+            else:
+                b.on_clicked(lambda _, w=which: self._on_speed_overlay(w))
+            setattr(self, f'_btn_mid_{which}', b)
+
+        # --- Сводная кнопка «Все 3» (v0.53.4) ---
+        # Включает / выключает все три верхних GPS-тумблера разом:
+        # если все три уже включены — гасит все, иначе — зажигает все.
+        y_all = y_top - 3 * (btn_h + btn_gap)
+        ax_all = self.fig.add_axes([btn_x, y_all, btn_w, btn_h])
+        self._btn_mid_all = Button(ax_all, 'Все 3')
+        self._btn_mid_all.label.set_fontsize(8)
+        self._btn_mid_all.on_clicked(lambda _: self._on_toggle_all_speed())
+
+        self._update_speed_overlay_buttons()
+
+        # --- Основное меню (под кластером GPS + «Все 3») ---
+        y_main_top = y_top - 4 * (btn_h + btn_gap)
+
+        for i, (label, handler, is_algo, overlay_num) in enumerate(btn_labels):
+            y = y_main_top - i * (btn_h + btn_gap)
+            cb = handler if callable(handler) else getattr(self, handler)
+            if is_algo:
+                ax_btn = self.fig.add_axes([btn_x, y, btn_main_w, btn_h])
+                btn = Button(ax_btn, label)
+                btn.label.set_fontsize(8)
+                btn.on_clicked(cb)
+                setattr(self, f'_btn_widget_{i}', btn)
+                algo_num = int(label.split('.')[0])
+                setattr(self, f'_btn_widget_algo_{algo_num}', btn)
+                ax_help = self.fig.add_axes(
+                    [btn_x + btn_main_w + 0.002, y, btn_help_w, btn_h])
+                btn_help = Button(ax_help, '?')
+                btn_help.label.set_fontsize(7)
+                btn_help.on_clicked(
+                    lambda _, n=algo_num: self._show_algo_help(n))
+                setattr(self, f'_btn_help_widget_{algo_num}', btn_help)
+            else:
+                ax_btn = self.fig.add_axes([btn_x, y, btn_w, btn_h])
+                btn = Button(ax_btn, label)
+                btn.label.set_fontsize(8)
+                btn.on_clicked(cb)
+                setattr(self, f'_btn_widget_{i}', btn)
+                if overlay_num is not None:
+                    setattr(self, f'_btn_widget_overlay_{overlay_num}', btn)
+
+        self.status = self.fig.text(
+            0.02, 0.055, '', transform=self.fig.transFigure,
+            fontsize=9, va='top', ha='left',
+            bbox=dict(boxstyle='round', fc='white', alpha=0.85,
+                      edgecolor='gray')
+        )
+        self.update_status()
+        self._update_algo_buttons()
+        self._update_overlay_buttons()
+
+        self.cursor_text = self.ax_spec.text(
+            0.99, 0.98, '', transform=self.ax_spec.transAxes,
+            fontsize=8, va='top', ha='right',
+            bbox=dict(boxstyle='round,pad=0.3', fc='lightyellow',
+                      alpha=0.85, edgecolor='orange'),
+            zorder=50
+        )
+        self.cursor_text.set_visible(False)
+
+        self.drag_text = self.ax_spec.text(
+            0.5, 0.98, '', transform=self.ax_spec.transAxes,
+            fontsize=9, va='top', ha='center',
+            bbox=dict(boxstyle='round,pad=0.4', fc='#fff8dc',
+                      alpha=0.92, edgecolor='red', lw=1.2),
+            zorder=51
+        )
+        self.drag_text.set_visible(False)
+
+        tb_y = 0.005
+        tb_h = 0.022
+        tb_w = 0.04
+        tb_step = 0.09
+        tb_x = 0.10
+        _tb_defs = [
+            ('x_start', 'Xнач,с'), ('x_end', 'Xкон,с'), ('dx', 'dX,с'),
+            ('y_min', 'Fmin'), ('y_max', 'Fmax'),
+            ('width', 'Шир'), ('step', 'Шаг'), ('color', 'Цвет'),
+            ('peak', 'Пик'),
+        ]
+        for i, (name, label) in enumerate(_tb_defs):
+            tb = TextBox(
+                self.fig.add_axes([tb_x + i * tb_step, tb_y, tb_w, tb_h]),
+                label, initial=''
+            )
+            setattr(self, f'tb_{name}', tb)
+            tb.on_submit(getattr(self, f'_on_field_{name}'))
+
+        self._tb_list = [
+            self.tb_x_start, self.tb_x_end, self.tb_dx,
+            self.tb_y_min, self.tb_y_max,
+            self.tb_width, self.tb_step, self.tb_color, self.tb_peak,
+        ]
+        self._tb_focused_idx = -1
+        for idx, tb in enumerate(self._tb_list):
+            self._patch_textbox(tb, idx)
+
+        plt.rcParams['keymap.save'] = []
+        plt.rcParams['keymap.pan'] = []
+
+        # v0.56.0: перехват кнопки floppy disk в тулбаре.
+        # Клик по дискете вызывает нашу _toolbar_save_png(),
+        # а не стандартный save_figure() matplotlib.
+        try:
+            _tb = self.fig.canvas.manager.toolbar
+            if _tb is not None:
+                _tb.save_figure = self._make_floppy_handler()
+        except Exception as _e:
+            print(f"Не удалось перехватить floppy disk: {_e}",
+                  file=sys.stderr)
+
+        self.fig.canvas.mpl_connect('key_press_event', self._on_key)
+        self.fig.canvas.mpl_connect('button_press_event', self._on_click)
+        self.fig.canvas.mpl_connect('motion_notify_event', self._on_motion)
+        self.fig.canvas.mpl_connect('close_event', self._on_close)
+
+    def _patch_textbox(self, tb, idx):
+        orig_click = tb._click
+        orig_keypress = tb._keypress
+
+        def _click_handler(event):
+            orig_click(event)
+            try:
+                tb.text_select_all()
+            except Exception:
+                pass
+
+        def _keypress_handler(event):
+            if event.key == 'tab':
+                next_idx = (idx + 1) % len(self._tb_list)
+                self._focus_textbox(next_idx, select_all=True)
+                return
+            elif event.key == 'shift+tab':
+                prev_idx = (idx - 1) % len(self._tb_list)
+                self._focus_textbox(prev_idx, select_all=True)
+                return
+            orig_keypress(event)
+
+        tb._click = _click_handler
+        tb._keypress = _keypress_handler
+
+    def _focus_textbox(self, idx, select_all=True):
+        if idx < 0 or idx >= len(self._tb_list):
+            return
+        tb = self._tb_list[idx]
+        self._tb_focused_idx = idx
+        try:
+            canvas = self.fig.canvas
+            if hasattr(canvas, 'widgetlock'):
+                for other_tb in self._tb_list:
+                    if other_tb is not tb:
+                        try:
+                            canvas.widgetlock.release(other_tb)
+                        except Exception:
+                            pass
+                canvas.widgetlock(tb)
+            if hasattr(tb, 'ax'):
+                tb.ax.set_navigate(False)
+            if select_all:
+                try:
+                    tb.text_select_all()
+                except Exception:
+                    pass
+            self.fig.canvas.draw_idle()
+        except Exception:
+            pass
+
+    def _move_focus(self, direction):
+        canvas = self.fig.canvas
+        current_idx = -1
+        for i, tb in enumerate(self._tb_list):
+            if hasattr(canvas, 'widgetlock') and not canvas.widgetlock.available(tb):
+                current_idx = i
+                break
+        if current_idx < 0:
+            next_idx = 0 if direction > 0 else len(self._tb_list) - 1
+        else:
+            try:
+                canvas.widgetlock.release(self._tb_list[current_idx])
+            except Exception:
+                pass
+            next_idx = (current_idx + direction) % len(self._tb_list)
+        self._focus_textbox(next_idx)
+
+    def _draw_spectrogram(self):
+        if self.spec_img is not None:
+            try:
+                self.spec_img.remove()
+            except Exception:
+                pass
+            self.spec_img = None
+        if self._cbar is not None:
+            try:
+                self._cbar.remove()
+            except Exception:
+                pass
+            self._cbar = None
+
+        fmin = self.cfg['freq_min']
+        fmax = self.cfg['freq_max']
+        fmask = self.freqs <= fmax * 1.5
+        S_subset = self.S_db[fmask, :]
+        vmin = float(np.min(S_subset))
+        vmax = float(np.max(S_subset))
+        self._spec_vmin = vmin
+        self._spec_vmax = vmax
+
+        if self.spec_mode == 'time':
+            self.spec_img = self.ax_spec.pcolormesh(
+                self.frame_idx, self.freqs[fmask], self.S_db[fmask, :],
+                shading='auto', cmap='inferno'
+            )
+            spec_title = 'Спектрограмма'
+        else:
+            n_levels = max(10, min(50, self.color_steps * 5))
+            levels = np.linspace(vmin, vmax, n_levels)
+            self.spec_img = self.ax_spec.contourf(
+                self.frame_idx, self.freqs[fmask], self.S_db[fmask, :],
+                levels=levels, cmap='inferno'
+            )
+            spec_title = 'Power Spectrum'
+
+        self._cbar = self.fig.colorbar(self.spec_img, ax=self.ax_spec,
+                                       label='дБ', pad=0.01)
+        self.ax_spec.set_xlabel('Кадр / Время, с', labelpad=0)
+        self.ax_spec.set_ylabel('Частота, Гц')
+        self.ax_spec.set_ylim(fmin, fmax)
+        self.ax_spec.set_xlim(0, self.n_frames)
+        self.ax_spec.set_title(
+            f'{spec_title} ({int(fmin)}-{int(fmax)} Гц)  |  '
+            'drag = выбор/масштаб  |  клик = гармоники  |  '
+            'Z = сброс  |  P = PNG  |  Q = выход  |  ? = помощь',
+            fontsize=10
+        )
+        self.ax_spec.yaxis.set_major_formatter(
+            plt.FuncFormatter(lambda x, _: f'{int(x)}')
+        )
+        self._xaxis_fps = self.cfg['target_fps']
+        self.ax_spec.xaxis.set_major_formatter(
+            plt.FuncFormatter(lambda x, _: f'{int(x)}\n{x/self._xaxis_fps:.3f}с')
+        )
+
+    def _on_toggle_spec(self, _=None):
+        self.spec_mode = 'power' if self.spec_mode == 'time' else 'time'
+        self.cfg['spec_mode'] = self.spec_mode
+        self._draw_spectrogram()
+        if self.harm_freqs:
+            self.draw_harmonics()
+        self.draw_ranges()
+        self.draw_tubes()
+        self._sync_fields()
+        self.update_status()
+        self.fig.canvas.draw_idle()
+
+    def _btn_h5(self, _=None):
+        self._set_phase(self.PHASE_H5)
+
+    def _btn_h4(self, _=None):
+        self._set_phase(self.PHASE_H4)
+
+    def _set_overlay_mode(self, mode):
+        self.overlay_mode = mode
+        self.cfg['overlay_mode'] = mode
+        self._update_overlay_buttons()
+        self.draw_ranges()
+        self.draw_tubes()
+        self.fig.canvas.draw_idle()
+
+    def _highlight_buttons(self, prefix, count, active_val, start=0):
+        for n in range(start, start + count):
+            w = getattr(self, f'{prefix}{n}', None)
+            if w is None and prefix == '_btn_widget_algo_':
+                idx = 2 + n
+                w = getattr(self, f'_btn_widget_{idx}', None)
+            if w is not None:
+                if n == active_val:
+                    w.color = '#ccffcc'
+                    w.hovercolor = '#aaddaa'
+                else:
+                    w.color = '0.85'
+                    w.hovercolor = '0.95'
+                w.ax.set_facecolor(w.color)
+                w.ax.figure.canvas.draw_idle()
+
+    def _update_overlay_buttons(self):
+        self._highlight_buttons('_btn_widget_overlay_', 4, self.overlay_mode)
+
+    def _update_algo_buttons(self):
+        active = self.last_algo if self._algo_run_done else None
+        self._highlight_buttons('_btn_widget_algo_', 6, active, start=1)
+
+    def _show_algo_help(self, algo_num):
+        if self._algo_help_visible_num == algo_num:
+            self._hide_algo_help()
+            return
+        lines_text = ALGO_HELPS.get(algo_num, [])
+        title = ALGO_TITLES.get(algo_num, f"Алгоритм {algo_num}")
+        all_lines = [title, "=" * 50, ""] + lines_text
+        txt = '\n'.join(all_lines)
+        if self._algo_help_obj is not None:
+            try:
+                self._algo_help_obj.remove()
+            except Exception:
+                pass
+        self._algo_help_obj = self.fig.text(
+            0.25, 0.50, txt,
+            fontsize=9, va='center', ha='left', family='monospace',
+            bbox=dict(boxstyle='round,pad=0.5', fc='lightyellow',
+                      alpha=0.95, edgecolor='orange', lw=1.5),
+            zorder=100
+        )
+        self._algo_help_visible_num = algo_num
+        self.fig.canvas.draw_idle()
+
+    def _hide_algo_help(self):
+        if self._algo_help_obj is not None:
+            try:
+                self._algo_help_obj.remove()
+            except Exception:
+                pass
+            self._algo_help_obj = None
+        self._algo_help_visible_num = None
+        self.fig.canvas.draw_idle()
+
+    # ---------- оверлей GPS-скорости (v0.53) ----------
+
+    def _on_speed_overlay(self, which):
+        if which == 'h5':
+            self.speed_overlay_h5 = not self.speed_overlay_h5
+        elif which == 'h4':
+            self.speed_overlay_h4 = not self.speed_overlay_h4
+        else:
+            return
+
+        self._update_speed_overlay_buttons()
+        self._draw_speed_overlay()
+        self._draw_speed_labels()
+        self._draw_speed_extremes()
+
+    def _on_toggle_speed_labels(self):
+        self.speed_labels_on = not self.speed_labels_on
+        self._update_speed_overlay_buttons()
+        self._draw_speed_labels()
+        self._draw_speed_extremes()
+
+    def _on_toggle_all_speed(self):
+        """Сводный тумблер «Все 3»: одновременное включение либо
+        выключение всех трёх верхних кнопок — GPS→H5, GPS→H4, Подп.V.
+
+        Логика:
+          - если все три уже включены → выключаем все три;
+          - в любом другом состоянии   → включаем все три.
+        """
+        if self.speed_overlay_h5 and self.speed_overlay_h4 \
+                and self.speed_labels_on:
+            self.speed_overlay_h5 = False
+            self.speed_overlay_h4 = False
+            self.speed_labels_on = False
+        else:
+            self.speed_overlay_h5 = True
+            self.speed_overlay_h4 = True
+            self.speed_labels_on = True
+
+        self._update_speed_overlay_buttons()
+        self._draw_speed_overlay()
+        self._draw_speed_labels()
+        self._draw_speed_extremes()
+
+    def _update_speed_overlay_buttons(self):
+        # v0.57.9.2: цвета активных кнопок совпадают с цветами
+        # соответствующих кривых GPS на графике:
+        #   GPS→H5 — маджента #ff00cc -> светлая подсветка #ff99ff
+        #   GPS→H4 — голубой  #00ccff -> светлая подсветка #99eeff
+        # Кнопка «Подп.V» — без изменений (подписи 4 разных цветов).
+        states = [
+            ('h5',     self.speed_overlay_h5, '#ff99ff', '#ff66ff'),
+            ('h4',     self.speed_overlay_h4, '#99eeff', '#66ddff'),
+            ('labels', self.speed_labels_on,  '#ffffcc', '#ffff88'),
+        ]
+        for which, active, on_color, on_hover in states:
+            w = getattr(self, f'_btn_mid_{which}', None)
+            if w is None:
+                continue
+            if active:
+                w.color = on_color
+                w.hovercolor = on_hover
+            else:
+                w.color = '0.85'
+                w.hovercolor = '0.95'
+            w.ax.set_facecolor(w.color)
+            w.ax.figure.canvas.draw_idle()
+
+        # Подсветка сводной кнопки «Все 3»: активна, только когда
+        # все три верхних тумблера включены.
+        w_all = getattr(self, '_btn_mid_all', None)
+        if w_all is not None:
+            all_on = (self.speed_overlay_h5
+                      and self.speed_overlay_h4
+                      and self.speed_labels_on)
+            if all_on:
+                w_all.color = '#c8e6ff'
+                w_all.hovercolor = '#a8d6ff'
+            else:
+                w_all.color = '0.85'
+                w_all.hovercolor = '0.95'
+            w_all.ax.set_facecolor(w_all.color)
+            w_all.ax.figure.canvas.draw_idle()
+
+    def _draw_speed_overlay(self):
+        for ln in self._speed_lines:
+            try:
+                ln.remove()
+            except Exception:
+                pass
+        self._speed_lines = []
+
+        if not (self.speed_overlay_h5 or self.speed_overlay_h4):
+            self.fig.canvas.draw_idle()
+            return
+
+        if not self.gps_points or len(self.gps_points) < 2:
+            self.fig.canvas.draw_idle()
+            return
+
+        if self.h5 is None or self.h4 is None:
+            self.fig.canvas.draw_idle()
+            return
+
+        try:
+            V_ref = self._calc_speed(self.h5, self.h4)[3]
+        except Exception:
+            V_ref = 0.0
+
+        if V_ref <= 1.0:
+            self.fig.canvas.draw_idle()
+            return
+
+        # v0.55.8: k5/k4 теперь считаются ПОСЛЕ _gps_shifted_arrays,
+        # см. вызов _gps_k5k4() ниже.
+
+        # v0.55.3: единый источник сдвинутых GPS-данных.
+        # Возвращаются ВСЕ GPS-точки со сдвигом shifted = gps_t + lag —
+        # включая те, что до сдвига лежали за пределами выбранного
+        # диапазона анализа. После сдвига они попадают в этот диапазон
+        # и должны участвовать в построении графика GPS.
+        gps_frames, gps_v_sm, _dt_med, _lag_used = \
+            self._gps_shifted_arrays()
+        if gps_frames is None or len(gps_frames) < 2:
+            self.fig.canvas.draw_idle()
+            return
+
+        # v0.55.8: калибровка по среднему реальному треку.
+        k5, k4 = self._gps_k5k4()
+        if k5 <= 1e-9 or k4 <= 1e-9:
+            # fallback — эталонная калибровка
+            k5 = self.h5 / V_ref if V_ref > 1e-9 else 0.0
+            k4 = self.h4 / V_ref if V_ref > 1e-9 else 0.0
+
+        # DEBUG: [GPS-overlay]
+        print(f"[GPS-overlay] lag={_lag_used:+.4f}s, "
+              f"h5={'ON' if self.speed_overlay_h5 else 'off'}, "
+              f"h4={'ON' if self.speed_overlay_h4 else 'off'}, "
+              f"frames=[{gps_frames[0]:.1f}..{gps_frames[-1]:.1f}], "
+              f"xlim={self.ax_spec.get_xlim()}",
+              file=sys.stderr, flush=True)
+
+        # DEBUG diag: что и куда рисуем
+        _gv_min = float(gps_v_sm.min()) if len(gps_v_sm) else 0.0
+        _gv_max = float(gps_v_sm.max()) if len(gps_v_sm) else 0.0
+        _gv_avg = float(gps_v_sm.mean()) if len(gps_v_sm) else 0.0
+        _h5_track = (float(np.mean(self.tube_h5_centers))
+                     if self.tube_h5_centers else 0.0)
+        _h4_track = (float(np.mean(self.tube_h4_centers))
+                     if self.tube_h4_centers else 0.0)
+        _h5m = (float(np.mean(self.tube_h5_centers))
+                if self.tube_h5_centers else self.h5)
+        _h4m = (float(np.mean(self.tube_h4_centers))
+                if self.tube_h4_centers else self.h4)
+        _gvm = (float(np.mean([p[1] for p in self.gps_points]))
+                if self.gps_points else 0.0)
+        print(f"[GPS-curves] h5={self.h5:.3f} h4={self.h4:.3f} "
+              f"V_ref={V_ref:.3f} k5={k5:.4f} k4={k4:.4f} "
+              f"| h5_track_mean={_h5m:.1f} h4_track_mean={_h4m:.1f} "
+              f"gps_v_mean={_gvm:.2f}",
+              file=sys.stderr, flush=True)
+        print(f"[GPS-curves] gps_v_sm: min={_gv_min:.2f} "
+              f"avg={_gv_avg:.2f} max={_gv_max:.2f} (км/ч)",
+              file=sys.stderr, flush=True)
+        print(f"[GPS-curves] H5_curve Y: "
+              f"{_gv_min * k5:.1f}..{_gv_max * k5:.1f}  "
+              f"(реальный трек H5 avg={_h5_track:.1f})",
+              file=sys.stderr, flush=True)
+        print(f"[GPS-curves] H4_curve Y: "
+              f"{_gv_min * k4:.1f}..{_gv_max * k4:.1f}  "
+              f"(реальный трек H4 avg={_h4_track:.1f})",
+              file=sys.stderr, flush=True)
+        _gap5_hz = _h5_track - _gv_avg * k5
+        _gap4_hz = _h4_track - _gv_avg * k4
+        print(f"[GPS-curves] ОТРЫВ при gps_v_avg: "
+              f"H5={_gap5_hz:+.2f} Гц "
+              f"({_gap5_hz / k5:+.3f} км/ч), "
+              f"H4={_gap4_hz:+.2f} Гц "
+              f"({_gap4_hz / k4:+.3f} км/ч)",
+              file=sys.stderr, flush=True)
+
+        if self.speed_overlay_h5:
+            h5_curve = gps_v_sm * k5
+            ln, = self.ax_spec.plot(
+                gps_frames, h5_curve,
+                color='#ff00cc', lw=2.2, alpha=0.95,
+                zorder=10, solid_capstyle='round'
+            )
+            ln.set_path_effects([
+                pe.Stroke(linewidth=4.5, foreground='black'),
+                pe.Normal()
+            ])
+            self._speed_lines.append(ln)
+
+        if self.speed_overlay_h4:
+            h4_curve = gps_v_sm * k4
+            ln, = self.ax_spec.plot(
+                gps_frames, h4_curve,
+                color='#00ccff', lw=2.2, alpha=0.95,
+                zorder=10, solid_capstyle='round'
+            )
+            ln.set_path_effects([
+                pe.Stroke(linewidth=4.5, foreground='black'),
+                pe.Normal()
+            ])
+            self._speed_lines.append(ln)
+
+        self.fig.canvas.draw_idle()
+
+    def _gps_view_samples(self, x0_view, x1_view):
+        """Возвращает (frames, speeds, dt_med) — выборку GPS-скорости
+        в видимом окне [x0_view, x1_view].
+
+        Если GPS-точек внутри окна меньше 3, добавляются интерполированные
+        значения на границах окна и в центре — чтобы подписи и экстремумы
+        работали и в узких диапазонах.
+        Возвращает (None, None, dt) при отсутствии GPS.
+        """
+        if not self.gps_points or len(self.gps_points) < 2:
+            return None, None, 1.0
+
+        gps_t = np.array([p[0] for p in self.gps_points], dtype=float)
+        gps_v = np.array([p[1] for p in self.gps_points], dtype=float)
+
+        if len(gps_t) >= 2:
+            dt_med = float(np.median(np.diff(gps_t)))
+        else:
+            dt_med = 1.0
+        if dt_med <= 0:
+            dt_med = 1.0
+
+        # v0.55.3: сглаживание через _smooth_series() с параметром
+        # gps_smooth_sec из конфига (было hardcoded 2.0 с).
+        smooth_sec = float(self.cfg.get('gps_smooth_sec', 2.0))
+        gps_v_sm = _smooth_series(gps_v, smooth_sec, dt_med)
+
+        fps = self.cfg['target_fps']
+        lag_used = self._effective_lag()
+        # v0.55.3: shifted = gps_t + lag (см. find_gps_lag).
+        # Все GPS-точки сдвигаются одинаково — включая те, что до
+        # сдвига были за пределами видимого окна. После сдвига они
+        # могут попасть в окно и должны участвовать в построении
+        # подписей/экстремумов/графика.
+        gps_frames = (gps_t + lag_used) * fps
+
+        vis = (gps_frames >= x0_view) & (gps_frames <= x1_view)
+        n_vis = int(vis.sum())
+
+        if n_vis >= 3:
+            return gps_frames[vis], gps_v_sm[vis], dt_med
+
+        # Окно не пересекается с GPS-диапазоном — пусто
+        if gps_frames[-1] < x0_view or gps_frames[0] > x1_view:
+            return np.array([]), np.array([]), dt_med
+
+        t_lo = max(x0_view, float(gps_frames[0]))
+        t_hi = min(x1_view, float(gps_frames[-1]))
+
+        pieces_t = []
+        pieces_v = []
+
+        # Реальные точки, попавшие в окно
+        if n_vis >= 1:
+            pieces_t.append(gps_frames[vis])
+            pieces_v.append(gps_v_sm[vis])
+
+        # Интерполяция на границах окна и в центре
+        if t_hi > t_lo:
+            ts_extra = np.array(
+                [t_lo, (t_lo + t_hi) / 2.0, t_hi], dtype=float)
+        else:
+            ts_extra = np.array([t_lo], dtype=float)
+        vs_extra = np.interp(ts_extra, gps_frames, gps_v_sm)
+        pieces_t.append(ts_extra)
+        pieces_v.append(vs_extra)
+
+        all_t = np.concatenate(pieces_t)
+        all_v = np.concatenate(pieces_v)
+        order = np.argsort(all_t)
+        all_t = all_t[order]
+        all_v = all_v[order]
+
+        # Дедупликация совпадающих по времени
+        keep_t = [all_t[0]]
+        keep_v = [all_v[0]]
+        for tt, vv in zip(all_t[1:], all_v[1:]):
+            if abs(tt - keep_t[-1]) > 1e-6:
+                keep_t.append(tt)
+                keep_v.append(vv)
+        return np.array(keep_t), np.array(keep_v), dt_med
+
+    def _draw_speed_labels(self):
+        for obj in self._speed_label_objs:
+            try:
+                obj.remove()
+            except Exception:
+                pass
+        self._speed_label_objs = []
+
+        if not self.speed_labels_on:
+            self.fig.canvas.draw_idle()
+            return
+
+        x0_view, x1_view = self.ax_spec.get_xlim()
+        if x1_view < x0_view:
+            x0_view, x1_view = x1_view, x0_view
+
+        # v0.57.9: собираем кандидатов в буфер, потом фильтруем
+        # налезающие подписи ПО X И ПО Y одновременно — вне
+        # зависимости от цвета. Устраняет:
+        #   * "10[6.3]6.4"  (два пика одного цвета близко по X)
+        #   * маджента+голубая в одной точке (разные цвета,
+        #     но близки и по X, и по Y — на пересечении кривых).
+        candidates = []
+
+        def _queue(f_x, f_y, v_val, color, is_max):
+            candidates.append({
+                'x': float(f_x),
+                'y': float(f_y),
+                'text': f'{v_val:.1f}',
+                'color': color,
+                'is_max': bool(is_max),
+            })
+
+        # ---------- GPS-секция ----------
+        if (self.speed_overlay_h5 or self.speed_overlay_h4) \
+                and self.gps_points and len(self.gps_points) >= 2 \
+                and self.h5 is not None and self.h4 is not None:
+            try:
+                V_ref = self._calc_speed(self.h5, self.h4)[3]
+            except Exception:
+                V_ref = 0.0
+
+            if V_ref > 1.0:
+                k5, k4 = self._gps_k5k4()
+                if k5 <= 1e-9 or k4 <= 1e-9:
+                    k5 = self.h5 / V_ref
+                    k4 = self.h4 / V_ref
+
+                gf_vis, gv_vis, dt_med = self._gps_view_samples(
+                    x0_view, x1_view)
+
+                if gf_vis is not None and len(gf_vis) >= 1:
+                    min_dist = max(1, int(round(3.0 / dt_med))) \
+                        if dt_med > 0 else 1
+
+                    if len(gf_vis) >= 3:
+                        peaks_idx = _find_peaks_simple(
+                            gv_vis, min_distance=min_dist)
+                        mins_idx = _find_extrema_simple(
+                            gv_vis, min_distance=min_dist, invert=True)
+
+                        if len(peaks_idx) > 20:
+                            peaks_idx = sorted(
+                                peaks_idx,
+                                key=lambda i: -gv_vis[i])[:20]
+                            peaks_idx.sort()
+                        if len(mins_idx) > 20:
+                            mins_idx = sorted(
+                                mins_idx,
+                                key=lambda i: gv_vis[i])[:20]
+                            mins_idx.sort()
+
+                        label_pts = [(float(gf_vis[i]),
+                                      float(gv_vis[i]), True)
+                                     for i in peaks_idx]
+                        label_pts += [(float(gf_vis[i]),
+                                       float(gv_vis[i]), False)
+                                      for i in mins_idx]
+                    else:
+                        label_pts = [(float(gf_vis[i]),
+                                      float(gv_vis[i]), True)
+                                     for i in range(len(gf_vis))]
+
+                    if self.speed_overlay_h5:
+                        for f_x, v_val, is_max in label_pts:
+                            if v_val < 5.0:
+                                continue
+                            _queue(f_x, v_val * k5, v_val,
+                                   '#ff00cc', is_max)
+                    if self.speed_overlay_h4:
+                        for f_x, v_val, is_max in label_pts:
+                            if v_val < 5.0:
+                                continue
+                            _queue(f_x, v_val * k4, v_val,
+                                   '#00ccff', is_max)
+
+        # ---------- Аудио-секция ----------
+        if self.tube_t and self.tube_h5_centers and self.tube_h4_centers:
+            t_arr = np.array(self.tube_t, dtype=float)
+            h5_c_arr = np.array(self.tube_h5_centers, dtype=float)
+            h4_c_arr = np.array(self.tube_h4_centers, dtype=float)
+
+            v_audio = []
+            for h5c, h4c in zip(h5_c_arr, h4_c_arr):
+                try:
+                    _, _, _, v = self._calc_speed(h5c, h4c)
+                except Exception:
+                    v = 0.0
+                v_audio.append(v)
+            v_audio = np.array(v_audio, dtype=float)
+
+            if len(t_arr) >= 2:
+                dt_step = float(np.median(np.diff(t_arr)))
+            else:
+                dt_step = 0.1
+            if dt_step <= 0:
+                dt_step = 0.1
+
+            vis2 = (t_arr >= x0_view) & (t_arr <= x1_view)
+            if vis2.sum() >= 3:
+                t_vis = t_arr[vis2]
+                h5_vis = h5_c_arr[vis2]
+                h4_vis = h4_c_arr[vis2]
+                v_vis = v_audio[vis2]
+
+                min_dist2 = max(1, int(round(3.0 / dt_step)))
+                peaks_idx2 = _find_peaks_simple(
+                    v_vis, min_distance=min_dist2)
+                mins_idx2 = _find_extrema_simple(
+                    v_vis, min_distance=min_dist2, invert=True)
+
+                if len(peaks_idx2) > 20:
+                    peaks_idx2 = sorted(
+                        peaks_idx2, key=lambda i: -v_vis[i])[:20]
+                    peaks_idx2.sort()
+                if len(mins_idx2) > 20:
+                    mins_idx2 = sorted(
+                        mins_idx2, key=lambda i: v_vis[i])[:20]
+                    mins_idx2.sort()
+
+                for idx in peaks_idx2:
+                    v_val = float(v_vis[idx])
+                    if v_val < 5.0:
+                        continue
+                    _queue(float(t_vis[idx]),
+                           float(h5_vis[idx]), v_val,
+                           '#ffff00', True)
+                    _queue(float(t_vis[idx]),
+                           float(h4_vis[idx]), v_val,
+                           '#00ff00', True)
+
+                for idx in mins_idx2:
+                    v_val = float(v_vis[idx])
+                    if v_val < 5.0:
+                        continue
+                    _queue(float(t_vis[idx]),
+                           float(h5_vis[idx]), v_val,
+                           '#ffff00', False)
+                    _queue(float(t_vis[idx]),
+                           float(h4_vis[idx]), v_val,
+                           '#00ff00', False)
+
+        # ---------- Фильтрация: X+Y, все цвета разом ----------
+        # Пороги подобраны по видимой ширине подписи из 5 знаков
+        # при fontsize=8 с чёрной обводкой (stroke 2.5) + запас
+        # на неровную ширину цифр и округление до кадра.
+        # Значения читаются из конфига и могут меняться без
+        # правки .py:
+        #   label_pad_x_frac  — доля видимой ширины оси X
+        #   label_pad_y_frac  — доля видимой высоты оси Y
+        # Больше -> подписей меньше, но они никогда не наезжают.
+        x_range = float(x1_view - x0_view)
+        ylims = self.ax_spec.get_ylim()
+        y_range = float(ylims[1] - ylims[0])
+        _px = float(self.cfg.get('label_pad_x_frac', 0.10))
+        _py = float(self.cfg.get('label_pad_y_frac', 0.06))
+        min_dx = (x_range * _px) if x_range > 1e-9 else 0.0
+        min_dy = (y_range * _py) if y_range > 1e-9 else 0.0
+
+        # Сортируем по X — так первыми остаются самые левые
+        # подписи, а следующие проверяются против них.
+        candidates.sort(key=lambda cc: cc['x'])
+
+        kept = []
+        for c in candidates:
+            blocked = False
+            for k in kept:
+                if abs(c['x'] - k['x']) < min_dx \
+                        and abs(c['y'] - k['y']) < min_dy:
+                    blocked = True
+                    break
+            if not blocked:
+                kept.append(c)
+
+        # ---------- Отрисовка ----------
+        for c in kept:
+            is_max = c['is_max']
+            txt = self.ax_spec.text(
+                c['x'], c['y'], c['text'],
+                fontsize=8, color=c['color'],
+                ha='center',
+                va='bottom' if is_max else 'top',
+                fontweight='bold', zorder=15
+            )
+            txt.set_path_effects([
+                pe.Stroke(linewidth=2.5, foreground='black'),
+                pe.Normal()
+            ])
+            self._speed_label_objs.append(txt)
+
+        # --- DIAG (можно удалить после проверки) ---
+        print(f"[labels] candidates={len(candidates)} "
+              f"kept={len(kept)} "
+              f"min_dx={min_dx:.1f}frames "
+              f"min_dy={min_dy:.1f}Hz",
+              file=sys.stderr, flush=True)
+
+        self.fig.canvas.draw_idle()
+    def _draw_speed_extremes(self):
+        """Отмечает Vmax и Vmin в видимом диапазоне времени для каждого
+        активного источника.
+
+        Показываются ТОЛЬКО когда подписи пиков (speed_labels_on)
+        выключены. Если включён режим «Подп.V», локальные максимумы и
+        минимумы уже подписаны в _draw_speed_labels — и глобальные
+        Vmax/Vmin дублировать не нужно.
+
+        v0.57.9.1: буфер + фильтр X+Y, чтобы подписи разных источников
+        (например, GPS-H5 и аудио-H5), оказавшиеся рядом по времени
+        И по частоте, не налезали друг на друга. Пороги — те же
+        label_pad_x_frac / label_pad_y_frac, что и в
+        _draw_speed_labels.
+        """
+        for obj in getattr(self, '_extreme_objs', []):
+            try:
+                obj.remove()
+            except Exception:
+                pass
+        self._extreme_objs = []
+
+        if self.speed_labels_on:
+            self.fig.canvas.draw_idle()
+            return
+
+        has_audio = bool(self.tube_t and self.tube_h5_centers
+                         and self.tube_h4_centers)
+        has_gps = bool((self.speed_overlay_h5 or self.speed_overlay_h4)
+                       and self.gps_points and len(self.gps_points) >= 3
+                       and self.h5 is not None and self.h4 is not None)
+        if not has_audio and not has_gps:
+            self.fig.canvas.draw_idle()
+            return
+
+        x0_view, x1_view = self.ax_spec.get_xlim()
+        if x1_view < x0_view:
+            x0_view, x1_view = x1_view, x0_view
+
+        candidates = []
+
+        def _queue(f_x, f_y, v_val, color, is_max):
+            candidates.append({
+                'x': float(f_x),
+                'y': float(f_y),
+                'v': float(v_val),
+                'color': color,
+                'is_max': bool(is_max),
+            })
+
+        # ---------- Аудио: Vmax/Vmin на H5 и H4 -------------------
+        if has_audio:
+            t_arr = np.array(self.tube_t, dtype=float)
+            h5_c_arr = np.array(self.tube_h5_centers, dtype=float)
+            h4_c_arr = np.array(self.tube_h4_centers, dtype=float)
+
+            v_audio = []
+            for h5c, h4c in zip(h5_c_arr, h4_c_arr):
+                try:
+                    _, _, _, v = self._calc_speed(h5c, h4c)
+                except Exception:
+                    v = 0.0
+                v_audio.append(v)
+            v_audio = np.array(v_audio, dtype=float)
+
+            vis = (t_arr >= x0_view) & (t_arr <= x1_view)
+            if vis.sum() >= 2:
+                t_vis = t_arr[vis]
+                h5_vis = h5_c_arr[vis]
+                h4_vis = h4_c_arr[vis]
+                v_vis = v_audio[vis]
+
+                if len(v_vis) >= 2:
+                    v_max_g = float(v_vis.max())
+                    v_min_g = float(v_vis.min())
+
+                    if v_max_g >= 5.0:
+                        i_max = int(np.argmax(v_vis))
+                        _queue(float(t_vis[i_max]),
+                               float(h5_vis[i_max]),
+                               v_max_g, '#ffff00', True)
+                        _queue(float(t_vis[i_max]),
+                               float(h4_vis[i_max]),
+                               v_max_g, '#00ff00', True)
+
+                    if v_min_g >= 5.0:
+                        i_min = int(np.argmin(v_vis))
+                        _queue(float(t_vis[i_min]),
+                               float(h5_vis[i_min]),
+                               v_min_g, '#ffff00', False)
+                        _queue(float(t_vis[i_min]),
+                               float(h4_vis[i_min]),
+                               v_min_g, '#00ff00', False)
+
+        # ---------- GPS: Vmax/Vmin на H5-кривой и H4-кривой -------
+        if has_gps:
+            try:
+                V_ref = self._calc_speed(self.h5, self.h4)[3]
+            except Exception:
+                V_ref = 0.0
+
+            if V_ref > 1.0:
+                k5, k4 = self._gps_k5k4()
+                if k5 <= 1e-9 or k4 <= 1e-9:
+                    k5 = self.h5 / V_ref
+                    k4 = self.h4 / V_ref
+
+                gf_vis, gv_vis, _ = self._gps_view_samples(
+                    x0_view, x1_view)
+
+                if gf_vis is not None and gv_vis is not None and len(gf_vis) >= 1:
+                    v_max_g = float(gv_vis.max())
+                    v_min_g = float(gv_vis.min())
+
+                    if v_max_g >= 5.0:
+                        i_max = int(np.argmax(gv_vis))
+                        if self.speed_overlay_h5:
+                            _queue(float(gf_vis[i_max]),
+                                   v_max_g * k5, v_max_g,
+                                   '#ff00cc', True)
+                        if self.speed_overlay_h4:
+                            _queue(float(gf_vis[i_max]),
+                                   v_max_g * k4, v_max_g,
+                                   '#00ccff', True)
+
+                    if v_min_g >= 5.0 and v_min_g < v_max_g:
+                        i_min = int(np.argmin(gv_vis))
+                        if self.speed_overlay_h5:
+                            _queue(float(gf_vis[i_min]),
+                                   v_min_g * k5, v_min_g,
+                                   '#ff00cc', False)
+                        if self.speed_overlay_h4:
+                            _queue(float(gf_vis[i_min]),
+                                   v_min_g * k4, v_min_g,
+                                   '#00ccff', False)
+
+        # ---------- Фильтрация: X+Y, все цвета разом ----------
+        x_range = float(x1_view - x0_view)
+        ylims = self.ax_spec.get_ylim()
+        y_range = float(ylims[1] - ylims[0])
+        _px = float(self.cfg.get('label_pad_x_frac', 0.10))
+        _py = float(self.cfg.get('label_pad_y_frac', 0.06))
+        min_dx = (x_range * _px) if x_range > 1e-9 else 0.0
+        min_dy = (y_range * _py) if y_range > 1e-9 else 0.0
+
+        candidates.sort(key=lambda cc: cc['x'])
+
+        kept = []
+        for c in candidates:
+            blocked = False
+            for k in kept:
+                if abs(c['x'] - k['x']) < min_dx and abs(c['y'] - k['y']) < min_dy:
+                    blocked = True
+                    break
+            if not blocked:
+                kept.append(c)
+
+        for c in kept:
+            marker, = self.ax_spec.plot(
+                [c['x']], [c['y']],
+                marker='D' if c['is_max'] else 'v',
+                color=c['color'], markersize=7,
+                markeredgecolor='black', markeredgewidth=1.0,
+                linestyle='None', zorder=18,
+                clip_on=False
+            )
+            self._extreme_objs.append(marker)
+
+            _xr = x1_view - x0_view
+            _mg = 0.06 * _xr if _xr > 0 else 0.0
+            if c['x'] > x1_view - _mg:
+                _ha = 'right'
+            elif c['x'] < x0_view + _mg:
+                _ha = 'left'
+            else:
+                _ha = 'center'
+
+            txt = self.ax_spec.text(
+                c['x'], c['y'], f"{c['v']:.1f}",
+                fontsize=8, color=c['color'],
+                ha=_ha,
+                va='bottom' if c['is_max'] else 'top',
+                fontweight='bold', zorder=19,
+                clip_on=False
+            )
+            txt.set_path_effects([
+                pe.Stroke(linewidth=2.5, foreground='black'),
+                pe.Normal()
+            ])
+            self._extreme_objs.append(txt)
+
+        print(f"[extremes] candidates={len(candidates)} "
+              f"kept={len(kept)} "
+              f"min_dx={min_dx:.1f}frames "
+              f"min_dy={min_dy:.1f}Hz",
+              file=sys.stderr, flush=True)
+
+        self.fig.canvas.draw_idle()
+
+    def _btn_reset_time(self, _=None):
+        """v0.56.3: обычное изменение — Apply по A."""
+        self.ax_spec.set_xlim(0, self.n_frames)
+        self.analyze_start = 0
+        self.analyze_dur = self.n_frames
+        self._update_time_span()
+        self._sync_fields()
+        self._redraw_all()
+
+    def _btn_reset_freq(self, _=None):
+        """v0.56.3: обычное изменение — Apply по A."""
+        self.ax_spec.set_ylim(20, 600)
+        self._sync_fields()
+        self._redraw_all()
+
+    def _btn_reset_all(self, _=None):
+        """v0.56.3: обычное изменение — Apply по A."""
+        self._reset_zoom()
+
+    def _btn_exit(self, _=None):
+        self._on_exit()
+
+    def _set_phase(self, phase):
+        self.phase = phase
+        if self.span_selector:
+            self.span_selector.set_active(phase == self.PHASE_TIME)
+        self.update_status()
+        self.fig.canvas.draw_idle()
+
+    def _redraw_all(self):
+        if self.harm_freqs:
+            self.draw_harmonics()
+        self.draw_ranges()
+        self.draw_tubes()
+        self._draw_speed_overlay()
+        self._draw_speed_labels()
+        self._draw_speed_extremes()
+        self.update_status()
+        self.fig.canvas.draw_idle()
+
+    def _frame_to_sec(self, frame):
+        return frame / self.cfg['target_fps']
+
+    def _sec_to_frame(self, sec):
+        return int(round(sec * self.cfg['target_fps']))
+
+    def _on_motion(self, event):
+        if event.xdata is None or event.ydata is None \
+                or event.inaxes != self.ax_spec:
+            if self.cursor_text:
+                self.cursor_text.set_visible(False)
+            self.fig.canvas.draw_idle()
+            return
+        frame = int(event.xdata)
+        fps = self.cfg['target_fps']
+        t_sec = frame / fps
+        freq = event.ydata
+        self.cursor_text.set_text(
+            f'кадр={frame} | t={t_sec:.3f}с | {freq:.0f} Гц')
+        self.cursor_text.set_visible(True)
+        if event.button == 1 and self.phase == self.PHASE_TIME \
+                and self._drag_start_frame is not None:
+            xmin = min(self._drag_start_frame, frame)
+            xmax = max(self._drag_start_frame, frame)
+            dur_f = xmax - xmin
+            t0 = xmin / fps
+            t1 = xmax / fps
+            dur_s = t1 - t0
+            self.drag_text.set_text(
+                f'кадры: {xmin}-{xmax} ({dur_f})  |  '
+                f'время: {t0:.3f}-{t1:.3f}с ({dur_s:.3f}с)'
+            )
+            self.drag_text.set_visible(True)
+        self.fig.canvas.draw_idle()
+
+    def _set_tb_silent(self, tb_name, value):
+        old = self._syncing_fields
+        self._syncing_fields = True
+        try:
+            getattr(self, f'tb_{tb_name}').set_val(value)
+        finally:
+            self._syncing_fields = old
+
+    def _sync_fields(self):
+        if self._syncing_fields:
+            return
+        self._syncing_fields = True
+        try:
+            xlim = self.ax_spec.get_xlim()
+            ylim = self.ax_spec.get_ylim()
+            fps = self.cfg['target_fps']
+
+            self.tb_x_start.set_val(f"{xlim[0] / fps:.3f}")
+            self.tb_x_end.set_val(f"{xlim[1] / fps:.3f}")
+            self.tb_dx.set_val(f"{(xlim[1] - xlim[0]) / fps:.3f}")
+            self.tb_y_min.set_val(f"{int(ylim[0])}")
+            self.tb_y_max.set_val(f"{int(ylim[1])}")
+
+            self.tb_width.set_val(int(self.line_width))
+            self.tb_step.set_val(f"{float(self.cfg['time_step']):.3f}")
+            self.tb_color.set_val(int(self.color_steps))
+            self.tb_peak.set_val(float(self.peak_search_hz))
+        finally:
+            self._syncing_fields = False
+
+    def _on_field_x_start(self, text):
+        if self._syncing_fields:
+            return
+        try:
+            val = float(text)
+            fps = self.cfg['target_fps']
+            frame = self._sec_to_frame(val)
+            xlim = self.ax_spec.get_xlim()
+            dur = xlim[1] - xlim[0]
+            # v0.56.3: авто-запись убрана (Apply по A).
+            self.ax_spec.set_xlim(frame, frame + dur)
+            self.analyze_start = max(0, frame)
+            self.analyze_dur = int(round(dur))
+            self._update_time_span()
+            self._sync_fields()
+            self._redraw_all()
+        except ValueError:
+            self._sync_fields()
+
+    def _on_field_x_end(self, text):
+        if self._syncing_fields:
+            return
+        try:
+            val = float(text)
+            fps = self.cfg['target_fps']
+            frame_end = self._sec_to_frame(val)
+            xlim = self.ax_spec.get_xlim()
+            # v0.56.3: авто-запись убрана (Apply по A).
+            self.ax_spec.set_xlim(xlim[0], frame_end)
+            self.analyze_start = max(0, int(xlim[0]))
+            self.analyze_dur = max(1, int(round(frame_end - xlim[0])))
+            self._update_time_span()
+            self._sync_fields()
+            self._redraw_all()
+        except ValueError:
+            self._sync_fields()
+
+    def _on_field_dx(self, text):
+        if self._syncing_fields:
+            return
+        try:
+            dx_sec = float(text)
+            if dx_sec <= 0:
+                self._sync_fields()
+                return
+            fps = self.cfg['target_fps']
+            xlim = self.ax_spec.get_xlim()
+            x_start = xlim[0]
+            x_end = x_start + dx_sec * fps
+            # v0.56.3: авто-запись убрана (Apply по A).
+            self.ax_spec.set_xlim(x_start, x_end)
+            self.analyze_start = max(0, int(round(x_start)))
+            self.analyze_dur = max(1, int(round(x_end - x_start)))
+            self._update_time_span()
+            self._sync_fields()
+            self._redraw_all()
+        except ValueError:
+            self._sync_fields()
+
+    def _on_field_y_min(self, text):
+        if self._syncing_fields:
+            return
+        try:
+            val = float(text)
+            ylim = self.ax_spec.get_ylim()
+            if val < ylim[1]:
+                self.cfg['freq_min'] = val
+                self.ax_spec.set_ylim(val, ylim[1])
+                self._sync_fields()
+                if self.harm_freqs:
+                    self.draw_harmonics()
+                self.draw_ranges()
+                self.draw_tubes()
+                self.fig.canvas.draw_idle()
+        except ValueError:
+            self._sync_fields()
+
+    def _on_field_y_max(self, text):
+        if self._syncing_fields:
+            return
+        try:
+            val = float(text)
+            ylim = self.ax_spec.get_ylim()
+            if val > ylim[0]:
+                self.cfg['freq_max'] = val
+                self.ax_spec.set_ylim(ylim[0], val)
+                self._sync_fields()
+                if self.harm_freqs:
+                    self.draw_harmonics()
+                self.draw_ranges()
+                self.draw_tubes()
+                self.fig.canvas.draw_idle()
+        except ValueError:
+            self._sync_fields()
+
+    def _on_field_width(self, text):
+        if self._syncing_fields:
+            return
+        try:
+            val = int(float(text))
+            if 1 <= val <= 20:
+                self.line_width = val
+                self.cfg['harmonic_line_width'] = val
+                self._set_tb_silent('width', f'{val}')
+                if self.harm_freqs:
+                    self.draw_harmonics()
+                    self.fig.canvas.draw_idle()
+        except ValueError:
+            self._sync_fields()
+
+    def _on_field_step(self, text):
+        if self._syncing_fields:
+            return
+        try:
+            val = float(text)
+            if 0.01 <= val <= 5.0:
+                self.cfg['time_step'] = val
+                self._set_tb_silent('step', f'{val:.3f}')
+        except ValueError:
+            self._sync_fields()
+
+    def _on_field_color(self, text):
+        if self._syncing_fields:
+            return
+        try:
+            val = int(float(text))
+            if 1 <= val <= 255:
+                self.color_steps = val
+                self.cfg['color_steps'] = val
+                self._set_tb_silent('color', f'{val}')
+        except ValueError:
+            self._sync_fields()
+
+    def _on_field_peak(self, text):
+        if self._syncing_fields:
+            return
+        try:
+            val = float(text)
+            if 1 <= val <= 30:
+                self.peak_search_hz = val
+                self.cfg['peak_search_hz'] = val
+                self._set_tb_silent('peak', f'{int(val)}')
+        except ValueError:
+            self._sync_fields()
+
+    def _update_time_span(self):
+        if self.time_span:
+            try:
+                self.time_span.remove()
+            except Exception:
+                pass
+        self.time_span = self.ax_spec.axvspan(
+            self.analyze_start, self.analyze_start + self.analyze_dur,
+            color='red', alpha=0.15, zorder=5
+        )
+
+    def _push_history(self, xlim=None, ylim=None,
+                      analyze_start=None, analyze_dur=None,
+                      force=False):
+        """Добавляет текущее состояние в историю.
+
+        v0.56.2:
+          * сравнение совпадения — с ТЕКУЩЕЙ записью
+            (zoom_history[zoom_pointer]), а не с последней;
+          * force=True — добавить запись даже если она совпадает
+            с текущей (для явного действия «Сохр.поз.»).
+        """
+        if xlim is None:
+            xlim = self.ax_spec.get_xlim()
+        if ylim is None:
+            ylim = self.ax_spec.get_ylim()
+        if analyze_start is None:
+            analyze_start = self.analyze_start
+        if analyze_dur is None:
+            analyze_dur = self.analyze_dur
+
+        entry = {
+            'view_x_start': float(xlim[0]),
+            'view_x_end':   float(xlim[1]),
+            'view_y_start': float(ylim[0]),
+            'view_y_end':   float(ylim[1]),
+            'analyze_start': int(analyze_start),
+            'analyze_dur':   int(analyze_dur),
+            'h5': float(self.h5) if self.h5 is not None else None,
+            'h4': float(self.h4) if self.h4 is not None else None,
+            'algorithm': int(self.last_algo) if self.last_algo is not None else 0,
+            'time_step':      float(self.cfg['time_step']),
+            'color_steps':    int(self.color_steps),
+            'peak_search_hz': float(self.peak_search_hz),
+            'line_width':     int(self.line_width),
+            'overlay_mode':   int(self.overlay_mode),
+        }
+
+        # Проверка совпадения — с ТЕКУЩЕЙ записью.
+        if not force:
+            cur = self.zoom_pointer
+            if 0 <= cur < len(self.zoom_history):
+                if self.zoom_history[cur] == entry:
+                    return
+
+        # Обрезаем «будущее» (стандартное поведение undo/redo).
+        if self.zoom_pointer < len(self.zoom_history) - 1:
+            self.zoom_history = self.zoom_history[:self.zoom_pointer + 1]
+
+        self.zoom_history.append(entry)
+        while len(self.zoom_history) > 50:
+            self.zoom_history.pop(0)
+        self.zoom_pointer = len(self.zoom_history) - 1
+
+    def _is_dirty(self):
+        """v0.56.3: True, если текущее состояние отличается от
+        текущей записи истории.
+
+        Сравниваются те же поля, что пишет _push_history.
+        Никакого отдельного «флага изменений» — состояние
+        вычисляется на момент вызова.
+        """
+        if not self.zoom_history:
+            return True
+        if (self.zoom_pointer < 0
+                or self.zoom_pointer >= len(self.zoom_history)):
+            return True
+        cur = self.zoom_history[self.zoom_pointer]
+        try:
+            xlim = self.ax_spec.get_xlim()
+            ylim = self.ax_spec.get_ylim()
+        except Exception:
+            return True
+        entry = {
+            'view_x_start': float(xlim[0]),
+            'view_x_end':   float(xlim[1]),
+            'view_y_start': float(ylim[0]),
+            'view_y_end':   float(ylim[1]),
+            'analyze_start': int(self.analyze_start),
+            'analyze_dur':   int(self.analyze_dur),
+            'h5': float(self.h5) if self.h5 is not None else None,
+            'h4': float(self.h4) if self.h4 is not None else None,
+            'algorithm': int(self.last_algo) if self.last_algo is not None else 0,
+            'time_step':      float(self.cfg['time_step']),
+            'color_steps':    int(self.color_steps),
+            'peak_search_hz': float(self.peak_search_hz),
+            'line_width':     int(self.line_width),
+            'overlay_mode':   int(self.overlay_mode),
+        }
+        return cur != entry
+
+    def _ask_apply_confirm(self, direction='дальше'):
+        """v0.56.3: спрашивает у пользователя, применить ли правки.
+
+        Возвращает:
+            True  — применить
+            False — не применять (правки потеряются)
+            None  — отмена (ничего не делать)
+        """
+        try:
+            import tkinter as tk
+            from tkinter import messagebox
+            root = tk.Tk()
+            root.withdraw()
+            try:
+                ans = messagebox.askyesnocancel(
+                    "audio_speed_calc — неприменённые правки",
+                    f"Есть неприменённые правки.\n\n"
+                    f"Применить перед тем, как идти {direction}?\n\n"
+                    f"Да     — применить и продолжить\n"
+                    f"Нет    — не применять (правки будут потеряны)\n"
+                    f"Отмена — остаться на месте"
+                )
+            finally:
+                try:
+                    root.destroy()
+                except Exception:
+                    pass
+            return ans
+        except Exception as e:
+            print(f"Диалог недоступен ({e}), использую консоль",
+                  file=sys.stderr)
+        try:
+            print(f"\nЕсть неприменённые правки. "
+                  f"Применить перед тем, как идти {direction}? "
+                  f"[y=да / n=нет / c=отмена]: ",
+                  file=sys.stderr, end='', flush=True)
+            s = input().strip().lower()
+            if s.startswith('y') or s == '':
+                return True
+            if s.startswith('n'):
+                return False
+            return None
+        except Exception:
+            return False
+
+    def _apply_history_entry(self, entry):
+        """Восстанавливает состояние из записи истории и пересчитывает
+        результаты для нового диапазона.
+
+        Параметры (Шаг, Цвет, Пик, Ширина, H5, H4, алгоритм, overlay)
+        восстанавливаются из entry. Если есть H5, H4 и гармоники —
+        _on_run запускается заново, чтобы Vср/Vgps ср/Δgps и подписи
+        соответствовали новому диапазону.
+        """
+        # --- 1. Оси ---
+        self.ax_spec.set_xlim(entry['view_x_start'], entry['view_x_end'])
+        self.ax_spec.set_ylim(entry['view_y_start'], entry['view_y_end'])
+
+        # --- 2. Диапазон анализа ---
+        self.analyze_start = int(entry.get('analyze_start', 0))
+        self.analyze_dur = int(entry.get('analyze_dur', self.n_frames))
+        if self.analyze_dur <= 0:
+            self.analyze_dur = max(1, self.n_frames - self.analyze_start)
+
+        # --- 3. Слайдеры и поля ---
+        ts = entry.get('time_step')
+        if ts is not None:
+            self.cfg['time_step'] = float(ts)
+
+        cs = entry.get('color_steps')
+        if cs is not None:
+            self.color_steps = int(cs)
+            self.cfg['color_steps'] = int(cs)
+
+        pk = entry.get('peak_search_hz')
+        if pk is not None:
+            self.peak_search_hz = float(pk)
+            self.cfg['peak_search_hz'] = float(pk)
+
+        lw = entry.get('line_width')
+        if lw is not None:
+            self.line_width = int(lw)
+            self.cfg['harmonic_line_width'] = int(lw)
+
+        om = entry.get('overlay_mode')
+        if om is not None:
+            self.overlay_mode = int(om)
+            self.cfg['overlay_mode'] = self.overlay_mode
+            self._update_overlay_buttons()
+
+        # --- 4. H5 / H4 ---
+        new_h5 = entry.get('h5')
+        new_h4 = entry.get('h4')
+        h_changed = False
+
+        if new_h5 is not None:
+            if abs(new_h5 - (self.h5 if self.h5 is not None else 0.0)) > 1e-9:
+                h_changed = True
+            self.h5 = float(new_h5)
+            self.cfg['harmonic_5_freq'] = float(new_h5)
+
+        if new_h4 is not None:
+            if abs(new_h4 - (self.h4 if self.h4 is not None else 0.0)) > 1e-9:
+                h_changed = True
+            self.h4 = float(new_h4)
+            self.cfg['harmonic_4_freq'] = float(new_h4)
+
+        # --- 5. Алгоритм ---
+        new_algo = entry.get('algorithm')
+        if new_algo is not None:
+            self.last_algo = int(new_algo)
+            self.cfg['algorithm'] = int(new_algo)
+
+        if h_changed:
+            self.calc_harmonics()
+            # v0.56.1: H5/H4 изменились — кэш калибровки dGPS
+            # больше не актуален.
+            self._invalidate_gps_lag_cache()
+
+        # --- 6. Обновление визуальных слоёв ---
+        self._update_time_span()
+        self._sync_fields()
+
+        # --- 7. Пересчёт для нового диапазона ---
+        # Запускаем всегда, когда есть всё необходимое: гармоники,
+        # H5/H4, валидный диапазон и корректный номер алгоритма.
+        # Раньше здесь проверялся флаг was_run = self._algo_run_done —
+        # из-за него пересчёт мог молча пропускаться.
+        can_recalc = (
+            not self._recalc_in_progress
+            and bool(self.harm_freqs)
+            and self.h5 is not None and self.h4 is not None
+            and self.analyze_dur > 0
+            and self.last_algo in (1, 2, 3, 4, 5, 6)
+        )
+
+        if can_recalc:
+            self._recalc_in_progress = True
+            try:
+                self._on_run(None, self.last_algo)
+                return
+            except Exception as e:
+                print(f"Не удалось пересчитать для нового диапазона: {e}",
+                      file=sys.stderr)
+                self._algo_run_done = False
+                self.gps_v_avg = None
+            finally:
+                self._recalc_in_progress = False
+
+        # Если пересчёт не удался или не требуется — очищаем старые
+        # данные, чтобы в статусе не остались числа от прошлого окна,
+        # и перерисовываем.
+        self._algo_run_done = False
+        self.gps_v_avg = None
+        self._redraw_all()
+
+    def _step_back(self, event=None):
+        """v0.56.3: при неприменённых правках — диалог.
+
+        Да  — применить и шагнуть назад.
+        Нет — не применять, шагнуть назад (правки потеряются).
+        Отмена — ничего.
+        """
+        if not self.zoom_history:
+            return
+        if self._is_dirty():
+            resp = self._ask_apply_confirm('назад')
+            if resp is None:
+                return
+            if resp:
+                self._push_history(force=True)
+                # после push мы в конце истории; шагаем назад
+        if self.zoom_pointer <= 0:
+            self.update_status()
+            return
+        self.zoom_pointer -= 1
+        self._apply_history_entry(self.zoom_history[self.zoom_pointer])
+        self.update_status()
+
+    def _step_forward(self, event=None):
+        """v0.56.3: при неприменённых правках — диалог.
+
+        Да  — применить (вперёд уже некуда, остаёмся).
+        Нет — не применять, шагнуть вперёд (правки потеряются).
+        Отмена — ничего.
+        """
+        if not self.zoom_history:
+            return
+        if self._is_dirty():
+            resp = self._ask_apply_confirm('вперёд')
+            if resp is None:
+                return
+            if resp:
+                # Применяем и остаёмся — вперёд идти уже некуда,
+                # т.к. push ставит запись в конец.
+                self._push_history(force=True)
+                self.update_status()
+                return
+        if self.zoom_pointer >= len(self.zoom_history) - 1:
+            self.update_status()
+            return
+        self.zoom_pointer += 1
+        self._apply_history_entry(self.zoom_history[self.zoom_pointer])
+        self.update_status()
+
+    def _btn_back(self, event=None):
+        self._step_back(event)
+
+    def _btn_apply(self, _=None):
+        """v0.56.3: фиксирует все накопленные правки как одну запись.
+
+        Клавиша A. Кнопка «Применить».
+
+        Если состояние совпадает с текущей записью истории —
+        ничего не делает (нет правок). Иначе добавляет запись.
+        """
+        if not self._is_dirty():
+            print("Нечего применять — состояние уже совпадает "
+                  "с текущей записью истории.", file=sys.stderr)
+            self.update_status()
+            return
+        self._push_history(force=True)
+        print(f"Применено. Позиций в истории: {len(self.zoom_history)}",
+              file=sys.stderr)
+        self.update_status()
+
+    def _btn_delete_pos(self, _=None):
+        """v0.56.2: удаляем ТЕКУЩУЮ позицию, остаёмся на её месте.
+
+        После удаления на индексе `pos` теперь стоит следующая
+        запись (бывшая pos+1). Пользователь остаётся на том же
+        индексе. Если удалили последнюю — pointer сдвигается на
+        новую последнюю.
+
+        Раньше pointer уезжал на pos-1 (предыдущую) — визуально
+        казалось, что показана «копия соседней позиции».
+        """
+        if not self.zoom_history:
+            return
+
+        pos = self.zoom_pointer
+        if pos < 0 or pos >= len(self.zoom_history):
+            # Если pointer вне списка — удаляем последнюю.
+            pos = len(self.zoom_history) - 1
+
+        self.zoom_history.pop(pos)
+
+        if not self.zoom_history:
+            self.zoom_pointer = -1
+            self.update_status()
+            self.fig.canvas.draw_idle()
+            return
+
+        # Остаёмся на той же позиции — теперь там следующая запись.
+        # Если удалили последнюю, прижимаемся к новой последней.
+        self.zoom_pointer = min(pos, len(self.zoom_history) - 1)
+
+        self._apply_history_entry(self.zoom_history[self.zoom_pointer])
+        self.update_status()
+
+    def _on_close(self, event):
+        if getattr(self, '_closing', False):
+            return
+        self._closing = True
+        self._save_view()
+        # v0.56.0: автосохранение конфига убрано.
+        # На диск конфиг пишется только по клавише S.
+
+    def _on_exit(self, _=None):
+        if getattr(self, '_closing', False):
+            return
+        self._closing = True
+        self._save_view()
+        # v0.56.0: автосохранение конфига убрано.
+        plt.close(self.fig)
+
+    def _on_span(self, xmin, xmax):
+        self.drag_text.set_visible(False)
+        # v0.56.3: авто-запись убрана — фиксируется через Apply (A).
+        x0 = max(0, int(round(min(xmin, xmax))))
+        x1 = max(0, int(round(max(xmin, xmax))))
+        self.analyze_start = x0
+        self.analyze_dur = max(1, x1 - x0)
+        self._update_time_span()
+        self.ax_spec.set_xlim(x0, x0 + self.analyze_dur)
+        fps = self.cfg['target_fps']
+        t0 = x0 / fps
+        t1 = x1 / fps
+        print(f"Диапазон: кадры {x0}-{x1} ({self.analyze_dur} кадров) | "
+              f"время: {t0:.1f}-{t1:.1f}с ({(x1 - x0)/fps:.1f}с)")
+        self._sync_fields()
+        self._redraw_all()
+
+    def _reset_zoom(self, _=None):
+        """v0.56.3: НЕ стираем историю.
+
+        Сброс — обычное изменение состояния. Зафиксировать через
+        Apply (A). Раньше здесь делался zoom_history.clear(),
+        и пользователь терял все сохранённые позиции.
+        """
+        self.drag_text.set_visible(False)
+        self._updating_axes = True
+        try:
+            self.ax_spec.set_xlim(0, self.n_frames)
+            self.ax_spec.set_ylim(self.cfg['freq_min'], self.cfg['freq_max'])
+            self.analyze_start = 0
+            self.analyze_dur = self.n_frames
+        finally:
+            self._updating_axes = False
+        self._update_time_span()
+        self._sync_fields()
+        self._redraw_all()
+
+    def _on_key(self, event):
+        key = event.key
+        if key == 'tab':
+            self._move_focus(1)
+        elif key == 'shift+tab':
+            self._move_focus(-1)
+        elif key in ('?', 'shift+/'):
+            self._toggle_help()
+        elif key == 'escape':
+            self._hide_help()
+            self._hide_algo_help()
+            self._set_phase(self.PHASE_TIME)
+        elif key in ('q', 'Q'):
+            self._on_exit()
+        elif key in ('s', 'S'):
+            self._save_view()
+            save_config(self.cfg, self.config_path)
+            self._save_png()
+        elif key == 'z':
+            self._step_back()
+        elif key in ('Z', 'shift+z'):
+            self._btn_reset_all()
+        elif key in ('p', 'P'):
+            self._toolbar_save_png()
+        elif key in ('a', 'A'):
+            tb_focused = False
+            for tb in self._tb_list:
+                if hasattr(self.fig.canvas, 'widgetlock') and \
+                        not self.fig.canvas.widgetlock.available(tb):
+                    tb_focused = True
+                    break
+            if not tb_focused:
+                self._btn_apply()
+        elif key in ('1', '2', '3', '4', '5', '6'):
+            tb_focused = False
+            for tb in self._tb_list:
+                if hasattr(self.fig.canvas, 'widgetlock') and \
+                        not self.fig.canvas.widgetlock.available(tb):
+                    tb_focused = True
+                    break
+            if not tb_focused:
+                self._on_run(None, int(key))
+
+    def _collect_sysinfo_lines(self):
+        sep = "=" * 70
+        sections = []
+        try:
+            comp = get_computer_info()
+            sections.append(("  СВЕДЕНИЯ О КОМПЬЮТЕРЕ", [
+                f"  Имя:             {comp['name']}",
+                f"  ОС:              {comp['os']}",
+                f"  Версия ОС:       {comp['os_version']}",
+                f"  Архитектура:     {comp['arch']}",
+                f"  Процессор:       {comp['processor']}",
+                f"  Пользователь:    {comp['user']}",
+                f"  Python:          {comp['python']}",
+                f"  CPU S/N:         {comp['cpu_serial']}",
+            ]))
+        except Exception as e:
+            sections.append(("  СВЕДЕНИЯ О КОМПЬЮТЕРЕ", [f"  Ошибка: {e}"]))
+        try:
+            disk = get_disk_info(self.filepath)
+            total_gb = disk['total_bytes'] / 1e9 if disk['total_bytes'] else 0
+            free_gb = disk['free_bytes'] / 1e9 if disk['free_bytes'] else 0
+            sections.append(("  СВЕДЕНИЯ О ДИСКЕ", [
+                f"  Диск:            {disk['drive']}",
+                f"  ФС:              {disk['fs_type']}",
+                f"  Метка тома:      {disk['volume_label']}",
+                f"  S/N тома:        {disk['volume_serial']}",
+                f"  Модель диска:    {disk['disk_model']}",
+                f"  S/N диска:       {disk['disk_serial']}",
+                f"  Всего:           {total_gb:.1f} ГБ",
+                f"  Свободно:        {free_gb:.1f} ГБ",
+            ]))
+        except Exception as e:
+            sections.append(("  СВЕДЕНИЯ О ДИСКЕ", [f"  Ошибка: {e}"]))
+        try:
+            # v0.56.4: в .exe читаем информацию о нём самом.
+            if getattr(sys, "frozen", False):
+                _target = os.path.abspath(sys.executable)
+            else:
+                _target = os.path.abspath(__file__)
+            scr = get_script_info(VERSION, _target)
+            sections.append(("  СВЕДЕНИЯ О СКРИПТЕ", [
+                f"  Имя:             {scr['name']}",
+                f"  Путь:            {scr['path']}",
+                f"  Размер:          {scr['size']} байт",
+                f"  mtime:           {scr['mtime']}",
+                f"  MD5:             {scr['md5']}",
+                f"  Версия:          {scr['version']}",
+            ]))
+        except Exception as e:
+            sections.append(("  СВЕДЕНИЯ О СКРИПТЕ", [f"  Ошибка: {e}"]))
+        return sep, sections
+
+    def _save_view(self):
+        xlim = self.ax_spec.get_xlim()
+        ylim = self.ax_spec.get_ylim()
+        self.cfg['view_x_start'] = float(xlim[0])
+        self.cfg['view_x_end']   = float(xlim[1])
+        self.cfg['view_y_start'] = float(ylim[0])
+        self.cfg['view_y_end']   = float(ylim[1])
+        self.cfg['spec_mode']    = self.spec_mode
+        self.cfg['peak_search_hz'] = self.peak_search_hz
+        self.cfg['overlay_mode'] = self.overlay_mode
+        self.cfg['analyze_start'] = int(self.analyze_start)
+        self.cfg['analyze_dur']   = int(self.analyze_dur)
+
+        self.cfg['view_history'] = [
+            {
+                'view_x_start': float(e['view_x_start']),
+                'view_x_end':   float(e['view_x_end']),
+                'view_y_start': float(e['view_y_start']),
+                'view_y_end':   float(e['view_y_end']),
+                'analyze_start': int(e.get('analyze_start', 0)),
+                'analyze_dur':   int(e.get('analyze_dur', self.n_frames)),
+                'h5': e.get('h5'),
+                'h4': e.get('h4'),
+                'algorithm': int(e.get('algorithm', 0)),
+                'time_step':      float(e.get(
+                    'time_step', self.cfg['time_step'])),
+                'color_steps':    int(e.get(
+                    'color_steps', self.color_steps)),
+                'peak_search_hz': float(e.get(
+                    'peak_search_hz', self.peak_search_hz)),
+                'line_width':     int(e.get(
+                    'line_width', self.line_width)),
+                'overlay_mode':   int(e.get(
+                    'overlay_mode', self.overlay_mode)),
+            }
+            for e in self.zoom_history[-50:]
+            if isinstance(e, dict) and 'view_x_start' in e
+        ]
+        self._save_window_geometry()
+
+    def _restore_view(self):
+        cfg = self.cfg
+        try:
+            if (cfg.get('view_x_start') is not None
+                    and cfg.get('view_x_end') is not None
+                    and cfg.get('view_y_start') is not None
+                    and cfg.get('view_y_end') is not None):
+                self.ax_spec.set_xlim(cfg['view_x_start'], cfg['view_x_end'])
+                self.ax_spec.set_ylim(cfg['view_y_start'], cfg['view_y_end'])
+        except Exception:
+            pass
+
+        try:
+            if cfg.get('analyze_dur'):
+                self.analyze_start = int(cfg.get('analyze_start', 0))
+                self.analyze_dur   = int(cfg['analyze_dur'])
+        except (ValueError, TypeError):
+            pass
+
+        self.zoom_history.clear()
+        for entry in cfg.get('view_history', []):
+            if isinstance(entry, dict) and 'view_x_start' in entry \
+                    and 'view_y_start' in entry:
+                try:
+                    self.zoom_history.append({
+                        'view_x_start': float(entry['view_x_start']),
+                        'view_x_end':   float(entry['view_x_end']),
+                        'view_y_start': float(entry['view_y_start']),
+                        'view_y_end':   float(entry['view_y_end']),
+                        'analyze_start': int(entry.get('analyze_start', 0)),
+                        'analyze_dur':   int(entry.get(
+                            'analyze_dur', self.n_frames)),
+                        'h5': entry.get('h5'),
+                        'h4': entry.get('h4'),
+                        'algorithm': int(entry.get('algorithm', 0)),
+                        'time_step':      float(entry.get(
+                            'time_step', self.cfg['time_step'])),
+                        'color_steps':    int(entry.get(
+                            'color_steps', self.color_steps)),
+                        'peak_search_hz': float(entry.get(
+                            'peak_search_hz', self.peak_search_hz)),
+                        'line_width':     int(entry.get(
+                            'line_width', self.line_width)),
+                        'overlay_mode':   int(entry.get(
+                            'overlay_mode', self.overlay_mode)),
+                    })
+                except (ValueError, TypeError, KeyError):
+                    continue
+        while len(self.zoom_history) > 50:
+            self.zoom_history.pop(0)
+        self.zoom_pointer = len(self.zoom_history) - 1
+
+        # v0.56.1: история загружена заново — кэш калибровки
+        # dGPS может быть неактуален.
+        self._invalidate_gps_lag_cache()
+
+        self._sync_fields()
+        self._update_time_span()
+        self.draw_tubes()
+        self.fig.canvas.draw_idle()
+
+    def _print_system_info(self):
+        if getattr(self, '_sys_info_printed', False):
+            return
+        self._sys_info_printed = True
+        sep, sections = self._collect_sysinfo_lines()
+        for title, slines in sections:
+            print(sep)
+            print(title)
+            print(sep)
+            for sl in slines:
+                print(sl)
+        print(sep)
+
+    def _make_floppy_handler(self):
+        """Обработчик для кнопки-дискеты в тулбаре matplotlib.
+
+        Клик по дискете вызывает _toolbar_save_png() — то же, что
+        клавиша P: диалог выбора пути + штамп + запись в _png_list.
+        Принимает и игнорирует любые args/kwargs, которые matplotlib
+        может передать в save_figure(*args, **kwargs).
+        """
+        def _handler(*args, **kwargs):
+            try:
+                self._toolbar_save_png()
+            except Exception as e:
+                print(f"Floppy disk: ошибка сохранения ({e})",
+                      file=sys.stderr)
+        return _handler
+
+    def _toolbar_save_png(self):
+        try:
+            import tkinter as tk
+            from tkinter import filedialog
+            root = tk.Tk()
+            root.withdraw()
+            base = os.path.splitext(os.path.basename(self.filepath))[0]
+            now = datetime.datetime.now()
+            default_name = (f"{base}_spec_"
+                            f"{now.strftime('%Y%m%d')}_"
+                            f"{now.strftime('%H%M%S')}.png")
+            png_dir = (self.cfg.get('last_png_dir', '')
+                       or os.path.dirname(self.filepath) or '.')
+            if not os.path.isdir(png_dir):
+                png_dir = os.path.dirname(self.filepath) or '.'
+            filepath = filedialog.asksaveasfilename(
+                title='Сохранить PNG',
+                defaultextension='.png',
+                filetypes=[('PNG', '*.png')],
+                initialdir=png_dir,
+                initialfile=default_name
+            )
+            root.destroy()
+            if filepath:
+                self._save_png(custom_path=filepath)
+        except Exception:
+            self._save_png()
+
+    def _save_png(self, custom_path=None):
+        if not hasattr(self, '_png_list'):
+            self._png_list = []
+
+        if custom_path:
+            png_path = custom_path
+            png_dir = os.path.dirname(png_path) or '.'
+            png_name = os.path.basename(png_path)
+        else:
+            png_dir = self.cfg.get('last_png_dir', '')
+            if not png_dir or not os.path.isdir(png_dir):
+                png_dir = os.path.dirname(self.filepath) or '.'
+            base = os.path.splitext(os.path.basename(self.filepath))[0]
+            now = datetime.datetime.now()
+            png_name = (f"{base}_spec_"
+                        f"{now.strftime('%Y%m%d')}_"
+                        f"{now.strftime('%H%M%S')}.png")
+            png_path = os.path.join(png_dir, png_name)
+
+        if self._footer_text is not None:
+            try:
+                self._footer_text.remove()
+            except Exception:
+                pass
+            self._footer_text = None
+
+        self._footer_text = add_png_footer(self.fig)
+
+        try:
+            self.fig.savefig(png_path, dpi=150, pad_inches=0.3)
+        except Exception as e:
+            print(f"Ошибка сохранения PNG: {e}")
+            if self._footer_text is not None:
+                try:
+                    self._footer_text.remove()
+                except Exception:
+                    pass
+                self._footer_text = None
+            self.fig.canvas.draw_idle()
+            return
+
+        if self._footer_text is not None:
+            try:
+                self._footer_text.remove()
+            except Exception:
+                pass
+            self._footer_text = None
+        self.fig.canvas.draw_idle()
+
+        try:
+            png_size = os.path.getsize(png_path)
+            png_md5 = md5_file(png_path)
+            png_mtime = datetime.datetime.fromtimestamp(
+                os.path.getmtime(png_path))
+            png_date_str = png_mtime.strftime('%Y-%m-%d %H:%M:%S')
+        except Exception:
+            png_size = 0
+            png_md5 = '---'
+            png_date_str = '---'
+
+        print(f"\nСкриншот сохранён: {png_name}")
+        print(f"  Размер:  {png_size} байт")
+        print(f"  MD5:     {png_md5}")
+        print(f"  Дата:    {png_date_str}")
+        print(f"  Папка:   {png_dir}")
+
+        self._png_list.append({
+            'name': png_name,
+            'path': png_path,
+            'size': png_size,
+            'md5': png_md5,
+            'date': png_date_str,
+        })
+
+        # v0.56.0: last_png_dir обновляется только в памяти.
+        self.cfg['last_png_dir'] = png_dir
+
+    def _on_click(self, event):
+        if event.xdata is None or event.ydata is None:
+            return
+        if event.inaxes != self.ax_spec:
+            return
+
+        self._drag_start_frame = int(event.xdata)
+        frame = int(event.xdata)
+        fps = self.cfg['target_fps']
+        t_sec = frame / fps
+
+        if self.phase == self.PHASE_TIME:
+            self.drag_text.set_text(
+                f'кадр={frame} | t={t_sec:.3f}с | {event.ydata:.0f} Гц'
+            )
+            self.drag_text.set_visible(True)
+            self.fig.canvas.draw_idle()
+            return
+
+        click_f = event.ydata
+        click_frame = event.xdata
+
+        if self.phase == self.PHASE_H5:
+            self.h5 = click_f
+            self.cfg['harmonic_5_freq'] = click_f
+            print(f"5-я гармоника: {click_f:.3f} Гц "
+                  f"(кадр={int(click_frame)}, "
+                  f"t={click_frame/fps:.1f}с)")
+            self._set_phase(self.PHASE_H4)
+        elif self.phase == self.PHASE_H4:
+            self.h4 = click_f
+            self.cfg['harmonic_4_freq'] = click_f
+            print(f"4-я гармоника: {click_f:.3f} Гц "
+                  f"(кадр={int(click_frame)}, "
+                  f"t={click_frame/fps:.1f}с)")
+            # v0.56.1: сброс кэша калибровки dGPS
+            self._invalidate_gps_lag_cache()
+            self.calc_harmonics()
+            self.draw_harmonics()
+            self._set_phase(self.PHASE_DONE)
+
+    def calc_harmonics(self):
+        if not (self.h5 and self.h4):
+            return
+        self.f0 = (self.h5 / 5 + self.h4 / 4) / 2
+        if self.f0 <= 0:
+            print("Ошибка: некорректная фундаментальная частота")
+            return
+        fmax = self.cfg['freq_max']
+        self.n_harm = max(5, int(fmax / self.f0))
+        self.harm_freqs = [self.f0 * (i + 1) for i in range(self.n_harm)]
+        print(f"\nФундаментальная частота: {self.f0:.3f} Гц")
+        print(f"Гармоник в диапазоне: {self.n_harm}")
+        for i, f in enumerate(self.harm_freqs):
+            print(f"  H{i+1}: {f:.3f} Гц")
+
+    def draw_harmonics(self):
+        for obj in self.harm_lines + self.harm_bands + self.harm_labels:
+            try:
+                obj.remove()
+            except Exception:
+                pass
+        self.harm_lines.clear()
+        self.harm_bands.clear()
+        self.harm_labels.clear()
+
+        if not self.harm_freqs:
+            return
+
+        cmap = plt.cm.tab10
+        colors = cmap(np.linspace(0, 1, min(self.n_harm, 10)))
+
+        xlim = self.ax_spec.get_xlim()
+        label_x = xlim[1] - (xlim[1] - xlim[0]) * 0.02
+
+        for i, freq in enumerate(self.harm_freqs):
+            c = colors[i % len(colors)]
+            ln = self.ax_spec.axhline(y=freq, color=c, lw=1.5,
+                                      ls='--', alpha=0.85)
+            self.harm_lines.append(ln)
+            w = self.line_width
+            for j in range(w, 0, -1):
+                alpha = 0.06 * (w - j + 1) / w
+                band = self.ax_spec.axhspan(freq - j, freq + j, color=c,
+                                            alpha=alpha, zorder=0)
+                self.harm_bands.append(band)
+            lbl = self.ax_spec.text(
+                label_x, freq + 0.5,
+                f'H{i+1}={freq:.0f}', fontsize=7, color=c, alpha=0.8,
+                fontweight='bold'
+            )
+            self.harm_labels.append(lbl)
+
+        self.fig.canvas.draw_idle()
+
+    def draw_ranges(self):
+        for obj in self.range_lines + self.range_labels:
+            try:
+                obj.remove()
+            except Exception:
+                pass
+        self.range_lines.clear()
+        self.range_labels.clear()
+
+        if self.overlay_mode not in (0, 2):
+            self.fig.canvas.draw_idle()
+            return
+
+        if (self.h5_min is None and self.h5_max is None
+                and self.h4_min is None and self.h4_max is None):
+            return
+
+        xlim = self.ax_spec.get_xlim()
+        label_x = xlim[1] - (xlim[1] - xlim[0]) * 0.02
+
+        _range_defs = [
+            (self.h5_min, 'cyan',   'H5 min'),
+            (self.h5_max, 'cyan',   'H5 max'),
+            (self.h4_min, 'yellow', 'H4 min'),
+            (self.h4_max, 'yellow', 'H4 max'),
+        ]
+        for val, color, tag in _range_defs:
+            if val is None:
+                continue
+            ln = self.ax_spec.axhline(y=val, color=color, lw=2.0, ls='-',
+                                      alpha=0.9, zorder=6)
+            self.range_lines.append(ln)
+            lbl = self.ax_spec.text(
+                label_x, val + 0.5,
+                f'{tag}={val:.0f}', fontsize=7, color=color,
+                alpha=0.9, fontweight='bold'
+            )
+            self.range_labels.append(lbl)
+
+        self.fig.canvas.draw_idle()
+
+    def draw_tubes(self):
+        for obj in self.tube_collections + self.tube_center_lines:
+            try:
+                obj.remove()
+            except Exception:
+                pass
+        self.tube_collections.clear()
+        self.tube_center_lines.clear()
+        for obj in getattr(self, 'overlay_objects', []):
+            try:
+                obj.remove()
+            except Exception:
+                pass
+        self.overlay_objects = []
+
+        if not self.tube_t or not self.tube_h5_mins:
+            return
+        if self.overlay_mode == 3:
+            return
+
+        t = np.array(self.tube_t, dtype=float)
+        h5_lo = np.array(self.tube_h5_mins)
+        h5_hi = np.array(self.tube_h5_maxs)
+        h4_lo = np.array(self.tube_h4_mins)
+        h4_hi = np.array(self.tube_h4_maxs)
+
+        draw_straight = self.overlay_mode in (0, 2)
+        draw_actual = self.overlay_mode in (1, 2)
+
+        if draw_straight:
+            xlim = self.ax_spec.get_xlim()
+            x = [xlim[0], xlim[1]]
+            self._draw_tube_band(x, x, x, 'cyan',
+                                 self.h5_min, self.h5_max, None, True)
+            self._draw_tube_band(x, x, x, 'yellow',
+                                 self.h4_min, self.h4_max, None, True)
+
+        if draw_actual:
+            self._draw_tube_band(t, h5_lo, h5_hi, 'cyan', None, None,
+                                 self.tube_h5_centers, False)
+            self._draw_tube_band(t, h4_lo, h4_hi, 'yellow', None, None,
+                                 self.tube_h4_centers, False)
+
+        self.fig.canvas.draw_idle()
+
+    def _draw_tube_band(self, x, lo, hi, color, flat_lo, flat_hi,
+                        centers, is_flat):
+        if is_flat:
+            if flat_lo is None or flat_hi is None:
+                return
+            llo, = self.ax_spec.plot(x, [flat_lo, flat_lo], color=color,
+                                     lw=1.5, ls='-', alpha=0.8, zorder=5)
+            lhi, = self.ax_spec.plot(x, [flat_hi, flat_hi], color=color,
+                                     lw=1.5, ls='-', alpha=0.8, zorder=5)
+            self.tube_center_lines.extend([llo, lhi])
+            coll = self.ax_spec.fill_between(
+                x, [flat_lo, flat_lo], [flat_hi, flat_hi],
+                color=color, alpha=0.12, zorder=3)
+            self.tube_collections.append(coll)
+        else:
+            llo, = self.ax_spec.plot(x, lo, color=color, lw=1.2, ls='-',
+                                     alpha=0.9, zorder=5)
+            lhi, = self.ax_spec.plot(x, hi, color=color, lw=1.2, ls='-',
+                                     alpha=0.9, zorder=5)
+            self.overlay_objects.extend([llo, lhi])
+            coll = self.ax_spec.fill_between(x, lo, hi, color=color,
+                                             alpha=0.15, zorder=4)
+            self.tube_collections.append(coll)
+            if centers:
+                c_arr = np.array(centers)
+                if len(c_arr) == len(x):
+                    lc, = self.ax_spec.plot(x, c_arr, color=color, lw=1.0,
+                                            ls='--', alpha=0.7, zorder=5)
+                    self.overlay_objects.append(lc)
+
+    def _print_algo_summary(self):
+        if not self._algo_results:
+            return
+        n = len(self._algo_results)
+        sep = '-' * 70
+        print(f"\n{'='*70}")
+        print("СВОДКА АЛГОРИТМОВ:")
+        print(f"  {'Алг':>4s}  {'V min':>8s}  {'V max':>8s}  {'V ср':>8s}  "
+              f"{'±V min':>8s}  {'±V max':>8s}  {'±V ср':>8s}")
+        print(f"  {sep}")
+        for algo_num in sorted(self._algo_results.keys()):
+            r = self._algo_results[algo_num]
+            name = ALGO_NAMES.get(algo_num, '?')[:24]
+            print(f"  {algo_num:>4d}  {r['v_min']:8.2f}  {r['v_max']:8.2f}  "
+                  f"{r['v_avg']:8.2f}  {r['dv_min']:8.2f}  "
+                  f"{r['dv_max']:8.2f}  {r['dv_avg']:8.2f}  | {name}")
+        if n >= 2:
+            v_mins = [r['v_min'] for r in self._algo_results.values()]
+            v_maxs = [r['v_max'] for r in self._algo_results.values()]
+            v_avgs = [r['v_avg'] for r in self._algo_results.values()]
+            dv_mins = [r['dv_min'] for r in self._algo_results.values()]
+            dv_maxs = [r['dv_max'] for r in self._algo_results.values()]
+            dv_avgs = [r['dv_avg'] for r in self._algo_results.values()]
+            print(f"  {sep}")
+            print(f"  {'СР':>4s}  {sum(v_mins)/n:8.2f}  "
+                  f"{sum(v_maxs)/n:8.2f}  {sum(v_avgs)/n:8.2f}  "
+                  f"{sum(dv_mins)/n:8.2f}  {sum(dv_maxs)/n:8.2f}  "
+                  f"{sum(dv_avgs)/n:8.2f}  | Усреднение по {n} алг.")
+            spread = max(v_avgs) - min(v_avgs)
+            print(f"  Разброс V ср между алгоритмами: {spread:.2f} км/ч")
+        print(f"{'='*70}")
+
+    # ---------- v0.56.1: калибровка dGPS по истории ----------
+
+    def _invalidate_gps_lag_cache(self):
+        """Сбрасывает кэш калибровки dGPS.
+        Вызывать при смене H5/H4 или при изменении GPS-данных.
+        """
+        self.gps_lag_calibrated = None
+        self.gps_corr_calibrated = 0.0
+        self.gps_lag_calib_h5 = None
+        self.gps_lag_calib_h4 = None
+        self.gps_lag_calib_info = None
+
+    def _find_longest_history_entry(self, f_start, f_end):
+        """Возвращает самый длинный интервал из истории + текущий.
+
+        Returns:
+            (cal_f_start, cal_f_end, source) или None.
+            source in {'current', 'history'}.
+        """
+        best_dur = f_end - f_start
+        best = (f_start, f_end, 'current')
+
+        for e in self.zoom_history:
+            if not isinstance(e, dict):
+                continue
+            e_start = int(e.get('analyze_start', 0))
+            e_dur = int(e.get('analyze_dur', 0))
+            if e_dur < 1:
+                continue
+            e_end = min(e_start + e_dur, self.n_frames)
+            if e_end <= e_start:
+                continue
+            dur = e_end - e_start
+            if dur > best_dur:
+                best_dur = dur
+                best = (e_start, e_end, 'history')
+
+        return best
+
+    def _compute_gps_lag_for_range(self, f_start, f_end,
+                                    f_lo5, f_hi5, f_lo4, f_hi4,
+                                    peak_hz):
+        """Считает dGPS на указанном диапазоне кадров.
+
+        Returns:
+            (lag, corr, info)
+            lag:  float или None при неудаче.
+            corr: float (0.0 при неудаче).
+            info: dict с диагностикой и полем 'error'.
+        """
+        info = {
+            'n_audio': 0,
+            'audio_std': 0.0,
+            'gps_std': 0.0,
+            'error': None,
+            'diag_path': None,
+        }
+
+        if not self.gps_points or len(self.gps_points) < 3:
+            info['error'] = 'нет GPS-точек'
+            return None, 0.0, info
+
+        fps = self.cfg['target_fps']
+        gps_times = [p[0] for p in self.gps_points]
+        gps_speeds = [p[1] for p in self.gps_points]
+
+        audio_times_full = []
+        audio_speeds_full = []
+        try:
+            step_check = 3
+            edge_frames = 0
+            if self.cfg.get('gps_trim_fft_edges', True):
+                hop_l = max(1, int(self.sr / fps))
+                edge_frames = ((self.cfg['fft_size']
+                                + hop_l - 1) // hop_l)
+                if f_end - f_start <= 4 * edge_frames:
+                    edge_frames = 0
+            f_start_corr = f_start + edge_frames
+            f_end_corr = f_end - edge_frames
+            if f_end_corr <= f_start_corr:
+                f_start_corr = f_start
+                f_end_corr = f_end
+
+            # v0.57.5: rolling-трекинг гармоник (см. _on_run).
+            cur_expected_h5 = self.h5
+            cur_expected_h4 = self.h4
+
+            for step_i_check in range(f_start, f_start_corr,
+                                       step_check):
+                if step_i_check >= self.n_frames:
+                    break
+                col = self.S_db[:, step_i_check]
+                cur_expected_h5 = find_peak_near(
+                    self.freqs, col, cur_expected_h5,
+                    peak_hz, f_lo5, f_hi5)
+                cur_expected_h4 = find_peak_near(
+                    self.freqs, col, cur_expected_h4,
+                    peak_hz, f_lo4, f_hi4)
+
+            for step_i_check in range(f_start_corr, f_end_corr,
+                                       step_check):
+                if step_i_check >= self.n_frames:
+                    break
+                col = self.S_db[:, step_i_check]
+                cur_expected_h5 = find_peak_near(
+                    self.freqs, col, cur_expected_h5,
+                    peak_hz, f_lo5, f_hi5)
+                cur_expected_h4 = find_peak_near(
+                    self.freqs, col, cur_expected_h4,
+                    peak_hz, f_lo4, f_hi4)
+                _, _, _, v_tmp = self._calc_speed(
+                    cur_expected_h5, cur_expected_h4)
+                audio_times_full.append(step_i_check / fps)
+                audio_speeds_full.append(v_tmp)
+        except Exception as e:
+            info['error'] = f'ошибка расчёта пиков: {e}'
+            return None, 0.0, info
+
+        info['n_audio'] = len(audio_times_full)
+        if len(audio_times_full) < 10:
+            info['error'] = (f'мало точек аудио '
+                              f'({len(audio_times_full)})')
+            return None, 0.0, info
+
+        try:
+            smooth_sec = float(self.cfg.get('gps_smooth_sec', 2.0))
+            arr_v = np.array(audio_speeds_full, dtype=float)
+            arr_t = np.array(audio_times_full, dtype=float)
+            dt_a_nominal = step_check / fps
+            arr_v_sm = _smooth_series(arr_v, smooth_sec, dt_a_nominal)
+            gps_t_np = np.array(gps_times, dtype=float)
+            gps_v_np = np.array(gps_speeds, dtype=float)
+            if len(gps_t_np) >= 2:
+                dt_g_nom = float(np.median(np.diff(gps_t_np)))
+            else:
+                dt_g_nom = 1.0
+            gps_v_sm = _smooth_series(gps_v_np, smooth_sec, dt_g_nom)
+            gps_points_sm = [
+                (float(p[0]), float(gps_v_sm[i]),
+                 float(p[2]), float(p[3]), float(p[4]))
+                for i, p in enumerate(self.gps_points)
+            ]
+            info['audio_std'] = float(arr_v.std())
+            info['gps_std'] = float(np.std(gps_speeds))
+
+            lag, corr, lag_results = find_gps_lag(
+                arr_t.tolist(), arr_v_sm.tolist(),
+                gps_times, gps_v_sm.tolist())
+
+            try:
+                _diag_path = write_gps_lag_diag(
+                    filepath=self.filepath,
+                    gps_points=gps_points_sm,
+                    arr_t=arr_t.tolist(),
+                    arr_v=arr_v_sm.tolist(),
+                    best_lag=lag,
+                    best_corr=corr,
+                    all_results=lag_results,
+                    gps_method=self.gps_method,
+                    analyze_window=(f_start / fps, f_end / fps),
+                )
+                info['diag_path'] = _diag_path
+            except Exception:
+                pass
+
+            return float(lag), float(corr), info
+        except Exception as e:
+            info['error'] = f'ошибка корреляции: {e}'
+            return None, 0.0, info
+
+    def _try_use_calibrated_gps_lag(self, f_start, f_end,
+                                     f_lo5, f_hi5, f_lo4, f_hi4,
+                                     peak_hz):
+        """v0.57.7: пытается применить dGPS, откалиброванный
+        по самому длинному интервалу из истории + текущему окну.
+
+        Логика:
+          * если H5/H4 не менялись и текущее окно НЕ длиннее,
+            чем калиброванное — берём из кэша;
+          * иначе — пересчитываем на самом длинном интервале
+            (rolling-трекинг + min RMSE).
+
+        Возвращает True, если self.gps_lag установлен,
+        иначе False (вызывающий код использует fallback).
+        """
+        if not self.gps_points or len(self.gps_points) < 3:
+            return False
+
+        # v0.57.7: history-калибровка ВОССТАНОВЛЕНА.
+        # В v0.57.0 была отключена как временная мера, пока
+        # корреляционный сигнал строился с фиксированной
+        # привязкой к self.h5/self.h4 (формы кривых не совпадали).
+        # В v0.57.5 rolling-трекинг в корреляции + в v0.57.6
+        # критерий min RMSE сделали калибровку по длинному окну
+        # надёжной.
+        longest = self._find_longest_history_entry(f_start, f_end)
+        if longest is None:
+            return False
+        cal_f_start, cal_f_end, cal_src = longest
+        cal_dur = cal_f_end - cal_f_start
+        cur_dur = f_end - f_start
+
+        cache_valid = (
+            self.gps_lag_calibrated is not None
+            and self.gps_lag_calib_h5 is not None
+            and self.gps_lag_calib_h4 is not None
+            and abs(self.gps_lag_calib_h5 - self.h5) < 1e-9
+            and abs(self.gps_lag_calib_h4 - self.h4) < 1e-9
+        )
+
+        if cache_valid:
+            cached_dur = int(
+                self.gps_lag_calib_info.get('duration_frames', 0))
+            if cur_dur <= cached_dur:
+                self.gps_lag = float(self.gps_lag_calibrated)
+                self.gps_corr = float(self.gps_corr_calibrated)
+                _src = self.gps_lag_calib_info.get('source', '?')
+                _dur = self.gps_lag_calib_info.get('duration_sec', 0.0)
+                print(f"  GPS запаздывание: {self.gps_lag:+.3f} сек "
+                      f"(кэш калибровки: {_src}, {_dur:.2f}с, "
+                      f"corr={self.gps_corr:+.3f})")
+                return True
+
+        fps = float(self.cfg['target_fps'])
+        print(f"  GPS: калибровка dGPS по самому длинному "
+              f"интервалу ({cal_src}): "
+              f"{cal_f_start/fps:.2f}-{cal_f_end/fps:.2f}с "
+              f"({cal_dur/fps:.2f}с)")
+
+        lag, corr, info = self._compute_gps_lag_for_range(
+            cal_f_start, cal_f_end, f_lo5, f_hi5, f_lo4, f_hi4, peak_hz)
+
+        if lag is None:
+            print(f"  GPS: калибровка не удалась: "
+                  f"{info.get('error', 'неизвестная ошибка')}")
+            return False
+
+        self.gps_lag_calibrated = float(lag)
+        self.gps_corr_calibrated = float(corr)
+        self.gps_lag_calib_h5 = float(self.h5)
+        self.gps_lag_calib_h4 = float(self.h4)
+        self.gps_lag_calib_info = {
+            'f_start': cal_f_start,
+            'f_end': cal_f_end,
+            'duration_frames': cal_dur,
+            'duration_sec': cal_dur / fps,
+            'corr': corr,
+            'n_audio': info.get('n_audio', 0),
+            'source': cal_src,
+        }
+        self.gps_lag = float(lag)
+        self.gps_corr = float(corr)
+        print(f"  GPS запаздывание: {self.gps_lag:+.3f} сек "
+              f"(калибровка: {cal_src}, {cal_dur/fps:.2f}с, "
+              f"corr={self.gps_corr:+.3f}, n={info.get('n_audio', 0)})")
+        if info.get('diag_path'):
+            print(f"  GPS-diag: {info['diag_path']}")
+        return True
+
+    def _on_run(self, _, algo=None):
+        if not self.harm_freqs:
+            print("Сначала выберите гармоники (5-ю и 4-ю)")
+            return
+
+        if algo is None:
+            algo = self.last_algo
+        self.last_algo = algo
+        self._algo_run_done = True
+        self.cfg['algorithm'] = algo
+
+        # Сброс GPS-средней (v0.53.1)
+        self.gps_v_avg = None
+
+        step_sec = float(self.cfg['time_step'])
+        step_frames_float = step_sec * self.cfg['target_fps']
+
+        color_steps = self.color_steps
+        peak_hz = self.peak_search_hz
+
+        # --- Диапазон анализа ---
+        # Никогда не сбрасываем молча на весь трек. Если analyze_dur
+        # округлился до 0 (например, dX < 1/fps), берём ровно 1 кадр
+        # от analyze_start. Если analyze_start вне границ — прижимаем.
+        f_start = int(round(self.analyze_start))
+        if f_start < 0:
+            f_start = 0
+        if self.n_frames > 0 and f_start > self.n_frames - 1:
+            f_start = self.n_frames - 1
+
+        f_dur_frames = int(round(self.analyze_dur))
+        if f_dur_frames < 1:
+            f_dur_frames = 1
+
+        f_end = f_start + f_dur_frames
+        if f_end > self.n_frames:
+            f_end = self.n_frames
+        if f_end <= f_start:
+            f_end = min(f_start + 1, self.n_frames)
+
+        # Нормализуем: отчёт и статус показывают ровно тот диапазон,
+        # по которому считали.
+        self.analyze_start = f_start
+        self.analyze_dur = f_end - f_start
+        self._update_time_span()
+
+        if self._spec_vmin is not None:
+            vmin, vmax = self._spec_vmin, self._spec_vmax
+        elif hasattr(self.spec_img, 'norm') and self.spec_img.norm is not None:
+            vmin = self.spec_img.norm.vmin
+            vmax = self.spec_img.norm.vmax
+        else:
+            vmin = float(np.min(self.S_db))
+            vmax = float(np.max(self.S_db))
+
+        n_hf = len(self.harm_freqs)
+        if n_hf < 2:
+            print("Недостаточно гармоник для расчёта (нужно минимум 2)")
+            return
+        h5_idx = int(np.argmin(np.abs(np.array(self.harm_freqs) - self.h5)))
+        h4_idx = int(np.argmin(np.abs(np.array(self.harm_freqs) - self.h4)))
+        f_lo5, f_hi5 = get_search_bounds(self.harm_freqs, self.n_harm, h5_idx)
+        f_lo4, f_hi4 = get_search_bounds(self.harm_freqs, self.n_harm, h4_idx)
+
+        self._print_system_info()
+        print(f"\n{'='*70}")
+        print(f"Расчёт min/max по гармоникам — алгоритм {algo}: "
+              f"{ALGO_NAMES.get(algo, '?')}")
+        fps = self.cfg['target_fps']
+        t_start_sec = f_start / fps
+        t_end_sec = f_end / fps
+        print(f"  Кадры: {f_start}-{f_end}")
+        print(f"  Время: {t_start_sec:.3f}-{t_end_sec:.3f}с "
+              f"({t_end_sec - t_start_sec:.3f}с)")
+        step_actual_frames = int(round(step_frames_float))
+        step_actual_sec = step_actual_frames / fps
+        print(f"  Шаг: {step_sec:.3f} сек (~{step_frames_float:.1f} кадров, "
+              f"факт {step_actual_frames} кадр = {step_actual_sec:.3f}с)")
+        print(f"  Порог палитры: -{color_steps} индекс (из 255)")
+        print(f"  Поиск пика: +/-{peak_hz:.0f} Гц")
+        print(f"  Палитра: vmin={vmin:.1f} dB, vmax={vmax:.1f} dB")
+        print(f"  H5: {f_lo5:.1f}-{f_hi5:.1f} Гц  |  "
+              f"H4: {f_lo4:.1f}-{f_hi4:.1f} Гц")
+        print(f"  Гармоник: {self.n_harm}  |  f0 = {self.f0:.3f} Гц")
+
+        if self.gps_points and len(self.gps_points) >= 3:
+            gps_times = [p[0] for p in self.gps_points]
+            gps_speeds = [p[1] for p in self.gps_points]
+            override = self.cfg.get('gps_lag_override')
+            if override is not None:
+                self.gps_lag = float(override)
+                self.gps_corr = 0.0
+                print(f"  GPS запаздывание: {self.gps_lag:.3f} сек "
+                      f"(ручной ввод)")
+            elif (self.cfg.get('gps_lag_from_history', True)
+                  and self._try_use_calibrated_gps_lag(
+                      f_start, f_end, f_lo5, f_hi5, f_lo4, f_hi4,
+                      peak_hz)):
+                # v0.56.1: dGPS применён из калибровки по длинному
+                # интервалу из истории. Старый блок корреляции ниже
+                # не выполняется.
+                pass
+            else:
+                audio_times_full = []
+                audio_speeds_full = []
+                try:
+                    # v0.54.0: строим аудио-сигнал только
+                    # внутри окна анализа [f_start, f_end].
+                    step_check = 3
+                    # v0.55.0: обрезаем края FFT.
+                    edge_frames = 0
+                    if self.cfg.get('gps_trim_fft_edges', True):
+                        hop_l = max(1, int(self.sr / fps))
+                        edge_frames = ((self.cfg['fft_size']
+                                        + hop_l - 1) // hop_l)
+                        if f_end - f_start <= 4 * edge_frames:
+                            edge_frames = 0
+                    f_start_corr = f_start + edge_frames
+                    f_end_corr = f_end - edge_frames
+                    if f_end_corr <= f_start_corr:
+                        f_start_corr = f_start
+                        f_end_corr = f_end
+
+                    # v0.57.5: ROLLING-трекинг гармоник, как в цикле
+                    # шагов. Раньше h5_peak/h4_peak искались вокруг
+                    # ФИКСИРОВАННЫХ self.h5/self.h4 — при дрейфе
+                    # гармоники (504 -> 525 Гц) реальный пик выходит
+                    # за пределы +-peak_hz, и корреляция шла по
+                    # "чужому" локальному максимуму.
+                    cur_expected_h5 = self.h5
+                    cur_expected_h4 = self.h4
+
+                    # Прогрев: прокрутить трекинг от f_start до
+                    # f_start_corr, чтобы состояние соответствовало
+                    # началу корреляционного окна.
+                    for step_i_check in range(f_start, f_start_corr,
+                                              step_check):
+                        if step_i_check >= self.n_frames:
+                            break
+                        col = self.S_db[:, step_i_check]
+                        cur_expected_h5 = find_peak_near(
+                            self.freqs, col, cur_expected_h5,
+                            peak_hz, f_lo5, f_hi5)
+                        cur_expected_h4 = find_peak_near(
+                            self.freqs, col, cur_expected_h4,
+                            peak_hz, f_lo4, f_hi4)
+
+                    for step_i_check in range(f_start_corr,
+                                              f_end_corr,
+                                              step_check):
+                        if step_i_check >= self.n_frames:
+                            break
+                        col = self.S_db[:, step_i_check]
+                        cur_expected_h5 = find_peak_near(
+                            self.freqs, col, cur_expected_h5,
+                            peak_hz, f_lo5, f_hi5)
+                        cur_expected_h4 = find_peak_near(
+                            self.freqs, col, cur_expected_h4,
+                            peak_hz, f_lo4, f_hi4)
+                        _, _, _, v_tmp = self._calc_speed(
+                            cur_expected_h5, cur_expected_h4)
+                        audio_times_full.append(step_i_check / fps)
+                        audio_speeds_full.append(v_tmp)
+                    if len(audio_times_full) >= 10:
+                        # v0.55.0: единое сглаживание обоих сигналов.
+                        smooth_sec = float(
+                            self.cfg.get('gps_smooth_sec', 2.0))
+                        arr_v = np.array(audio_speeds_full, dtype=float)
+                        arr_t = np.array(audio_times_full, dtype=float)
+                        dt_a_nominal = step_check / fps
+                        arr_v_sm = _smooth_series(
+                            arr_v, smooth_sec, dt_a_nominal)
+                        gps_t_np = np.array(gps_times, dtype=float)
+                        gps_v_np = np.array(gps_speeds, dtype=float)
+                        if len(gps_t_np) >= 2:
+                            dt_g_nom = float(np.median(
+                                np.diff(gps_t_np)))
+                        else:
+                            dt_g_nom = 1.0
+                        gps_v_sm = _smooth_series(
+                            gps_v_np, smooth_sec, dt_g_nom)
+                        gps_points_sm = [
+                            (float(p[0]), float(gps_v_sm[i]),
+                             float(p[2]), float(p[3]), float(p[4]))
+                            for i, p in enumerate(self.gps_points)
+                        ]
+                        print(f"  GPS-корреляция: окно анализа "
+                              f"{t_start_sec:.3f}-{t_end_sec:.3f}с, "
+                              f"шаг аудио {dt_a_nominal:.3f}с, "
+                              f"точек аудио {len(arr_v)}, "
+                              f"сглаживание {smooth_sec:.1f}с "
+                              f"(аудио и GPS)")
+                        print(f"  V аудио разброс: "
+                              f"{arr_v.min():.2f}..{arr_v.max():.2f} км/ч "
+                              f"(std={arr_v.std():.3f})")
+                        print(f"  V GPS  разброс: "
+                              f"{min(gps_speeds):.2f}.."
+                              f"{max(gps_speeds):.2f} км/ч "
+                              f"(std={np.std(gps_speeds):.3f})")
+                        # v0.56.5: зоны недоверия + маска
+                        self.gps_doubt_zones = find_doubt_zones(
+                            list(zip(gps_times, gps_speeds)),
+                            self.cfg)
+                        if self.gps_doubt_zones:
+                            print("  Зоны недоверия (%d): " 
+                                  % len(self.gps_doubt_zones),
+                                  file=sys.stderr)
+                            for z0, z1, rsn in self.gps_doubt_zones[:5]:
+                                print("    [%.2f, %.2f] %s" 
+                                      % (z0, z1, rsn),
+                                      file=sys.stderr)
+                        _pts = list(zip(gps_times, gps_speeds))
+                        self.gps_weights = mask_gps_points(
+                            _pts, self.gps_doubt_zones)
+                        _n_valid = sum(self.gps_weights)
+                        _n_total = len(self.gps_weights)
+                        if _n_valid < _n_total:
+                            print("  В корреляции: %d из %d точек " 
+                                  "(исключено %d)" 
+                                  % (_n_valid, _n_total,
+                                     _n_total - _n_valid),
+                                  file=sys.stderr)
+
+                        # v0.56.5: проверка порога минимума
+                        _min_pts = int(self.cfg.get(
+                            "doubt_min_points", 15))
+                        if _n_valid < _min_pts:
+                            print("  [WARN] Точек для корреляции "
+                                  "мало (%d < %d). Лаг = 0.0, "
+                                  "задайте gps_lag_override "
+                                  "в конфиге." 
+                                  % (_n_valid, _min_pts),
+                                  file=sys.stderr)
+                            self.gps_lag = 0.0
+                            self.gps_corr = 0.0
+                            lag_results = []
+                        else:
+                            self.gps_lag, self.gps_corr, lag_results = \
+                                find_gps_lag(arr_t.tolist(),
+                                             arr_v_sm.tolist(),
+                                             gps_times,
+                                             gps_v_sm.tolist(),
+                                             point_weights=self.gps_weights)
+                        # DEBUG: [GPS-lag-set]
+                        print(f"[GPS-lag-set] correlation -> "
+                              f"lag={self.gps_lag:+.4f}s, "
+                              f"corr={self.gps_corr:+.4f}",
+                              file=sys.stderr, flush=True)
+                        try:
+                            _diag_path = write_gps_lag_diag(
+                                filepath=self.filepath,
+                                gps_points=gps_points_sm,
+                                arr_t=arr_t.tolist(),
+                                arr_v=arr_v_sm.tolist(),
+                                best_lag=self.gps_lag,
+                                best_corr=self.gps_corr,
+                                all_results=lag_results,
+                                gps_method=self.gps_method,
+                                analyze_window=(
+                                    f_start / fps,
+                                    f_end / fps,
+                                ),
+                            )
+                            if _diag_path:
+                                print(f"  GPS-diag: "
+                                      f"{_diag_path}")
+                        except Exception as _e:
+                            print(f"  GPS-diag: ошибка "
+                                  f"({_e})",
+                                  file=sys.stderr)
+                        if lag_results:
+                            print("  Топ-5 лагов по RMSE "
+                                  "(меньше — лучше):")
+                            for row in lag_results[:5]:
+                                if len(row) == 4:
+                                    l, c, rm, nn = row
+                                else:
+                                    l, c, nn = row
+                                    rm = float('nan')
+                                marker = (" <==" if abs(l - self.gps_lag)
+                                          < 1e-9 else "")
+                                print(f"    {l:+.1f}с  "
+                                      f"rmse={rm:7.3f}  "
+                                      f"corr={c:+.3f}  "
+                                      f"n={nn}{marker}")
+                        print(f"  GPS запаздывание: {self.gps_lag:+.3f} сек "
+                              f"(корреляция: {self.gps_corr:+.3f})")
+                        if abs(self.gps_corr) < 0.5:
+                            print("  ВНИМАНИЕ: |корреляция| < 0.5 — "
+                                  "результат недостоверен!")
+                            print("    Задайте gps_lag_override в конфиге "
+                                  "(например 1.5)")
+                    else:
+                        print(f"  GPS: недостаточно точек аудио "
+                              f"({len(audio_times_full)})")
+                except Exception as e:
+                    print(f"  GPS: не удалось вычислить запаздывание ({e})")
+
+        print("  Интерполяция границ: включена (суббинная точность)")
+        print(f"  Параметры авто: цил={self.cfg['cylinders']} "
+              f"такт={self.cfg['stroke']} "
+              f"шина={self.cfg['tire_width']}/"
+              f"{self.cfg['tire_profile']} "
+              f"R{self.cfg['rim_diameter']} "
+              f"ГП={self.cfg['final_drive']} "
+              f"КПП={self.cfg['gear_ratio']}")
+        print(f"{'='*70}")
+
+        hdr = (f"{'Время,с':>8s}  {'H5 min':>10s}  {'H5 max':>10s}  "
+               f"{'H4 min':>10s}  {'H4 max':>10s}  {'H5ц':>8s}  {'H4ц':>8s}  "
+               f"{'f,Гц':>8s}  {'n,об/мин':>10s}  {'V,км/ч':>8s}  "
+               f"{'±V,км/ч':>8s}  {'V GPS':>8s}")
+        print(hdr)
+        print("-" * len(hdr))
+
+        all_h5_min, all_h5_max = [], []
+        all_h4_min, all_h4_max = [], []
+        step_data = []
+        all_v, all_dv = [], []
+        all_f, all_n = [], []
+
+        self.tube_t = []
+        self.tube_h5_mins = []
+        self.tube_h5_maxs = []
+        self.tube_h4_mins = []
+        self.tube_h4_maxs = []
+        self.tube_h5_centers = []
+        self.tube_h4_centers = []
+
+        expected_h5 = self.h5
+        expected_h4 = self.h4
+
+        n_steps = max(1, math.floor((f_end - f_start)
+                                    / step_frames_float) + 1)
+        for step_i in range(n_steps):
+            fs = f_start + int(round(step_i * step_frames_float))
+            if fs > f_end:
+                break
+            fe = min(f_start + int(round((step_i + 1) * step_frames_float)),
+                     self.n_frames)
+            t_sec = fs / fps
+
+            h5_mins, h5_maxs = [], []
+            h4_mins, h4_maxs = [], []
+            h5_centers, h4_centers = [], []
+
+            cur_expected_h5 = expected_h5
+            cur_expected_h4 = expected_h4
+
+            for frame_i in range(fs, fe):
+                if frame_i >= self.n_frames:
+                    break
+                col_data = self.S_db[:, frame_i]
+                cur_expected_h5 = find_peak_near(self.freqs, col_data,
+                                                 cur_expected_h5, peak_hz,
+                                                 f_lo5, f_hi5)
+                cur_expected_h4 = find_peak_near(self.freqs, col_data,
+                                                 cur_expected_h4, peak_hz,
+                                                 f_lo4, f_hi4)
+                h5_centers.append(cur_expected_h5)
+                h4_centers.append(cur_expected_h4)
+
+                h5_lo, h5_hi = find_range_dispatch(
+                    algo, self.freqs, col_data, cur_expected_h5, color_steps,
+                    vmin, vmax, 256, f_lo5, f_hi5)
+                h5_mins.append(h5_lo)
+                h5_maxs.append(h5_hi)
+
+                h4_lo, h4_hi = find_range_dispatch(
+                    algo, self.freqs, col_data, cur_expected_h4, color_steps,
+                    vmin, vmax, 256, f_lo4, f_hi4)
+                h4_mins.append(h4_lo)
+                h4_maxs.append(h4_hi)
+
+            if h5_centers:
+                expected_h5 = h5_centers[-1]
+            if h4_centers:
+                expected_h4 = h4_centers[-1]
+
+            h5_min = min(h5_mins)
+            h5_max = max(h5_maxs)
+            h4_min = min(h4_mins)
+            h4_max = max(h4_maxs)
+            h5_c = sum(h5_centers) / len(h5_centers) if h5_centers else 0.0
+            h4_c = sum(h4_centers) / len(h4_centers) if h4_centers else 0.0
+
+            all_h5_min.append(h5_min)
+            all_h5_max.append(h5_max)
+            all_h4_min.append(h4_min)
+            all_h4_max.append(h4_max)
+
+            self.tube_t.append(float(fs))
+            self.tube_h5_mins.append(h5_min)
+            self.tube_h5_maxs.append(h5_max)
+            self.tube_h4_mins.append(h4_min)
+            self.tube_h4_maxs.append(h4_max)
+            self.tube_h5_centers.append(h5_c)
+            self.tube_h4_centers.append(h4_c)
+
+            f_val, n_val, Rk_val, V_val = self._calc_speed(h5_c, h4_c)
+            df_val, dV_val = self._calc_speed_error(h5_min, h5_max,
+                                                    h4_min, h4_max,
+                                                    f_val, V_val)
+
+            all_v.append(V_val)
+            all_dv.append(dV_val)
+            all_f.append(f_val)
+            all_n.append(n_val)
+
+            step_data.append({
+                't_sec': t_sec,
+                'h5_min': h5_min, 'h5_max': h5_max,
+                'h4_min': h4_min, 'h4_max': h4_max,
+                'h5_c': h5_c, 'h4_c': h4_c,
+                'f': f_val, 'n': n_val, 'V': V_val, 'dV': dV_val,
+            })
+
+            gps_v_str = ""
+            if self.gps_points:
+                # v0.55.2: gps_t = t_audio - lag
+                t_gps = t_sec - self.gps_lag
+                gps_t_arr = [p[0] for p in self.gps_points]
+                gps_v_arr = [p[1] for p in self.gps_points]
+                if gps_t_arr[0] <= t_gps <= gps_t_arr[-1]:
+                    gps_v_val = float(np.interp(t_gps, gps_t_arr, gps_v_arr))
+                    gps_v_str = f"  {gps_v_val:8.1f}"
+
+            row = (f"{t_sec:8.3f}  {h5_min:10.3f}  {h5_max:10.3f}  "
+                   f"{h4_min:10.3f}  {h4_max:10.3f}  {h5_c:8.3f}  "
+                   f"{h4_c:8.3f}  {f_val:8.3f}  {n_val:10.0f}  "
+                   f"{V_val:8.2f}  {dV_val:8.2f}{gps_v_str}")
+            print(row)
+            sys.stdout.flush()
+
+        self.h5_min = min(all_h5_min) if all_h5_min else None
+        self.h5_max = max(all_h5_max) if all_h5_max else None
+        self.h4_min = min(all_h4_min) if all_h4_min else None
+        self.h4_max = max(all_h4_max) if all_h4_max else None
+
+        v_min = v_max = v_avg = 0.0
+        dv_min = dv_max = dv_avg = 0.0
+        n_min_v = n_max_v = 0
+        f0_avg = 0.0
+        _c_def = float(self.cfg.get('tire_deflection_coeff', 0.84))
+        Rk_v = (_c_def * self.cfg['tire_width'] * self.cfg['tire_profile']
+                / 100000.0 + 0.0127 * self.cfg['rim_diameter'])
+
+        print(f"\n{'='*70}")
+        print("ИТОГ (за весь отрезок):")
+        if self.h5_min is not None:
+            print(f"  H5: {self.h5_min:.3f} - {self.h5_max:.3f} Гц")
+            print(f"  H4: {self.h4_min:.3f} - {self.h4_max:.3f} Гц")
+
+        if all_v:
+            v_min = min(all_v)
+            v_max = max(all_v)
+            v_avg = sum(all_v) / len(all_v)
+            dv_min = min(all_dv)
+            dv_max = max(all_dv)
+            dv_avg = sum(all_dv) / len(all_dv)
+            n_min_v = min(all_n)
+            n_max_v = max(all_n)
+            f0_avg = sum(all_f) / len(all_f)
+
+            print(f"  V min  = {v_min:.2f} ± {dv_min:.2f} км/ч")
+            print(f"  V max  = {v_max:.2f} ± {dv_max:.2f} км/ч")
+            print(f"  V ср   = {v_avg:.2f} ± {dv_avg:.2f} км/ч")
+            print(f"  n      = {n_min_v:.0f} - {n_max_v:.0f} об/мин")
+            print(f"  f0     = {f0_avg:.3f} Гц")
+            print(f"  Rk     = {Rk_v:.4f} м")
+
+            if self.gps_points:
+                gps_t_arr = [p[0] for p in self.gps_points]
+                gps_v_arr = [p[1] for p in self.gps_points]
+                # v0.55.2: gps_t ∈ [a0-lag, a1-lag]
+                t_start_gps = t_start_sec - self.gps_lag
+                t_end_gps = t_end_sec - self.gps_lag
+                gps_in_win, gps_before, gps_after = find_gps_window_points(
+                    self.gps_points, t_start_gps, t_end_gps)
+                if not gps_in_win and len(gps_t_arr) >= 2:
+                    t_mid = (t_start_gps + t_end_gps) / 2
+                    if gps_t_arr[0] <= t_mid <= gps_t_arr[-1]:
+                        gps_in_win = [(t_mid, float(np.interp(
+                            t_mid, gps_t_arr, gps_v_arr)), 0.0)]
+                if gps_in_win:
+                    gps_avg = sum(p[1] for p in gps_in_win) / len(gps_in_win)
+                    self.gps_v_avg = gps_avg  # v0.53.1
+                    dv_gps = v_avg - gps_avg
+                    print("  GPS-сравнение:")
+                    print(f"    Метод: {self.gps_method}")
+                    print(f"    GPS-меток в файле: {len(self.gps_points)}")
+                    print(f"    Запаздывание GPS: {self.gps_lag:+.3f} сек "
+                          f"(корреляция: {self.gps_corr:+.3f})")
+                    print(f"    Окно: {t_start_sec:.3f}-{t_end_sec:.3f}с -> "
+                          f"GPS: {t_start_gps:.3f}-{t_end_gps:.3f}с")
+                    if gps_before:
+                        print(f"    [{gps_before[0]:.3f}с] "
+                              f"{gps_before[1]:.1f} км/ч  "
+                              f"({gps_before[2]:.3f}с до окна)")
+                    for pt in gps_in_win:
+                        print(f"    [{pt[0]:.3f}с] {pt[1]:.1f} км/ч  "
+                              f"(в окне)")
+                    if gps_after:
+                        print(f"    [{gps_after[0]:.3f}с] "
+                              f"{gps_after[1]:.1f} км/ч  "
+                              f"({gps_after[2]:.3f}с после окна)")
+                    print(f"    V аудио (ср): {v_avg:.2f} км/ч")
+                    print(f"    V GPS  (ср): {gps_avg:.2f} км/ч "
+                          f"(интерполяция по {len(gps_in_win)} точкам)")
+                    print(f"    dV: {dv_gps:+.2f} км/ч")
+                else:
+                    print(f"  GPS: нет точек в окне "
+                          f"(с поправкой t={self.gps_lag:+.3f}с)")
+
+            base = os.path.splitext(os.path.basename(self.filepath))[0]
+            report_path = f"{base}_speed_report_algo{algo}.txt"
+            try:
+                self._write_speed_report(
+                    report_path, algo, f_start, f_end, step_sec,
+                    color_steps, peak_hz, vmin, vmax,
+                    f_lo5, f_hi5, f_lo4, f_hi4,
+                    step_data, self.h5_min, self.h5_max,
+                    self.h4_min, self.h4_max,
+                    v_min, v_max, v_avg, dv_min, dv_max, dv_avg,
+                    f0_avg, n_min_v, n_max_v, Rk_v)
+                print(f"Отчёт сохранён: {report_path}")
+            except Exception as e:
+                print(f"Не удалось сохранить отчёт: {e}")
+        print(f"{'='*70}")
+
+        self._algo_results[algo] = {
+            'v_min': v_min, 'v_max': v_max, 'v_avg': v_avg,
+            'dv_min': dv_min, 'dv_max': dv_max, 'dv_avg': dv_avg,
+            'n_min': n_min_v, 'n_max': n_max_v, 'f0': f0_avg,
+        }
+        self._print_algo_summary()
+
+        self._update_overlay_buttons()
+        self._update_algo_buttons()
+        self.draw_tubes()
+        self.draw_ranges()
+        self._draw_speed_overlay()
+        self._draw_speed_labels()
+        self._draw_speed_extremes()
+        self.update_status()
+        self.fig.canvas.draw_idle()
+
+    def update_status(self):
+        parts = []
+
+        if self.phase == self.PHASE_TIME:
+            step = 1
+        elif self.phase == self.PHASE_H5:
+            step = 2
+        elif self.phase == self.PHASE_H4:
+            step = 3
+        else:
+            step = 5
+
+        parts.append(f"[{step}/5]")
+
+        hist_total = len(self.zoom_history)
+        if hist_total == 0:
+            hist_str = "Ист: 0/0"
+        else:
+            hist_pos = self.zoom_pointer + 1
+            if hist_pos < 1:
+                hist_pos = 1
+            if hist_pos > hist_total:
+                hist_pos = hist_total
+            hist_str = f"Ист: {hist_pos}/{hist_total}"
+        # v0.56.3: маркер неприменённых правок.
+        if self._is_dirty():
+            hist_str += " *"
+        parts.append(hist_str)
+
+        try:
+            step_sec = float(self.cfg['time_step'])
+        except (ValueError, TypeError):
+            step_sec = 0.0
+        parts.append(f"Шаг={step_sec:.3f}с")
+
+        if self.phase == self.PHASE_TIME:
+            parts.append("Drag — выбрать диапазон, "
+                         "клик — выбрать 5-ю гармонику")
+            parts.append(f"Файл: {os.path.basename(self.filepath)}")
+        elif self.phase == self.PHASE_H5:
+            parts.append("Кликните мышью по 5-й гармонике")
+        elif self.phase == self.PHASE_H4:
+            parts.append("Кликните мышью по 4-й гармонике")
+        elif self.phase == self.PHASE_DONE:
+            # --- Диапазон анализа (кадры и секунды) ---
+            try:
+                fps_status = float(self.cfg['target_fps'])
+                f_s = int(round(self.analyze_start))
+                f_d = int(round(self.analyze_dur))
+                if f_d < 1:
+                    f_d = 1
+                f_e = min(f_s + f_d, self.n_frames)
+                if f_e <= f_s:
+                    f_e = min(f_s + 1, self.n_frames)
+                if fps_status > 0:
+                    t0 = f_s / fps_status
+                    t1 = f_e / fps_status
+                    parts.append(
+                        f"Диап: кадры {f_s}-{f_e} "
+                        f"({t0:.3f}-{t1:.3f}с)"
+                    )
+                else:
+                    parts.append(f"Диап: кадры {f_s}-{f_e}")
+            except Exception:
+                pass
+
+            if not self._algo_run_done:
+                parts.append("Выберите алгоритм: 1.dB ... 6.RMS")
+                if self.h5 is not None:
+                    parts.append(f"H5={self.h5:.1f} Гц")
+                if self.h4 is not None:
+                    parts.append(f"H4={self.h4:.1f} Гц")
+                if self.f0 is not None:
+                    parts.append(f"f0={self.f0:.3f} Гц")
+            else:
+                algo_name = ALGO_NAMES.get(self.last_algo, "?")
+                parts.append(f"Готово | Алго {self.last_algo}: {algo_name}")
+                if (self.h5 is not None and self.h4 is not None
+                        and self.f0 is not None):
+                    parts.append(f"H5={self.h5:.1f} Гц | "
+                                 f"H4={self.h4:.1f} Гц")
+                    parts.append(f"f0={self.f0:.1f} Гц")
+
+                    # Vср — из результатов последнего запуска алгоритма,
+                    # ровно то же значение, что записано в отчёте.
+                    v_avg_status = None
+                    if self._algo_results and \
+                            self.last_algo in self._algo_results:
+                        v_avg_status = self._algo_results[
+                            self.last_algo].get('v_avg')
+                    if v_avg_status is not None:
+                        parts.append(f"Vср={v_avg_status:.1f} км/ч")
+
+                    gps_avg = getattr(self, 'gps_v_avg', None)
+                    if gps_avg is not None:
+                        parts.append(f"Vgps ср={gps_avg:.1f} км/ч")
+
+                    # Δgps — сдвиг между GPS-временем и временем аудио
+                    # (как в отчёте). Если активен gps_lag_override из
+                    # JSON — помечаем «(OVR)».
+                    gps_dt_used = self.gps_lag
+                    _override = self.cfg.get('gps_lag_override')
+                    ovr_flag = False
+                    if _override is not None:
+                        try:
+                            gps_dt_used = float(_override)
+                            ovr_flag = True
+                        except (ValueError, TypeError):
+                            pass
+                    # v0.56.1: маркер (H) — dGPS применён из
+                    # калибровки по длинному интервалу из истории.
+                    _calib_flag = (not ovr_flag
+                                    and self.gps_lag_calib_info
+                                    is not None)
+                    _mark = (" (OVR)" if ovr_flag
+                             else (" (H)" if _calib_flag else ""))
+                    parts.append(f"Δgps={gps_dt_used:+.3f}с" + _mark)
+
+        self.status.set_text(' | '.join(parts) if parts else '')
+        self.fig.canvas.draw_idle()
+
+    def _toggle_help(self):
+        if self.help_visible:
+            self._hide_help()
+        else:
+            self._show_help()
+
+    def _show_help(self):
+        left_lines = list(HELP_LEFT_LINES)
+        right_lines = list(HELP_RIGHT_LINES)
+        maxw_l = max(len(l) for l in left_lines)
+        maxw_r = max(len(l) for l in right_lines)
+        while len(right_lines) < len(left_lines):
+            right_lines.append("")
+        while len(left_lines) < len(right_lines):
+            left_lines.append("")
+        combined = []
+        for l, r in zip(left_lines, right_lines):
+            combined.append(l.ljust(maxw_l) + "  |  " + r.ljust(maxw_r))
+        txt = '\n'.join(combined)
+        self.help_obj = self.fig.text(
+            0.5, 0.5, txt,
+            transform=self.fig.transFigure,
+            fontsize=8, va='center', ha='center',
+            family='monospace', color='white',
+            bbox=dict(boxstyle='round,pad=0.8', facecolor='#1a1a2e',
+                      alpha=0.95, edgecolor='#e0e0e0', lw=1.5),
+            zorder=100
+        )
+        self.help_visible = True
+        self.fig.canvas.draw_idle()
+
+    def _hide_help(self):
+        if self.help_visible and hasattr(self, 'help_obj'):
+            try:
+                self.help_obj.remove()
+            except Exception:
+                pass
+            self.help_obj = None
+            self.help_visible = False
+            self.fig.canvas.draw_idle()
+
+
+def prompt_car_params(config, config_path):
+    """Запрос параметров автомобиля. Промпты в stderr.
+
+    v0.56.0: НЕ сохраняет config автоматически на диск.
+    Новые значения действуют только в текущей сессии;
+    для записи в файл — клавиша S в окне.
+
+    Параметр config_path оставлен для совместимости сигнатуры.
+    """
+    keys = [
+        ('cylinders',     'Цилиндров',     int),
+        ('stroke',        'Тактность (1=2-такт, 2=4-такт)', int),
+        ('tire_width',    'Ширина шины',   int),
+        ('tire_profile',  'Профиль шины',  int),
+        ('rim_diameter',  'Диаметр диска', int),
+        ('final_drive',   'Главная пара',  float),
+        ('gear_ratio',    'Передача КПП',  float),
+        ('accel_0_100_sec', 'Разгон 0-100 км/ч', float),
+    ]
+
+    print("\nПАРАМЕТРЫ АВТОМОБИЛЯ (из config):", file=sys.stderr)
+    print(f"  Цилиндры:      {config['cylinders']}", file=sys.stderr)
+    print(f"  Тактность:     {config['stroke']} "
+          f"({'4-такт' if config['stroke']==2 else '2-такт'})",
+          file=sys.stderr)
+    print(f"  Шина:          {config['tire_width']}/"
+          f"{config['tire_profile']} "
+          f"R{config['rim_diameter']}", file=sys.stderr)
+    print(f"  ГП:            {config['final_drive']}", file=sys.stderr)
+    print(f"  КПП:           {config['gear_ratio']}", file=sys.stderr)
+    if "accel_0_100_sec" in config:
+        print(f"  0-100 км/ч:    {config['accel_0_100_sec']} с",
+              file=sys.stderr)
+    print("Согласны? (Enter=да / n=ввести новые):",
+          file=sys.stderr, flush=True)
+
+    try:
+        resp = input().strip().lower()
+    except (EOFError, OSError):
+        resp = ''
+
+    if resp == 'n':
+        for key, label, typ in keys:
+            cur = config[key]
+            print(f"  {label} [{cur}]: ", file=sys.stderr,
+                  end='', flush=True)
+            try:
+                val = input().strip()
+            except (EOFError, OSError):
+                val = ''
+            if val:
+                try:
+                    config[key] = typ(val)
+                except ValueError:
+                    print(f"    Ошибка: оставлено {cur}",
+                          file=sys.stderr)
+        # v0.56.0: автосохранение убрано.
+        # Новые параметры действуют в текущей сессии;
+        # на диск — по клавише S в окне.
+        print("Новые параметры применены только в текущей сессии. "
+              "Для записи в файл нажмите S в окне.",
+              file=sys.stderr)
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='Расчёт скорости по звуку из .ts-фрагментов'
+    )
+    parser.add_argument('filepath', help='Путь к .ts файлу')
+    parser.add_argument('--config', default=None,
+                        help='Файл конфигурации JSON '
+                             '(по умолчанию: <base_ts>_config.json)')
+    args = parser.parse_args()
+
+    if not os.path.exists(args.filepath):
+        print(f"Файл не найден: {args.filepath}")
+        sys.exit(1)
+
+    base_ts = os.path.splitext(os.path.basename(args.filepath))[0]
+    per_file_config = f"{base_ts}_config.json"
+
+    if args.config:
+        config_path = args.config
+    elif os.path.exists(per_file_config):
+        config_path = per_file_config
+    else:
+        if os.path.exists(CONFIG_FILE):
+            print(f"Перенос настроек из {CONFIG_FILE} -> "
+                  f"{per_file_config}", file=sys.stderr)
+            old_cfg = load_config(CONFIG_FILE)
+            save_config(old_cfg, per_file_config)
+            config_path = per_file_config
+        else:
+            config_path = per_file_config
+
+    # v0.56.0: автозапись в history_log.txt убрана.
+    # Функция update_history_log() остаётся в модуле,
+    # но больше не вызывается автоматически.
+    # update_history_log()
+
+    config = load_config(config_path)
+
+    if not config.get('harmonic_5_freq') or not config.get('harmonic_4_freq'):
+        print("Гармоники не заданы в конфиге.")
+        print("Запустите программу, выберите 5-ю и 4-ю гармоники кликом мыши.")
+        print("Настройки сохранятся автоматически (S — сохранить вручную).")
+
+    prompt_car_params(config, config_path)
+
+    analyzer = AudioSpeedAnalyzer(args.filepath, config, config_path)
+    analyzer.run()
+
+
+if __name__ == '__main__':
+    main()
