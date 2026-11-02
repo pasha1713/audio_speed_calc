@@ -1,82 +1,46 @@
 @echo off
-REM ============================================================
-REM  build_exe.bat - build audio_speed_calc.exe via PyInstaller
-REM  Works on Windows 7/8/10/11 with Python 3.8+
-REM ============================================================
+chcp 65001 >nul
 setlocal
-cd /d "%~dp0"
 
-echo ============================================================
-echo  Building audio_speed_calc.exe
-echo ============================================================
+echo ========================================
+echo  Сборка audio_speed_calc.exe
+echo ========================================
 echo.
 
-REM --- Check Python ---
-where python >nul 2>nul
+pyinstaller --version >nul 2>&1
 if errorlevel 1 (
-    echo [x] Python not found in PATH.
-    echo     Install Python 3.8+ and add it to PATH.
+    echo ОШИБКА: PyInstaller не найден.
     pause
     exit /b 1
 )
 
-REM --- Show Python and PyInstaller versions ---
-for /f "tokens=*" %%v in ('python --version 2^>^&1') do echo [i] %%v
-for /f "tokens=*" %%v in ('python -c "import PyInstaller; print(\"PyInstaller \" + PyInstaller.__version__)" 2^>^&1') do echo [i] %%v
-echo.
+echo [1/8] Сборка главного приложения...
+pyinstaller audio_speed_calc.spec --clean --noconfirm --distpath ..
 
-REM --- Check PyInstaller ---
-python -c "import PyInstaller" >nul 2>nul
-if errorlevel 1 (
-    echo [!] PyInstaller not found. Installing...
-    python -m pip install --upgrade pyinstaller
-    if errorlevel 1 (
-        echo [x] Cannot install PyInstaller.
-        pause
-        exit /b 2
-    )
-)
+echo [2/8] Сборка ts_integrity_check.exe...
+pyinstaller --onefile --noconfirm --distpath ..\dist\audio_speed_calc ..\ts_integrity_check.py
 
-REM --- Check bin\ contents ---
-echo [i] External binaries in bin\:
-if exist "bin\ffmpeg.exe"   (echo     ffmpeg.exe   - OK) else (echo     ffmpeg.exe   - MISSING)
-if exist "bin\ffprobe.exe"  (echo     ffprobe.exe  - OK) else (echo     ffprobe.exe  - MISSING)
-if exist "bin\exiftool.exe" (echo     exiftool.exe - OK) else (echo     exiftool.exe - MISSING)
-echo.
+echo [3/8] Сборка otchet_0x300_для_ssa_26.exe...
+pyinstaller --onefile --noconfirm --distpath ..\dist\audio_speed_calc ..\otchet_0x300_для_ssa_26.py
 
-REM --- Clean previous build ---
-if exist build rmdir /s /q build
-if exist dist rmdir /s /q dist
+echo [4/8] Сборка ssa_shift.exe...
+pyinstaller --onefile --noconfirm --distpath ..\dist\audio_speed_calc ..\ssa_shift.py
 
-REM --- Run PyInstaller ---
-echo [i] Running PyInstaller...
-echo.
-pyinstaller audio_speed_calc.spec --clean --noconfirm
-if errorlevel 1 (
-    echo.
-    echo [x] Build FAILED. See errors above.
-    pause
-    exit /b 3
-)
+echo [5/8] Сборка ssa_add_audio_speed.exe...
+pyinstaller --onefile --noconfirm --distpath ..\dist\audio_speed_calc ..\ssa_add_audio_speed.py
+
+echo [6/8] Сборка ssa_frame_time.exe...
+pyinstaller --onefile --noconfirm --distpath ..\dist\audio_speed_calc ..\ssa_frame_time.py
+
+echo [7/8] Сборка tsp_frag_calc.exe...
+pyinstaller --onefile --noconfirm --distpath ..\dist\audio_speed_calc ..\tsp_frag_calc.py
+
+echo [8/8] Сборка patch_otchet_tolerant.exe...
+pyinstaller --onefile --noconfirm --distpath ..\dist\audio_speed_calc ..\patch_otchet_tolerant.py
 
 echo.
-echo ============================================================
-echo  BUILD COMPLETE
-echo ============================================================
-if exist "dist\audio_speed_calc.exe" (
-    for %%A in ("dist\audio_speed_calc.exe") do (
-        echo   File: %%~fA
-        echo   Size: %%~zA bytes
-    )
-) else (
-    echo   [!] dist\audio_speed_calc.exe not found.
-)
-
-echo.
-echo   Test the .exe on a machine WITHOUT Python.
-echo.
-
-if exist dist explorer dist
-
+echo ========================================
+echo  СБОРКА ЗАВЕРШЕНА!
+echo  Все .exe лежат в ..\dist\audio_speed_calc\
+echo ========================================
 pause
-endlocal
