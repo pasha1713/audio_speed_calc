@@ -1,12 +1,9 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
-audio_speed_calc.spec - PyInstaller build spec.
+audio_speed_calc.spec — PyInstaller build spec (Windows 7, Python 3.8, PyInstaller 5.x)
 
 Собирает ОДИН .exe со встроенными ffmpeg/ffprobe/exiftool из ./bin/.
-
-Совместимость:
-  - PyInstaller 5.x  (Python 3.8+)
-  - PyInstaller 6.x  (Python 3.9+)
+Включает все вспомогательные Python-модули и gpx.fmt.
 
 Сборка:
     pyinstaller audio_speed_calc.spec --clean --noconfirm
@@ -18,7 +15,7 @@ audio_speed_calc.spec - PyInstaller build spec.
 import os
 
 # ------------------------------------------------------------------
-# Внешние бинарники из ./bin/
+# Внешние бинарники из ./bin/ (ffmpeg, ffprobe, exiftool)
 # ------------------------------------------------------------------
 binaries = []
 for _name in ('ffmpeg', 'ffprobe', 'exiftool'):
@@ -30,6 +27,23 @@ for _name in ('ffmpeg', 'ffprobe', 'exiftool'):
             break
 
 # ------------------------------------------------------------------
+# Данные: gpx.fmt (шаблон для exiftool) + шрифты matplotlib
+# ------------------------------------------------------------------
+datas = []
+# gpx.fmt — кладём в корень _MEIPASS, чтобы _find_exec('gpx.fmt') его нашёл
+if os.path.isfile('gpx.fmt'):
+    datas.append(('gpx.fmt', '.'))
+
+# Шрифты matplotlib (если есть проблемы с русским текстом)
+try:
+    import matplotlib
+    _mpl_data = os.path.join(os.path.dirname(matplotlib.__file__), 'mpl-data')
+    if os.path.isdir(_mpl_data):
+        datas.append((_mpl_data, 'matplotlib/mpl-data'))
+except Exception:
+    pass
+
+# ------------------------------------------------------------------
 # Скрытые импорты
 # ------------------------------------------------------------------
 hiddenimports = [
@@ -39,10 +53,18 @@ hiddenimports = [
     'tkinter.messagebox',
     'tkinter.simpledialog',
     'matplotlib.backends.backend_tkagg',
+    # Новые модули проекта
+    'make_disk_py',
+    'merge_ts_ssa_v2',
+    'ssa_frame_time',
+    'ssa_shift',
+    'patch_otchet_tolerant',
+    'ssa_add_audio_speed',
+    'tsp_frag_calc',
 ]
 
 # ------------------------------------------------------------------
-# Исключения - не тянуть лишнее
+# Исключения — не тянуть лишнее
 # ------------------------------------------------------------------
 excludes = [
     'PyQt5', 'PyQt6', 'PySide2', 'PySide6',
@@ -51,13 +73,13 @@ excludes = [
 ]
 
 # ------------------------------------------------------------------
-# Analysis - БЕЗ optimize=0 (нет в PyInstaller 5.x)
+# Analysis
 # ------------------------------------------------------------------
 a = Analysis(
     ['audio_speed_calc.py'],
     pathex=['.'],
     binaries=binaries,
-    datas=[],
+    datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
@@ -81,7 +103,7 @@ exe = EXE(
     upx=True,
     upx_exclude=[],
     runtime_tmpdir=None,
-    console=True,
+    console=True,                # нужен для логов Make Disk
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
