@@ -29,7 +29,10 @@ import struct
 import datetime
 import shutil
 import numpy as np
+import glob
+import subprocess
 import matplotlib
+import matplotlib.ticker
 import matplotlib.pyplot as plt
 import matplotlib.patheffects as pe
 from matplotlib.widgets import Slider, Button, SpanSelector, TextBox
@@ -45,12 +48,789 @@ if sys.platform == 'win32':
     except Exception:
         pass
 
-VERSION = "0.56.3"
+VERSION = "0.58.10.1"  # + ssa_shift_correction_sec (-1.0)
 CONFIG_FILE = "audio_speed_config.json"
 HISTORY_LOG_FILE = "history_log.txt"
 
 
 CHANGELOG = {
+    "0.58.10.1": [
+        "",
+        "v0.58.10.1",
+        "-" * 64,
+        "",
+        "Make Disk: поправка сдвига SSA для фрагмента",
+        "",
+        "* Новый параметр конфига ssa_shift_correction_sec",
+        "  (по умолчанию -1.0).",
+        "",
+        "* Формула snap_abs теперь:",
+        "    snap_abs = (t_start_req - t_start_eff) + ssa_shift_correction_sec",
+        "",
+        "* При raw первом Dialogue 0.0-1.0 и t_start_req-t_start_eff=0.2333",
+        "  сдвиг становится -0.767 вместо +0.2333: первый Dialogue",
+        "  теперь заканчивается ровно на позиции запроса, а не начинается с неё.",
+        "",
+        "* Если в будущем длительность первого Dialogue изменится —",
+        "  достаточно поправить ssa_shift_correction_sec в JSON,",
+        "  без правки audio_speed_calc.py.",
+        "",
+    ],
+    "0.58.10.0": [
+        "",
+        "v0.58.10.0",
+        "-" * 64,
+        "",
+        "Make Disk: patch по ИСТОЧНИКУ .TS.ssa, ssa_shift после patch",
+        "",
+        "* patch_otchet_tolerant.py применяется к источнику",
+        "  2k/ssa/<base>.TS.ssa, а не только к sidecar",
+        "  2k/<base>.ssa. После patch — ren .TS.ssa -> .ssa.",
+        "",
+        "* frag: ssa_shift применяется к источнику ПОСЛЕ patch",
+        "  и ПОСЛЕ ren; затем источник копируется в sidecar.",
+        "  Раньше ssa_shift шёл до patch — на склеенной строке",
+        "  regex ^...$ срабатывал только по первому Dialogue,",
+        "  остальные 4 не сдвигались.",
+        "",
+        "* SSA_SHIFT_HELPER: сохраняет символ перевода строки (LF).",
+        "  Раньше out.append(...) терял его (regex .* не матчит LF,",
+        "  $ матчит перед LF, группа 4 без LF) — все",
+        "  Dialogue слипались обратно в одну строку.",
+        "",
+        "* _compute_fragment_info: snap_abs = t_start_req - t_start_eff",
+        "  (убран +1/fps_used). Первый Dialogue фрагмента теперь",
+        "  попадает примерно на 0.23-0.24с, а не на 0.27с.",
+        "",
+        "* full .ssa: без ssa_shift (offset=0), только patch + ren + copy.",
+        "",
+    ],
+    "0.58.9.8": [
+        "",
+        "v0.58.9.8",
+        "-" * 64,
+        "",
+        "Make Disk: проверка, что otchet_0x300 реально создал .ssa",
+        "",
+        "* otchet_0x300_для_ssa_26.py при внутренней ошибке",
+        "  возвращал rc=0 (не было sys.exit(1)), GUI",
+        "  помечал шаг [OK], хотя .ssa не создавался.",
+        "",
+        "* В _worker после otchet добавлена проверка:",
+        "  если ssa_out не создан или пуст — rc=1,",
+        "  шаг помечается [FAIL], в консоль и в лог",
+        "  пишется диагностика.",
+        "",
+        "* Не заменяет фикс самого otchet (см.",
+        "  patch_otchet_tolerant.py — tolerant-парсер",
+        "  и sys.exit), но даёт защиту от молчаливых",
+        "  провалов.",
+        "",
+    ],
+    "0.58.9.7": [
+        "",
+        "v0.58.9.7",
+        "-" * 64,
+        "",
+        "Make Disk: KML окончательно убран, имена файлов",
+        "как в исходном make_disk.cmd",
+        "",
+        "* KML-блок удалён из _btn_make_disk окончательно.",
+        "  В v0.58.9.6 он оставался там (удалялся только",
+        "  в _generate_make_disk_cmd), из-за чего .cmd",
+        "  через GUI-фолбэк всё равно создавал track.kml.",
+        "",
+        "* Имена файлов ВЕЗДЕ (и в GUI, и в .cmd):",
+        "    <ts_name>_exiftool_orig.txt",
+        "    <ts_name>_orig.txt        (console от otchet)",
+        "    <ts_name>.ssa",
+        "    <ts_name>_tsanalize.txt",
+        "    <ts_name>_MediaInfo.txt",
+        "    <ts_name>.gpx",
+        "    <ts_name>_full.txt        (создаёт otchet сам)",
+        "  где <ts_name> = basename .ts с расширением,",
+        "  например 20260602050735_000048.TS.",
+        "",
+        "* _generate_make_disk_cmd — структура <series>/",
+        "  (2k или 4k по суффиксу A в имени .ts):",
+        "    <series>/exiftool/<ts_name>_exiftool_orig.txt",
+        "    <series>/ssa/<ts_name>.ssa",
+        "    <series>/txt/<ts_name>_orig.txt",
+        "    <series>/txt/<ts_name>_full.txt",
+        "    <series>/tsanalize/<ts_name>_tsanalize.txt",
+        "    <series>/MediaInfo/<ts_name>_MediaInfo.txt",
+        "    <series>/gpx/<ts_name>.gpx",
+        "",
+        "* exiftool — с skip_if_exists (непустой",
+        "  exiftool_orig.txt не пересоздаётся).",
+        "",
+        "* Старые артефакты удаляются при генерации .cmd:",
+        "    <reports>/make_disk_<base>.cmd",
+        "    <reports>/track.kml",
+        "    <reports>/_gpx_to_kml.fmt",
+        "",
+    ],
+    "0.58.9.6": [
+        "",
+        "v0.58.9.6",
+        "-" * 64,
+        "",
+        "Make Disk .cmd — переписан по логике make_disk.cmd",
+        "",
+        "* .cmd генерируется рядом с .ts (в папке файла),",
+        "  а не в <base>_reports/. Запускается из своего",
+        "  каталога (cd /d \"%~dp0\").",
+        "",
+        "* Сам создаёт структуру каталогов:",
+        "    <series>/",
+        "    <series>/ssa/",
+        "    <series>/exiftool/",
+        "    <series>/tsanalize/",
+        "    <series>/MediaInfo/",
+        "    <series>/txt/",
+        "    <series>/gpx/",
+        "  где <series> = 2k или 4k по суффиксу A в имени",
+        "  .ts (000048.TS -> 2k, 000229A.TS -> 4k).",
+        "",
+        "* Отчёты пишутся сразу в свои подпапки (без move):",
+        "    <series>/exiftool/exiftool_orig.txt",
+        "    <series>/ssa/<base>.ssa",
+        "    <series>/txt/report_console.txt",
+        "    <series>/txt/<base>_full.txt (move из ssa)",
+        "    <series>/tsanalize/tsanalize.txt",
+        "    <series>/MediaInfo/mediainfo.txt",
+        "    <series>/gpx/track.gpx",
+        "",
+        "* KML полностью убран (ни шага, ни _gpx_to_kml.fmt,",
+        "  ни track.kml). GPX остаётся.",
+        "",
+        "* gpx.fmt копируется в <ts_dir>/gpx.fmt (если там",
+        "  ещё нет) — .cmd ссылается на него как gpx.fmt.",
+        "",
+        "* exiftool — с skip_if_exists (непустой",
+        "  exiftool_orig.txt не пересоздаётся). Пустой —",
+        "  пересоздаётся (защита от недописанного).",
+        "",
+        "* Старые артефакты в <base>_reports/ удаляются:",
+        "    make_disk_<base>.cmd   (был в reports до 0.58.9.6)",
+        "    _gpx_to_kml.fmt       (оставался от 0.58.9.1)",
+        "    track.kml             (оставался от 0.58.9.1)",
+        "",
+        "* Все символы, не входящие в CP866, заменяются '?'",
+        "  с предупреждением в stderr.",
+        "",
+    ],
+    "0.58.9.5": [
+        "",
+        "v0.58.9.5",
+        "-" * 64,
+        "",
+        "Make Disk: exiftool_orig.txt создаётся один раз",
+        "",
+        "* В GUI: exiftool-шаг присутствует в steps всегда",
+        "  (если tool_exiftool найден), но имеет флаг",
+        "  skip_if_exists=True. _worker перед запуском",
+        "  проверяет: файл есть и непуст -> [SKIP]",
+        "  (rc=0), subprocess не запускается.",
+        "",
+        "* В .cmd: шаг exiftool обёрнут в",
+        "    if exist <out> for %%A in (<out>) do",
+        "        if %%~zA GTR 0 set SKIP_N=1",
+        "    if defined SKIP_N (echo SKIP) else",
+        "        (<cmd> > out & if errorlevel ... )",
+        "  Пустой файл считается отсутствующим и",
+        "  пересоздаётся (защита от недописанного",
+        "  exiftool_orig.txt).",
+        "",
+        "* otchet_0x300 БЕЗ skip_if_exists — .ssa,",
+        "  _full.txt, report_console.txt создаются",
+        "  всегда (пересоздание дёшево и полезно при",
+        "  ручной правке exiftool_orig.txt).",
+        "",
+        "* v0.58.9.2 делал проверку на этапе сборки",
+        "  steps (exiftool вообще не попадал в steps,",
+        "  если файл был). Из-за этого .cmd не мог",
+        "  пересоздать файл на другой машине.",
+        "  v0.58.9.5 переносит проверку в момент",
+        "  выполнения: и GUI, и .cmd решают сами.",
+        "",
+    ],
+    "0.58.9.3": [
+        "",
+        "v0.58.9.3",
+        "-" * 64,
+        "",
+        "Make Disk: генерация make_disk_<base>.cmd (Windows 7)",
+        "",
+        "* После сборки списка шагов и перед запуском",
+        "  _worker в <base>_reports/ пишется .cmd со",
+        "  всеми командами, которые будут выполнены.",
+        "",
+        "* Формат — как у оригинального make_disk.cmd:",
+        "  построчно, >redirect stdout в файл отчёта,",
+        "  cd /d \"%~dp0\" в начале, pause в конце.",
+        "",
+        "* Кодировка .cmd — CP866 (родная для русского",
+        "  cmd на Win7), переводы строк CRLF, без BOM.",
+        "  Внутри — chcp 866 >nul. Без UTF-8: на Win7",
+        "  chcp 65001 нестабилен, а cmd читает .cmd в",
+        "  OEM-кодировке.",
+        "",
+        "* Спецсимволы cmd в echo и if-errorlevel",
+        "  эскейпятся ^: ^( ^) ^& ^| ^< ^> ^^. Иначе",
+        "  скобки в имени шага (например,",
+        "  \"otchet_0x300 (SSA)\") рвут блок.",
+        "",
+        "* setlocal enabledelayedexpansion НЕ используется:",
+        "  не нужен и опасен при '!' в путях.",
+        "",
+        "* exiftool / tsanalyze / MediaInfo — по",
+        "  basename (ищутся в PATH), как в исходном",
+        "  make_disk.cmd.",
+        "",
+        "* sys.executable для otchet — абсолютный путь.",
+        "  Прочие пути в .cmd — относительные от",
+        "  <base>_reports/.",
+        "",
+        "* gpx.fmt копируется в <base>_reports/,",
+        "  _gpx_to_kml.fmt уже там. В .cmd — basename.",
+        "",
+        "* Если в Make Disk не нашлось ни одного",
+        "  инструмента — .cmd не создаётся.",
+        "",
+    ],
+    "0.58.9.2": [
+        "",
+        "v0.58.9.2",
+        "-" * 64,
+        "",
+        "Make Disk: повторный прогон использует готовый",
+        "exiftool_orig.txt",
+        "",
+        "* Если <base>_reports/exiftool_orig.txt уже",
+        "  существует и не пуст — шаг exiftool",
+        "  пропускается, отчёт берётся существующий.",
+        "",
+        "* Шаг otchet_0x300 при этом ВСЁ РАВНО",
+        "  выполняется (он читает готовый файл).",
+        "  Проверка существования касается ТОЛЬКО",
+        "  шага exiftool — не otchet.",
+        "",
+        "* Побочный эффект: .ssa / _full.txt можно",
+        "  собрать повторно без установленного",
+        "  exiftool, если exiftool_orig.txt был",
+        "  получен ранее.",
+        "",
+    ],
+    "0.58.9.1": [
+        "",
+        "v0.58.9.1",
+        "-" * 64,
+        "",
+        "ИСПРАВЛЕНО по итогам первого прогона Make Disk",
+        "",
+        "1. otchet_0x300 больше не пропускается.",
+        "",
+        "* v0.58.9 проверял os.path.exists(exiftool_orig.txt)",
+        "  на этапе сборки списка шагов — ДО запуска exiftool.",
+        "  В чистой папке файла ещё нет -> otchet пропускался,",
+        "  не создавались <base>.ssa, <base>_full.txt,",
+        "  report_console.txt.",
+        "",
+        "* Теперь otchet всегда идёт после exiftool.",
+        "",
+        "2. Добавлена генерация track.kml.",
+        "",
+        "* GPX не открывается в Google Earth Web",
+        "  (earth.google.com/web) — веб-версия принимает",
+        "  только KML/KMZ. GPX открывается в Google Earth",
+        "  Pro (десктоп), QGIS, BaseCamp, OsmAnd, My Maps.",
+        "",
+        "* track.kml генерируется встроенным шаблоном",
+        "  (LineString), открывается в Google Earth Web",
+        "  напрямую.",
+        "",
+        "3. Во все дочерние процессы добавлен PYTHONUTF8=1.",
+        "",
+        "* Стабильная UTF-8 независимо от локали Windows.",
+        "  Устраняет UnicodeDecodeError при чтении",
+        "  exiftool_orig.txt скриптом otchet_0x300.",
+        "",
+    ],
+    "0.58.9": [
+        "",
+        "v0.58.9",
+        "-" * 64,
+        "",
+        "NEW",
+        "",
+        "Кнопка Make Disk - пакетная генерация отчётов",
+        "по образцу make_disk.cmd.",
+        "",
+        "* Шаги (все опциональны):",
+        "    exiftool -v2 -ee3 -G -t  -> exiftool_orig.txt",
+        "    otchet_0x300_для_ssa_26  -> <base>.ssa,",
+        "                                report_console.txt,",
+        "                                <base>_full.txt",
+        "    tsanalyze.exe            -> tsanalize.txt",
+        "    MediaInfo.exe            -> mediainfo.txt",
+        "    exiftool -p gpx.fmt      -> track.gpx",
+        "",
+        "* Отчёты в <base>_reports/ рядом с .ts.",
+        "",
+        "* Прогресс в консоли (или отдельном окне",
+        "  cmd, если консоли нет). Каждый шаг печатается",
+        "  с префиксом [i/N], затем [OK]/[FAIL].",
+        "",
+        "* По завершении - диалог со статусами шагов и",
+        "  списком сгенерированных файлов.",
+        "",
+        "* Отсутствующие инструменты пропускаются с",
+        "  [SKIP] - не валят остальные шаги.",
+        "",
+        "* Общий флаг с кнопкой Видео: пока одна",
+        "  операция идёт - вторая не запустится.",
+        "",
+        "ТРЕБУЕМЫЕ ИНСТРУМЕНТЫ (любые из):",
+        "  exiftool(.exe), tsanalyze(.exe),",
+        "  MediaInfo(.exe), otchet_0x300_для_ssa_26.py,",
+        "  gpx.fmt (для GPX)",
+        "",
+    ],
+    "0.58.7": [
+        "",
+        "v0.58.7",
+        "-" * 64,
+        "",
+        "ИСПРАВЛЕНО / НОВОЕ",
+        "",
+        "Кнопка «Видео» ищет папку Video с .ts-фрагментами.",
+        "",
+        "* Порядок поиска:",
+        "    1) <папка_текущего_ts>/Video;",
+        "    2) <папка_скрипта>/Video;",
+        "    3) иначе — папка текущего .ts, как раньше.",
+        "",
+        "* Регистронезависимо: Video / video / VIDEO /",
+        "  ВИДЕО / Видео / видео. Ищется хотя бы один",
+        "  .TS внутри.",
+        "",
+        "* В консоль и в диалог выводится:",
+        "    «Папка: <путь> (Video)» либо",
+        "    «Папка: <путь>», плюс «Файлов .TS: N».",
+        "",
+        "* Если Video найдена, но пуста (нет .TS),",
+        "  она игнорируется — проверяется папка",
+        "  текущего .ts.",
+        "",
+    ],
+    "0.58.6": [
+        "",
+        "v0.58.6",
+        "-" * 64,
+        "",
+        "NEW",
+        "",
+        "Кнопка «Видео» — проверка непрерывности видео.",
+        "",
+        "* Запускает ts_integrity_check.py (или .exe)",
+        "  рядом с audio_speed_calc.",
+        "",
+        "* Аргумент — папка текущего .ts. Проверяются",
+        "  ВСЕ .ts-фрагменты, стыки между ними,",
+        "  целостность каждого отдельно: PTS, PCR,",
+        "  GPS-время, GPS-координаты, IDR/SPS/PPS,",
+        "  битрейт, аудио-спектрограмма, яркость",
+        "  кадров, pHash, SEI-метки редакторов.",
+        "",
+        "* Выполняется в отдельном потоке — UI",
+        "  остаётся отзывчивым.",
+        "",
+        "* В статусе «Проверка видео... (может",
+        "  занять несколько минут)».",
+        "",
+        "* Результат: <base>_video_integrity.txt",
+        "  рядом с .ts + всплывающее окно с",
+        "  итогом (Ошибок / Предупреждений /",
+        "  Заключение).",
+        "",
+        "* Таймаут 30 мин. Повторный клик",
+        "  игнорируется, пока идёт первая",
+        "  проверка.",
+        "",
+        "* PYTHONIOENCODING=utf-8 для дочернего",
+        "  процесса — корректный вывод при",
+        "  запуске на Windows (cp866 по",
+        "  умолчанию).",
+        "",
+    ],
+    "0.58.5": [
+        "",
+        "v0.58.5",
+        "-" * 64,
+        "",
+        "ИСПРАВЛЕНО",
+        "",
+        "Разворот окна на весь экран — надёжно, с первого",
+        "запуска.",
+        "",
+        "* v0.58.3/v0.58.4 сначала принудительно ставили",
+        "  размер окна в размер экрана (set_size_inches +",
+        "  geometry). После этого state('zoomed') WM",
+        "  игнорирует — окно уже на весь экран. Кнопка",
+        "  'развернуть' на таком окне ВОЗВРАЩАЕТ его в",
+        "  восстановленное состояние — отсюда 'с 3-ей",
+        "  попытки'.",
+        "",
+        "* Теперь: fig.canvas.draw_idle() + plt.pause(0.001)",
+        "  даёт Tk замапить окно, затем state('zoomed')",
+        "  разворачивает его как положено.",
+        "",
+        "* Убраны set_size_inches / geometry(screen).",
+        "",
+        "* _save_window_geometry снова сохраняет обычный",
+        "  размер (а не развёрнутый), чтобы следующий",
+        "  запуск начинался с 'восстановленного' и уже",
+        "  затем максимайзился.",
+        "",
+    ],
+    "0.58.4": [
+        "",
+        "v0.58.4",
+        "-" * 64,
+        "",
+        "ИСПРАВЛЕНО",
+        "",
+        "Разворот окна на весь экран работает с ПЕРВОГО",
+        "запуска, а не с третьего.",
+        "",
+        "* v0.58.3 вызывал state('zoomed') через after(100)",
+        "  без проверки winfo_ismapped(). На холодной системе",
+        "  100мс не хватало, окно ещё не было отображено,",
+        "  и WM игнорировал 'zoomed'.",
+        "",
+        "* Теперь:",
+        "  - win.geometry(screen_size) СРАЗУ (видимый",
+        "    эффект с первого кадра, независимо от WM);",
+        "  - state('zoomed') только после winfo_ismapped(),",
+        "    с ретраями (20 x 100мс);",
+        "  - расширенная цепочка: state -> wm_state ->",
+        "    showMaximized -> maximize -> attributes ->",
+        "    tk.call('wm','state','zoomed').",
+        "",
+        "* Диагностика в maximize.log рядом со скриптом",
+        "  (видна даже если stderr потерян).",
+        "",
+    ],
+    "0.58.3": [
+        "",
+        "v0.58.3",
+        "-" * 64,
+        "",
+        "ИСПРАВЛЕНО",
+        "",
+        "Окно действительно стартует на весь экран.",
+        "",
+        "* v0.58.2 вызывал state('zoomed') до plt.show(),",
+        "  когда Tk-окно ещё не отображено — эффекта не было.",
+        "",
+        "* Теперь:",
+        "  - fig.set_size_inches() сразу ставит размер",
+        "    фигуры в размер экрана (работает без WM);",
+        "  - win.after(100, ...) откладывает WM-maximize",
+        "    до момента, когда окно уже отображено;",
+        "  - цепочка fallback: state('zoomed') ->",
+        "    showMaximized -> maximize -> attributes ->",
+        "    geometry(screen).",
+        "",
+        "* Диагностика в stderr: [maximize] ... — что",
+        "  сработало.",
+        "",
+    ],
+    "0.58.2": [
+        "",
+        "v0.58.2",
+        "-" * 64,
+        "",
+        "NEW",
+        "",
+        "Окно при запуске разворачивается на весь экран.",
+        "",
+        "* Ключ конфига start_maximized (по умолчанию true).",
+        "  false — восстанавливать сохранённую геометрию,",
+        "  как раньше.",
+        "",
+        "* _maximize_window() пробует разные пути: Tk",
+        "  state('zoomed'), Qt showMaximized, GTK maximize,",
+        "  Tk attributes('-zoomed', True).",
+        "",
+        "* _save_window_geometry() не пишет размер, пока",
+        "  start_maximized = true — иначе при отключении",
+        "  опции окно открывалось бы размером с экран, но",
+        "  не развёрнутым.",
+        "",
+        "* В HELP_RIGHT_LINES добавлена строка про",
+        "  start_maximized.",
+        "",
+    ],
+    "0.58.1": [
+        "",
+        "v0.58.1",
+        "-" * 64,
+        "",
+        "ИСПРАВЛЕНО",
+        "",
+        "Кнопка GPS: Авто/Ручн больше не теряет ручное значение",
+        "при переключении в Авто и обратно.",
+        "",
+        "* _gps_lag_manual_input = None означает",
+        '  "ещё не задано" (было 0.0 — валидное значение).',
+        "",
+        "* Ручн -> Авто: значение НЕ обнуляется, только",
+        "  снимается override из конфига; поле очищается.",
+        "",
+        "* Авто -> Ручн: восстанавливается последнее ручное",
+        "  значение; если его ещё не было — берётся текущий",
+        "  self.gps_lag (результат корреляции).",
+        "",
+        "* Очистка поля ΔGPS (пустая строка + Enter) тоже",
+        "  сохраняет последнее ручное значение — оно",
+        "  вернётся при следующем включении ручного режима.",
+        "",
+        "* Защита от None в _effective_lag, _sync_fields,",
+        "  _save_view, _on_run, update_status.",
+        "",
+    ],
+    "0.58.0": [
+        "",
+        "v0.58.0",
+        "-" * 64,
+        "",
+        "ИСПРАВЛЕНО / НОВОЕ",
+        "",
+        "1. Текстовые поля: клавиши меню (Q/S/Z/P/?/1..6/A)",
+        "   больше не срабатывают во время набора.",
+        "   Esc снимает фокус.",
+        "",
+        "2. Шкала GPS привязана к первому epoch ТЕКУЩЕГО",
+        "   файла, а не к первому объединённому. Сдвиг GPS",
+        "   работает и при наличии соседних .ts вперёд.",
+        "",
+        "3. Поле ΔGPS,с + кнопка GPS: Авто/Ручн.",
+        "   Ручное значение перекрывает и корреляцию, и",
+        "   историческую калибровку (H). Сохраняется в JSON",
+        "   как gps_lag_manual + gps_lag_override.",
+        "",
+    ],
+    "0.57.8": [
+        "",
+        "v0.57.8",
+        "-" * 64,
+        "",
+        "Коэффициент смятия шины вынесен в конфиг",
+        "",
+        "* Rk = c * P * H / 100000 + 0.0127 * R,",
+        "  где c — новый параметр tire_deflection_coeff.",
+        "",
+        "* Дефолт: 0.84 (радиальная легковая, 235/70 R16).",
+        "  Классическое 0.85 остаётся доступно правкой JSON.",
+        "",
+        "* Меняется в <base>_config.json:",
+        '    "tire_deflection_coeff": 0.84',
+        "",
+        "* Влияет на все V в отчёте пропорционально c.",
+        "  При переходе 0.85 -> 0.84:",
+        "  V уменьшается на 0.466 %.",
+        "",
+        "* Подбор под GPS:",
+        "  если V_аудио систематически выше V_GPS на k%,",
+        "  c_new = c_old * (1 - k/100).",
+        "",
+    ],
+    "0.57.7": [
+        "",
+        "v0.57.7",
+        "-" * 64,
+        "",
+        "ВОССТАНОВЛЕНА history-калибровка dGPS",
+        "",
+        "* _try_use_calibrated_gps_lag снова работает:",
+        "  dGPS считается по САМОМУ ДЛИННОМУ интервалу",
+        "  из истории + текущего окна, кэшируется и",
+        "  применяется к более коротким окнам.",
+        "",
+        "* Отключено было в v0.57.0 как временная мера:",
+        "  короткое окно 5с получало dGPS=+7.7с из",
+        "  51-секундной калибровки — формы кривых",
+        "  не совпадали из-за фиксированной привязки",
+        "  гармоник в корреляционном сигнале.",
+        "",
+        "* К v0.57.7 причина устранена:",
+        "  - v0.57.5 — rolling-трекинг в корреляционном",
+        "    сигнале (сигнал идентичен таблице шагов);",
+        "  - v0.57.6 — критерий поиска лага: min RMSE.",
+        "",
+        "* Кэш инвалидируется при смене H5/H4.",
+        "  В статусной строке применение калибровки",
+        "  по-прежнему помечается меткой (H).",
+        "",
+        "* Отключить новое поведение можно конфигом:",
+        "  gps_lag_from_history = false.",
+        "",
+    ],
+    "0.57.6": [
+        "",
+        "v0.57.6",
+        "-" * 64,
+        "",
+        "СМЕНА КРИТЕРИЯ поиска dGPS",
+        "",
+        "* find_gps_lag теперь ищет МИНИМУМ RMSE(|Vg - Va|),",
+        "  а не максимум корреляции Пирсона.",
+        "",
+        "* Причина: после v0.57.5 (rolling-трекинг гармоник)",
+        "  корреляционная кривая в окне ±5с стала плоской —",
+        "  множество лагов дают corr > 0.99 (плато).",
+        "  RMSE даёт более резкий минимум и лучше",
+        "  локализует истинный сдвиг.",
+        "",
+        "* При равенстве RMSE (в пределах 1e-6) —",
+        "  tie-breaker по максимуму корреляции.",
+        "",
+        "* Параболическая субшаговая локализация теперь",
+        "  уточняет минимум RMSE вместо максимума corr.",
+        "",
+        "* Формат возвращаемого results:",
+        "  (lag, corr, rmse, n_pairs) — 4 элемента.",
+        "  Сортировка: по возрастанию RMSE.",
+        "",
+    ],
+    "0.57.4": [
+        "",
+        "v0.57.4",
+        "-" * 64,
+        "",
+        "КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ критерия поиска dGPS",
+        "",
+        "* Возвращён максимум КОРРЕЛЯЦИИ ПИРСОНА (был в v0.56.x,",
+        "  ошибочно заменён на mean(|Va-Vg|) в v0.57.0).",
+        "",
+        "* Причина: mean(|Va-Vg|) учитывает разницу средних",
+        "  сигналов и разницу их амплитуд. При std(Va)=0.3 и",
+        "  std(Vg)=0.9 алгоритм выбирал сдвиг, где GPS ближе",
+        "  по среднему, а не там, где совпадают ФОРМЫ кривых.",
+        "",
+        "* Корреляция Пирсона инвариантна к сдвигу среднего и",
+        "  масштабу амплитуд, ищет именно совпадение формы.",
+        "  Совпадает с результатом диагностического лога",
+        "  _scan_lags (секция 5).",
+        "",
+        "* NEW: субшаговая локализация пика параболой через три",
+        "  точки вокруг максимума. При плоском пике (плато из",
+        "  3-5 точек) одиночный argmax даёт неустойчивый ответ",
+        "  (-1.5 или -1.4с), а парабола — середину плато (-1.45).",
+        "",
+    ],
+    "0.57.2": [
+        "",
+        "v0.57.2",
+        "-" * 64,
+        "",
+        "КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ сглаживания",
+        "",
+        "* _smooth_series использовала np.convolve(..., mode='same'),",
+        "  которая на краях дополняет массив НУЛЯМИ. Результат:",
+        "  первые и последние win/2 точек занижены в ~2 раза.",
+        "  Это создавало фиктивный «разгон» в начале окна и",
+        "  «торможение» в конце, ломало поиск dGPS.",
+        "",
+        "* Заменено на edge-padding: крайние значения копируются",
+        "  за пределы массива, свёртка считается в режиме 'valid'.",
+        "  Края сигнала теперь корректны.",
+        "",
+        "* Симптом до исправления: V_аудио падала до 52 км/ч в",
+        "  первых ~10 точках окна при истинной скорости 105 км/ч.",
+        "",
+    ],
+    "0.57.0": [
+        "",
+        "v0.57.0",
+        "-" * 64,
+        "",
+        "ПЕРЕПИСАН поиск dGPS — просто и предсказуемо",
+        "",
+        "* find_gps_lag: минимум СУММЫ |V_audio(t) - V_gps(t-lag)|",
+        "  по всем парным точкам. Шаг 0.1с, диапазон ±5с.",
+        "  Никакой корреляции Пирсона, никакого abs(corr),",
+        "  никакого адаптивного расширения.",
+        "",
+        "* _try_use_calibrated_gps_lag отключён (return False).",
+        "  Причина: короткое окно 5с получало dGPS=+7.7с из",
+        "  51-секундной калибровки. Теперь каждое окно считает",
+        "  dGPS строго по себе.",
+        "",
+        "* В консоли выводится топ-5 сдвигов по минимальной",
+        "  средней ошибке. Меньше ошибка — правее в списке.",
+        "",
+    ],
+    "0.56.8": [
+        "",
+        "v0.56.8",
+        "-" * 64,
+        "",
+        "ИСПРАВЛЕНО: поиск dGPS",
+        "",
+        "* Адаптивное расширение окна поиска:",
+        "  старт ±5с, если пик положительной корреляции",
+        "  слабый (< 0.3) — автоматический повтор в ±60с.",
+        "  Истинный лаг (например +7.7с) больше не теряется.",
+        "",
+        "* Убран fallback v0.56.7 (abs(corr) при",
+        "  best_corr < 0). Он цеплял спурийные антипики",
+        "  и возвращал ошибочный лаг (+2.9с вместо +7.7с).",
+        "  Теперь при полном отсутствии положительного",
+        "  пика возвращается lag = 0 с предупреждением.",
+        "",
+        "* Порог min_pairs = 15 отсекает вырожденные пики",
+        "  на 5–10 парных точках с нулевым разбросом GPS.",
+        "",
+    ],
+    "0.56.5": [
+        "",
+        "v0.56.5",
+        "-" * 64,
+        "",
+        "NEW: GPS из соседних файлов",
+        "",
+        "* При нехватке GPS-точек (РЭБ, помехи) — добор",
+          "  из N-1 и N+1 .ts той же серии.",
+        "* Поддержка имён 2K и 4K (суффикс A).",
+        "* Валидация точек: (0,0), эпоха вне 2020-2030,",
+          "  ускорение > предела, скорость > 300 км/ч.",
+        "* Зоны недоверия: скачки ускорения ±радиус.",
+        "* Порог корреляции: минимум doubt_min_points.",
+        "* Дедупликация по epoch на стыках файлов.",
+        "* Параметр accel_0_100_sec в prompt_car_params.",
+        "",
+    ],
+    "0.56.4": [
+        "",
+        "v0.56.4",
+        "-" * 64,
+        "",
+        "NEW: совместимость с PyInstaller (.exe)",
+        "",
+        "* _find_exec() учитывает sys.frozen и sys._MEIPASS;",
+        "  ищет бинарники рядом с .exe, в _internal/bin,",
+        "  в _MEIPASS/bin, рядом со скриптом, в PATH.",
+        "",
+        "* add_png_footer(): в .exe штампуем сам .exe,",
+        "  а не временный .py из _MEIPASS.",
+        "",
+        "* _collect_sysinfo_lines(): get_script_info()",
+        "  получает путь к .exe в замороженном режиме.",
+        "",
+    ],
     "0.56.3": [
         "",
         "v0.56.3",
@@ -467,6 +1247,11 @@ DEFAULT_CONFIG = {
     "view_y_start": None,
     "view_y_end": None,
     "peak_search_hz": 5.0,
+    # v0.57.9: пороги взаимного расположения подписей скорости.
+    # Доли от видимого диапазона осей X и Y. Больше -> подписей
+    # меньше, но они никогда не наезжают друг на друга.
+    "label_pad_x_frac": 0.10,
+    "label_pad_y_frac": 0.06,
     "algorithm": 2,
     "cylinders": 4,
     "stroke": 2,
@@ -475,27 +1260,94 @@ DEFAULT_CONFIG = {
     "rim_diameter": 16,
     "final_drive": 4.875,
     "gear_ratio": 0.802,
+    # v0.57.8: коэффициент смятия профиля шины под нагрузкой.
+    # Rk = tire_deflection_coeff * P * H / 100000 + 0.0127 * R.
+    # Дефолт 0.84 — для радиальной легковой шины в штатном
+    # нагруженном состоянии (235/70 R16).
+    "tire_deflection_coeff": 0.84,
     "win_x": None,
     "win_y": None,
     "win_w": None,
     "win_h": None,
+    # v0.58.2: старт в развёрнутом на весь экран окне.
+    # false — восстанавливать сохранённую геометрию.
+    "start_maximized": True,
     "spec_mode": "time",
     "view_history": [],
     "overlay_mode": 0,
     "gps_lag_override": None,
+    "gps_lag_manual": False,
     "analyze_start": 0,
     "analyze_dur": 0,
     "gps_trim_fft_edges": True,
     "gps_smooth_sec": 2.0,
     "gps_lag_from_history": True,
+    # v0.58.10.1: поправка сдвига SSA для фрагмента.
+    # snap_abs = (t_start_req - t_start_eff) + ssa_shift_correction_sec
+    "ssa_shift_correction_sec": -1.0,
+    # v0.58.10.2: сдвиг времени полного .ssa (не фрагмента).
+    # Применяется через ssa_shift.py ПОСЛЕ patch и ren, ПЕРЕД copy
+    # в sidecar. 0.0 = не сдвигать.
+    "full_ssa_shift_sec": 0.0,
+    # v0.58.10.3: при Make Disk вписывать уточнённую
+    # аудио-скорость в полный .ssa
+    # (формат: "Скорость: N км/ч [аудио: X.X км/ч]").
+    "ssa_add_audio_speed": True,
+    # v0.58.10.5: подмешивать GPS-скорость в .ssa
+    # ([аудио: X.X км/ч; GPS: Y.Y км/ч]).
+    "ssa_gps_speed_enabled": True,
+    # v0.58.10.6: расщеплять каждый Dialogue на N кадров
+    # (1 Dialogue на 1/fps с). False — 1 Dialogue на GPS-пакет.
+    "ssa_split_per_frame": False,
+    # v0.58.13
+    "ssa_time_correction_sec": 0.0,
+    # v0.58.13-fix5: .3f в Start/End SSA (иначе .cc).
+    "ssa_time_precision_ms": True,
+    # v0.58.13-fix11: доля от исходной длительности Dialogue
+    # в SPLIT и FULL .ssa (одинаковая формула).
+    #   dur_ms = round((1000/fps) * N * frac)
+    #   end_ms = start_ms + dur_ms
+    #   0.97: SPLIT/30fps  = 32 мс (gap 1 мс);
+    #         FULL /30fps  = 970 мс для 1с (gap 30 мс).
+    #   1.00: SPLIT/30fps  = 33 мс (касание, наезд 1 точка);
+    #         FULL /30fps  = 1000 мс для 1с (касание).
+    #         Убирает "мёртвую зону" на стыке кадров, из-за
+    #         которой некоторые плееры "двоят" субтитры.
+    #   0.50: половина длительности (мигание) — диагностика.
+    "ssa_frame_end_frac": 0.97,
+    "ssa_msk_discrepancy_warn_sec": 300.0,
+    "mp4_full": True,
+    # v0.56.5: соседние файлы
+    "neighbor_gps_enabled": True,
+    "neighbor_extend_sec": 30.0,
+    "neighbor_dedup_enabled": True,
+    "neighbor_dedup_k": 3,
+    # v0.56.5: валидация GPS-точек
+    "gps_epoch_min": "2020-01-01",
+    "gps_epoch_max": "2030-01-01",
+    "gps_speed_max_kmh": 300.0,
+    # v0.56.5: зоны недоверия
+    "doubt_zones_enabled": True,
+    "doubt_radius_sec": 1.5,
+    "doubt_min_points": 15,
+    "doubt_accel_safety_factor": 2.0,
+    "doubt_decel_max_g": 0.8,
+    "accel_0_100_sec": 12.0,
 }
 
 
 def add_png_footer(fig, y_pos=0.99):
-    """Штамп в левый верхний угол."""
+    """Штамп в левый верхний угол (v0.56.4).
+
+    В .exe штампуем сам .exe, а не .py из _MEIPASS.
+    """
     try:
-        script_path = os.path.abspath(__file__)
-        script_mtime = datetime.datetime.fromtimestamp(os.path.getmtime(script_path))
+        if getattr(sys, "frozen", False):
+            script_path = os.path.abspath(sys.executable)
+        else:
+            script_path = os.path.abspath(__file__)
+        script_mtime = datetime.datetime.fromtimestamp(
+            os.path.getmtime(script_path))
         script_md5 = md5_file(script_path)[:8]
     except Exception:
         script_path = 'audio_speed_calc.py'
@@ -535,18 +1387,44 @@ def save_config(cfg, path):
         print(f"Ошибка сохранения конфига: {e}", file=sys.stderr)
 
 def _find_exec(name):
-    """Поиск ffmpeg/ffprobe/exiftool: рядом со скриптом, в bin/, в PATH."""
+    """Поиск ffmpeg/ffprobe/exiftool (v0.56.4).
+
+    Порядок:
+      1) рядом с .exe (frozen);
+      2) в _MEIPASS/bin (frozen);
+      3) рядом с .py (обычный запуск);
+      4) в PATH.
+    """
     suffix = '.exe' if sys.platform == 'win32' else ''
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    candidates = [
-        os.path.join(script_dir, name + suffix),
-        os.path.join(script_dir, 'bin', name + suffix),
-    ]
+    candidates = []
+
+    if getattr(sys, "frozen", False):
+        exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+        candidates.append(os.path.join(exe_dir, name + suffix))
+        candidates.append(os.path.join(exe_dir, 'bin',
+                                       name + suffix))
+        candidates.append(os.path.join(exe_dir, '_internal', 'bin',
+                                       name + suffix))
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            candidates.append(
+                os.path.join(meipass, name + suffix))
+            candidates.append(os.path.join(meipass, 'bin',
+                                           name + suffix))
+
+    try:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+    except NameError:
+        script_dir = os.getcwd()
+    candidates.append(os.path.join(script_dir, name + suffix))
+    candidates.append(os.path.join(script_dir, 'bin', name + suffix))
+
     path_exe = shutil.which(name)
     if path_exe:
         candidates.append(path_exe)
+
     for c in candidates:
-        if os.path.isfile(c):
+        if c and os.path.isfile(c):
             return c
     return None
 
@@ -821,12 +1699,428 @@ def gps_to_relative_time(gps_points, first_epoch=None):
     if first_epoch is None:
         first_epoch = gps_points[0][0]
     return [(p[0] - first_epoch, p[1], p[2], p[3], p[4]) for p in gps_points]
+# ==================================================================
+# v0.56.5: работа с GPS-точками, соседними файлами, зонами недоверия
+# ==================================================================
+
+def parse_ts_filename(basename):
+    """Разбирает имя .ts: возвращает (prefix, index, suffix).
+
+    Поддерживаемые форматы (после v0.56.5):
+      2K:  20260602050735_000048.TS
+      4K:  20260602042558_000187A.TS
+
+    prefix — часть до индекса (цифры даты-времени и разделитель);
+    index  — целое число;
+    suffix — хвост после индекса (.TS, A.TS и т. п.).
+
+    Возвращает (prefix, index, suffix) или None, если шаблон не
+    распознан.
+    """
+    import re
+    # Ищем последнюю группу из 6 цифр перед необязательной
+    # буквой A и расширением.
+    m = re.search(
+        r"^(?P<prefix>.+?)(?P<index>\d{6})(?P<suffix>[A-Z]?\.TS)$",
+        basename,
+        re.IGNORECASE,
+    )
+    if not m:
+        return None
+    try:
+        idx = int(m.group("index"))
+    except ValueError:
+        return None
+    return (m.group("prefix"), idx, m.group("suffix").upper())
+
+
+def find_neighbor_files(filepath, max_shift=1):
+    """Возвращает список (shift, path) для N-1, N+1.
+
+    v0.56.6: матчинг по (suffix, index ± shift), БЕЗ требования
+    одинакового timestamp в префиксе. Timestamp используется
+    только как tiebreaker, если совпало несколько имён.
+    """
+    import re as _re
+    dirpath = os.path.dirname(os.path.abspath(filepath))
+    basename = os.path.basename(filepath)
+    parsed = parse_ts_filename(basename)
+    if parsed is None:
+        return []
+    prefix, idx, suffix = parsed
+
+    # Свой timestamp (14 цифр) для tiebreaker.
+    _m = _re.search(r"(\d{14})", prefix)
+    ts_self = int(_m.group(1)) if _m else None
+
+    try:
+        entries = os.listdir(dirpath)
+    except Exception:
+        return []
+
+    # Собираем кандидатов: {index: [(timestamp_int, name), ...]}
+    candidates = {}
+    for name in entries:
+        p = parse_ts_filename(name)
+        if p is None:
+            continue
+        p_prefix, p_idx, p_suffix = p
+        if p_suffix != suffix:
+            continue
+        _m2 = _re.search(r"(\d{14})", p_prefix)
+        p_ts = int(_m2.group(1)) if _m2 else None
+        candidates.setdefault(p_idx, []).append((p_ts, name))
+
+    def _pick(cands):
+        if not cands:
+            return None
+        if ts_self is None:
+            return cands[0][1]
+        best = None
+        best_diff = None
+        for p_ts, name in cands:
+            if p_ts is None:
+                continue
+            d = abs(p_ts - ts_self)
+            if best_diff is None or d < best_diff:
+                best_diff = d
+                best = name
+        if best is None:
+            return cands[0][1]
+        return best
+
+    neighbors = []
+    for shift in range(1, max_shift + 1):
+        for sign in (-1, +1):
+            want_idx = idx + sign * shift
+            if want_idx < 0:
+                continue
+            cands = candidates.get(want_idx)
+            chosen = _pick(cands)
+            if chosen:
+                neighbors.append((sign * shift,
+                                  os.path.join(dirpath, chosen)))
+                print("  [neighbor] shift=%+d idx=%d -> %s" 
+                      % (sign * shift, want_idx, chosen),
+                      file=sys.stderr)
+            else:
+                print("  [neighbor] shift=%+d idx=%d -> нет файла" 
+                      % (sign * shift, want_idx),
+                      file=sys.stderr)
+    return neighbors
+
+
+def _parse_epoch_bound(s, fallback_epoch):
+    """Парсит дату вида YYYY-MM-DD в epoch (UTC)."""
+    try:
+        dt = datetime.datetime.strptime(s, "%Y-%m-%d")
+        return int(dt.replace(
+            tzinfo=datetime.timezone.utc).timestamp())
+    except Exception:
+        return fallback_epoch
+
+
+def is_gps_point_valid(epoch, speed, lat, lon, cfg):
+    """v0.56.5: одна ли точка GPS физически осмысленна.
+
+    Проверки:
+      * координаты не (0, 0);
+      * широта -90..90, долгота -180..180;
+      * epoch в окне [gps_epoch_min, gps_epoch_max];
+      * скорость 0..gps_speed_max_kmh;
+    """
+    if epoch is None:
+        return False
+    if lat is None or lon is None:
+        return False
+    # (0,0) — фикса нет
+    if abs(lat) < 1e-6 and abs(lon) < 1e-6:
+        return False
+    if not (-90.0 <= lat <= 90.0):
+        return False
+    if not (-180.0 <= lon <= 180.0):
+        return False
+
+    _t_min = _parse_epoch_bound(
+        str(cfg.get("gps_epoch_min", "2020-01-01")), 1577836800)
+    _t_max = _parse_epoch_bound(
+        str(cfg.get("gps_epoch_max", "2030-01-01")), 1893456000)
+    if not (_t_min <= epoch <= _t_max):
+        return False
+
+    _v_max = float(cfg.get("gps_speed_max_kmh", 300.0))
+    if speed is None or speed < 0.0 or speed > _v_max:
+        return False
+    return True
+
+
+def validate_gps_points(points, cfg):
+    """Фильтрует список точек, оставляя только валидные.
+
+    points = [(t_rel, speed, lat, lon, bearing), ...]
+    cfg    = конфиг с порогами.
+
+    Возвращает (valid_points, stats).
+    stats = {"total": N, "valid": M, "dropped": K,
+             "reason_zero": K1, "reason_range": K2,
+             "reason_epoch": K3, "reason_speed": K4}.
+    """
+    valid = []
+    stats = {
+        "total": len(points),
+        "valid": 0,
+        "dropped": 0,
+        "reason_zero": 0,
+        "reason_range": 0,
+        "reason_epoch": 0,
+        "reason_speed": 0,
+    }
+    _t_min = _parse_epoch_bound(
+        str(cfg.get("gps_epoch_min", "2020-01-01")), 1577836800)
+    _t_max = _parse_epoch_bound(
+        str(cfg.get("gps_epoch_max", "2030-01-01")), 1893456000)
+    _v_max = float(cfg.get("gps_speed_max_kmh", 300.0))
+
+    for p in points:
+        # p = (t_rel, speed, lat, lon, bearing)
+        # epoch отсутствует в этом формате — проверяем по всем
+        # полям, кроме epoch. epoch-проверка делается ДО
+        # перевода в относительное время.
+        lat = p[2]
+        lon = p[3]
+        spd = p[1]
+        bad = False
+        if abs(lat) < 1e-6 and abs(lon) < 1e-6:
+            stats["reason_zero"] += 1
+            bad = True
+        elif not (-90.0 <= lat <= 90.0) or \
+                not (-180.0 <= lon <= 180.0):
+            stats["reason_range"] += 1
+            bad = True
+        elif spd is None or spd < 0.0 or spd > _v_max:
+            stats["reason_speed"] += 1
+            bad = True
+        if bad:
+            stats["dropped"] += 1
+            continue
+        valid.append(p)
+    stats["valid"] = len(valid)
+    return valid, stats
+
+
+def find_doubt_zones(points, cfg):
+    """v0.56.5: определяет зоны недоверия по скачкам ускорения.
+
+    points = [(t_rel, speed, lat, lon, bearing), ...]
+    Возвращает список (t_start, t_end, reason).
+
+    Алгоритм (вариант C из обсуждения):
+      1) для каждой пары (i, i+1) считаем a = dv/dt;
+      2) если |a| > a_max — помечаем интервал
+         [t_mid - R, t_mid + R], где R = doubt_radius_sec;
+      3) объединяем пересекающиеся интервалы.
+    """
+    if not cfg.get("doubt_zones_enabled", True):
+        return []
+    if len(points) < 3:
+        return []
+
+    t0_100 = float(cfg.get("accel_0_100_sec", 12.0))
+    if t0_100 <= 0.1:
+        t0_100 = 12.0
+    a_accel_base = (100.0 / 3.6) / t0_100   # м/с²
+    k = float(cfg.get("doubt_accel_safety_factor", 2.0))
+    a_accel = a_accel_base * k
+    a_decel = float(cfg.get("doubt_decel_max_g", 0.8)) * 9.81
+    a_max = max(a_accel, a_decel)
+
+    R = float(cfg.get("doubt_radius_sec", 1.5))
+
+    raw_zones = []
+    for i in range(len(points) - 1):
+        t_a = points[i][0]
+        t_b = points[i + 1][0]
+        v_a = points[i][1]
+        v_b = points[i + 1][1]
+        dt = t_b - t_a
+        if dt <= 1e-6:
+            continue
+        # переводим км/ч в м/с
+        a = ((v_b - v_a) / 3.6) / dt
+        if abs(a) > a_max:
+            t_mid = (t_a + t_b) / 2.0
+            raw_zones.append((t_mid - R, t_mid + R,
+                              "a=%.2f м/с²" % a))
+
+    if not raw_zones:
+        return []
+
+    # Объединение пересекающихся интервалов
+    raw_zones.sort(key=lambda z: z[0])
+    merged = [raw_zones[0]]
+    for z in raw_zones[1:]:
+        last = merged[-1]
+        if z[0] <= last[1]:
+            merged[-1] = (last[0], max(last[1], z[1]), last[2])
+        else:
+            merged.append(z)
+    return merged
+
+
+def mask_gps_points(points, zones):
+    """v0.56.5: массив весов 0/1 по точкам.
+
+    1 = точка участвует в корреляции,
+    0 = точка в зоне недоверия, исключается.
+    """
+    if not zones:
+        return [1] * len(points)
+    mask = []
+    for p in points:
+        t = p[0]
+        in_zone = False
+        for (z0, z1, _r) in zones:
+            if z0 <= t <= z1:
+                in_zone = True
+                break
+        mask.append(0 if in_zone else 1)
+    return mask
+
+
+def merge_gps_from_neighbors(filepath, cfg, 
+                              current_points_epoch):
+    """v0.56.5: склейка GPS из N-1, N, N+1.
+
+    current_points_epoch = [(epoch, speed, lat, lon, bearing), ...]
+    Возвращает (merged_epoch_points, info).
+
+    info = {"current": N, "added_prev": M1, "added_next": M2,
+            "prev_file": name1, "next_file": name2,
+            "prev_total": T1, "next_total": T2,
+            "extend_sec": R}.
+    """
+    info = {
+        "current": len(current_points_epoch),
+        "added_prev": 0,
+        "added_next": 0,
+        "prev_file": None,
+        "next_file": None,
+        "prev_total": 0,
+        "next_total": 0,
+        "extend_sec": float(cfg.get("neighbor_extend_sec", 30.0)),
+    }
+    if not cfg.get("neighbor_gps_enabled", True):
+        return list(current_points_epoch), info
+    if not current_points_epoch:
+        return list(current_points_epoch), info
+
+    R = float(cfg.get("neighbor_extend_sec", 30.0))
+
+    # Диапазон текущего файла по epoch
+    cur_ep = [p[0] for p in current_points_epoch]
+    cur_t_min = min(cur_ep)
+    cur_t_max = max(cur_ep)
+
+    neighbors = find_neighbor_files(filepath, max_shift=1)
+    if not neighbors:
+        return list(current_points_epoch), info
+
+    merged = list(current_points_epoch)
+
+    for shift, npath in neighbors:
+        try:
+            nb_raw, nb_method = extract_gps(npath)
+        except Exception as e:
+            print("  Сосед %+d: ошибка извлечения GPS (%s)" 
+                  % (shift, e), file=sys.stderr)
+            continue
+        if not nb_raw:
+            print("  Сосед %+d: GPS не найден (%s)" 
+                  % (shift, os.path.basename(npath)),
+                  file=sys.stderr)
+            continue
+
+        # Валидация
+        nb_valid = [p for p in nb_raw
+                     if is_gps_point_valid(
+                         p[0], p[1], p[2], p[3], cfg)]
+        nb_dropped = len(nb_raw) - len(nb_valid)
+
+        if shift < 0:
+            info["prev_file"] = os.path.basename(npath)
+            info["prev_total"] = len(nb_raw)
+        else:
+            info["next_file"] = os.path.basename(npath)
+            info["next_total"] = len(nb_raw)
+
+        # Обрезка по времени
+        if shift < 0:
+            lo = cur_t_min - R
+            hi = cur_t_min
+        else:
+            lo = cur_t_max
+            hi = cur_t_max + R
+        nb_in_window = [p for p in nb_valid
+                        if lo <= p[0] <= hi]
+
+        if not nb_in_window:
+            print("  Сосед %+d: %s, GPS=%d (valid=%d, "
+                  "drop=%d), в окно попало 0" 
+                  % (shift, os.path.basename(npath), len(nb_raw),
+                     len(nb_valid), nb_dropped),
+                  file=sys.stderr)
+            continue
+
+        if shift < 0:
+            info["added_prev"] = len(nb_in_window)
+        else:
+            info["added_next"] = len(nb_in_window)
+
+        print("  Сосед %+d: %s, GPS=%d (valid=%d, drop=%d), "
+              "в окно +%d точек" 
+              % (shift, os.path.basename(npath), len(nb_raw),
+                 len(nb_valid), nb_dropped, len(nb_in_window)),
+              file=sys.stderr)
+
+        merged.extend(nb_in_window)
+
+    # Дедупликация по epoch + lat + lon (вариант B из обсуждения)
+    if cfg.get("neighbor_dedup_enabled", True):
+        seen = set()
+        result = []
+        K = int(cfg.get("neighbor_dedup_k", 3))
+        # Сортируем по epoch, потом по модулю shift не важно
+        merged.sort(key=lambda p: p[0])
+        for p in merged:
+            key = (int(p[0]), round(p[2], 5), round(p[3], 5))
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append(p)
+        dup_removed = len(merged) - len(result)
+        if dup_removed > 0:
+            print("  Дедупликация: удалено %d дублей" % dup_removed,
+                  file=sys.stderr)
+        merged = result
+
+    return merged, info
+
+
 
 
 def _smooth_series(v, smooth_sec, dt):
     """Скользящее среднее окном smooth_sec секунд.
+
+    v0.57.2: edge-padding вместо mode='same'.
+    Было: np.convolve(v, kernel, mode='same') — края массива
+    дополняются нулями, первые/последние win/2 точек занижены
+    примерно в 2 раза. Это создавало фиктивный «разгон» на
+    старте окна и «торможение» на конце.
+
+    Стало: крайние значения копируются за пределы массива
+    (mode='edge'), свёртка в режиме 'valid'. Края корректны.
+
     dt — шаг выборки (с). Возвращает массив той же длины.
-    При некорректных параметрах возвращает исходный массив.
     """
     v = np.asarray(v, dtype=float)
     if smooth_sec <= 0 or len(v) < 3 or dt <= 0:
@@ -834,15 +2128,85 @@ def _smooth_series(v, smooth_sec, dt):
     win = max(1, int(round(smooth_sec / dt)))
     if win <= 1 or win >= len(v):
         return v
+    pad_left = win // 2
+    pad_right = win - pad_left - 1
+    vp = np.pad(v, (pad_left, pad_right), mode='edge')
     kernel = np.ones(win, dtype=float) / win
-    return np.convolve(v, kernel, mode='same')
+    return np.convolve(vp, kernel, mode='valid')
+
+
+def _parabolic_peak_lag(lags, corrs, i_peak):
+    """v0.57.4: субшаговая локализация пика корреляции.
+
+    Через три точки (i_peak-1, i_peak, i_peak+1) проводится
+    парабола и вычисляется её вершина:
+
+        x0 = x2 + 0.5*step*(y1 - y3)/(y1 - 2*y2 + y3)
+
+    Возвращает уточнённый lag. Если i_peak на краю массива или
+    знаменатель близок к нулю — возвращает lags[i_peak].
+    """
+    n = len(lags)
+    if i_peak <= 0 or i_peak >= n - 1:
+        return float(lags[i_peak])
+
+    x1 = float(lags[i_peak - 1])
+    x2 = float(lags[i_peak])
+    x3 = float(lags[i_peak + 1])
+    y1 = float(corrs[i_peak - 1])
+    y2 = float(corrs[i_peak])
+    y3 = float(corrs[i_peak + 1])
+
+    denom = y1 - 2.0 * y2 + y3
+    if abs(denom) < 1e-12:
+        return x2
+
+    step = 0.5 * ((x2 - x1) + (x3 - x2))
+    offset = 0.5 * step * (y1 - y3) / denom
+
+    half = 0.5 * abs(step)
+    if offset > half:
+        offset = half
+    elif offset < -half:
+        offset = -half
+
+    return x2 + offset
 
 
 def find_gps_lag(audio_times, audio_speeds, gps_times, gps_speeds,
-                 lag_range=(-5.0, 5.0), lag_step=0.1):
-    """Кросс-корреляция: ищет сдвиг GPS относительно аудио."""
+                 lag_range=(-5.0, 5.0), lag_step=0.1,
+                 point_weights=None):
+    """Поиск сдвига GPS относительно аудио.
+
+    v0.57.6: критерий — МИНИМУМ RMSE(Vg - Va).
+
+    После v0.57.5 (rolling-трекинг гармоник в корреляционном
+    сигнале) кривая corr(lag) в окне ±5с стала плоской:
+    множество лагов дают corr > 0.99, вершина не выражена.
+    RMSE даёт более резкий минимум.
+
+    При равенстве RMSE (в пределах 1e-6) — tie-breaker по
+    максимуму корреляции.
+
+    Возвращает:
+        best_lag   : float
+        best_corr  : float  (corr на ближайшем дискретном лаге)
+        results    : [(lag, corr, rmse, n_pairs), ...]
+                     сортировка по возрастанию RMSE.
+    """
     if len(gps_times) < 3 or len(audio_times) < 3:
         return 0.0, 0.0, []
+
+    if point_weights is not None \
+            and len(point_weights) == len(gps_times):
+        gps_times = [gps_times[i]
+                     for i in range(len(gps_times))
+                     if point_weights[i]]
+        gps_speeds = [gps_speeds[i]
+                      for i in range(len(gps_speeds))
+                      if point_weights[i]]
+        if len(gps_times) < 3:
+            return 0.0, 0.0, []
 
     gps_t = np.asarray(gps_times, dtype=float)
     gps_v = np.asarray(gps_speeds, dtype=float)
@@ -862,42 +2226,59 @@ def find_gps_lag(audio_times, audio_speeds, gps_times, gps_speeds,
     order_a = np.argsort(aud_t)
     aud_t, aud_v = aud_t[order_a], aud_v[order_a]
 
-    # v0.55.6: GPS-скорость и аудио-скорость физически ВСЕГДА в фазе
-    # (разгон -> обе растут, торможение -> обе падают). Отрицательная
-    # корреляция — аномалия. Максимизируем именно ПОЛОЖИТЕЛЬНУЮ
-    # корреляцию, а не abs(corr): иначе при шумных сигналах можно
-    # «выиграть» противофазный пик (corr<0) и уехать в другую сторону
-    # от правильного лага (баг v0.55.4 и ранее).
+    min_pairs = 3
     best_lag = 0.0
-    best_corr = -1.0   # ищем максимум положительной корреляции
+    best_corr = 0.0
+    best_rmse = float('inf')
     results = []
 
-    for lag in np.arange(lag_range[0], lag_range[1] + lag_step, lag_step):
+    n_lags = int(round((lag_range[1] - lag_range[0]) / lag_step)) + 1
+    for k in range(n_lags):
+        lag = lag_range[0] + k * lag_step
         shifted = gps_t + lag
+
         mask = (aud_t >= shifted[0]) & (aud_t <= shifted[-1])
-        if mask.sum() < 5:
+        n_pairs = int(mask.sum())
+        if n_pairs < min_pairs:
             continue
+
         g = np.interp(aud_t[mask], shifted, gps_v)
         a = aud_v[mask]
-        if a.std() < 1e-3 or g.std() < 1e-3:
+
+        a_std = float(a.std())
+        g_std = float(g.std())
+        if a_std < 1e-6 or g_std < 1e-6:
             continue
+
         c = float(np.corrcoef(a, g)[0, 1])
         if np.isnan(c):
             continue
-        results.append((float(lag), float(c), int(mask.sum())))
-        if c > best_corr:
+
+        diff = g - a
+        rmse = float(np.sqrt(np.mean(diff * diff)))
+
+        results.append((float(lag), float(c), float(rmse), int(n_pairs)))
+
+        # v0.57.6: критерий — минимум RMSE.
+        # Tie-breaker при равенстве RMSE — максимум corr.
+        if (rmse < best_rmse - 1e-6) or \
+           (abs(rmse - best_rmse) <= 1e-6 and c > best_corr):
+            best_rmse = rmse
             best_corr = c
             best_lag = float(lag)
 
-    if best_corr < 0.0:
-        # Все пики — противофазные. Ничего достоверного.
-        best_corr = 0.0
-        best_lag = 0.0
+    if len(results) >= 3:
+        _by_lag = sorted(results, key=lambda r: r[0])
+        _lags = [r[0] for r in _by_lag]
+        _corrs = [r[1] for r in _by_lag]
+        _rmses = [r[2] for r in _by_lag]
+        _i_min = int(np.argmin(_rmses))
+        best_lag = float(_parabolic_peak_lag(_lags, _rmses, _i_min))
+        best_corr = float(_corrs[_i_min])
 
-    # Для отображения топ-N сортируем по МОДУЛЮ (чтобы были видны
-    # сильные анти-пики), но лучший лаг выбран выше по положительной
-    # корреляции.
-    results.sort(key=lambda x: abs(x[1]), reverse=True)
+    results.sort(key=lambda x: (x[2], -x[1]))
+    if not results:
+        return 0.0, 0.0, results
     return best_lag, best_corr, results
 
 
@@ -1233,46 +2614,44 @@ ALGO_HELPS = {
 }
 
 HELP_LEFT_LINES = [
-    "ПОМОЩЬ — audio_speed_calc v0.53",
+    "ПОМОЩЬ — audio_speed_calc",
     "",
     "МЫШЬ:",
     "  Drag — выбор диапазона + масштаб",
     "  Клик — выбор гармоники H5/H4",
     "",
     "СОСТОЯНИЕ (статусная строка):",
-    "  [N/5]  — текущий шаг",
-    "  Ист: N/M — позиция в истории / всего",
-    "  Шаг=X.XXXс — текущий шаг расчёта",
+    "  [N/5]    — текущий шаг",
+    "  Ист: N/M * — история / есть правки",
+    "  Шаг=X.XXXс — шаг расчёта",
     "",
     "КНОПКИ СЛЕВА:",
-    "  Спектр — режим time/power",
-    "  5я/4я — выбор гармоник",
+    "  Спектр   — режим time/power",
+    "  5я / 4я  — выбор гармоник",
     "",
-    "КНОПКИ СЕРЕДИНА (v0.53):",
-    "  GPS→H5 — кривая H5 из GPS",
-    "  GPS→H4 — кривая H4 из GPS",
-    "  Подп.V — подписи пиков скорости",
-    "  Повторное нажатие — выкл.",
-    "",
-    "ЦВЕТА ПОДПИСЕЙ:",
-    "  маджента — GPS-H5",
-    "  голубой  — GPS-H4",
-    "  жёлтый   — реал.H5",
-    "  зелёный  — реал.H4",
+    "КНОПКИ СЕРЕДИНА:",
+    "  GPS→H5  — кривая H5 из GPS",
+    "  GPS→H4  — кривая H4 из GPS",
+    "  Подп.V  — подписи пиков скорости",
+    "  Все 3   — вкл/выкл все три разом",
     "",
     "КНОПКИ АЛГОРИТМОВ:",
     "  1.dB  2.Пал  3.Отн",
     "  4.Шум 5.-3dB 6.RMS",
-    "  ? — справка по алгоритму",
+    "  ?  — справка по алгоритму",
     "",
-    "СЛАЙДЕРЫ И ПОЛЯ:",
-    "  Fmin/Fmax — диапазон частот",
-    "  Ширина — полосы гармоник",
-    "  Шаг,с — шаг расчёта (0.01-5.0)",
-    "  Цвет — градаций палитры (1-255)",
-    "  Пик,Гц — поиск пика (1-30)",
+    "ПОЛЯ ВВОДА (внизу):",
+    "  Xнач/Xкон/dX — диапазон, с",
+    "  Fmin/Fmax    — диапазон частот",
+    "  Шир          — ширина полос",
+    "  Шаг          — шаг расчёта (0.01-5.0)",
+    "  Цвет         — градаций (1-255)",
+    "  Пик,Гц       — поиск пика (1-30)",
+    "  ΔGPS,с       — ручной сдвиг GPS",
+    "  МСК,с        — поправка времени",
+    "                 ТОЛЬКО для .ssa",
     "",
-    "dGPS-КАЛИБРОВКА (v0.56.1):",
+    "dGPS-КАЛИБРОВКА:",
     "  Авто по самому длинному интервалу",
     "  из истории. В статусе — метка (H).",
     "  Отключить: gps_lag_from_history=false",
@@ -1287,9 +2666,9 @@ HELP_RIGHT_LINES = [
     "",
     "НАВИГАЦИЯ ПО ИСТОРИИ:",
     "  Назад / Вперед — по позициям",
-    "  Применить (A) — зафиксировать",
+    "  Применить (A)  — зафиксировать",
     "     все правки ОДНОЙ записью",
-    "  Удалить поз. — стереть текущую",
+    "  Удалить поз.   — стереть текущую",
     "  Сб.время / Сб.част / Сброс",
     "",
     "ИНДИКАТОР ПРАВОК:",
@@ -1298,33 +2677,51 @@ HELP_RIGHT_LINES = [
     "  При Назад/Вперёд с правками —",
     "     диалог Да/Нет/Отмена.",
     "",
+    "ОСНОВНЫЕ КНОПКИ СПРАВА:",
+    "  Видео    — проверка целостности",
+    "  Make Disk — пакетный генератор",
+    "             отчётов (.ssa, txt, gpx)",
+    "  →MP4     — пересборка .ts в .mp4",
+    "  Жалоба   — сборка папок для подачи",
+    "             (Госуслуги / ЦАФАП)",
+    "  Выход    — закрыть программу",
+    "",
     "КЛАВИШИ:",
-    "  ? — помощь (это окно)",
-    "  Q — выход   S — сохранить конфиг",
+    "  ? — помощь      Q — выход",
+    "  S — сохр. конфиг + PNG",
     "  P — PNG-скриншот со штампом",
     "  A — применить правки (Apply)",
     "  Z — шаг назад по истории",
     "  Shift+Z — общий сброс",
-    "  Esc — отмена / фаза TIME",
+    "  Esc — отмена / снять фокус",
     "  1..6 — запуск алгоритма",
+    "  Home — первая позиция истории",
+    "  End  — последняя позиция истории",
+    "  Ctrl+1..9 — прыжок на позицию 1..9",
+    "  Ctrl+0    — прыжок на позицию 10",
     "  Tab / Shift+Tab — поля ввода",
-    "",
-    "ЧТО ХРАНИТ ИСТОРИЯ:",
-    "  Оси X/Y, диапазон анализа,",
-    "  H5/H4, алгоритм, Шаг, Цвет,",
-    "  Пик, Ширину, режим оверлея.",
-    "",
-    "ЛОГИКА РАСЧЁТА:",
-    "  f0 = (H5/5 + H4/4) / 2",
-    "  V = 0.377·Rk·n / (Io·Ik)",
-    "  Rk = 0.85·P·H/1e5 + 0.0127·R",
-    "  dn = 60·df·stroke / cyl",
     "",
     "ФАЙЛЫ:",
     "  <file>_config.json — настройки",
     "  <file>_speed_report_algoN.txt — отчёт",
-    "  <file>_spec_YYYYMMDD_HHMMSS.png — PNG",
+    "  <file>_<tag>_spec_*.png — PNG",
     "  history_log.txt — журнал версий",
+    "",
+    "ЛОГИКА РАСЧЁТА:",
+    "  f0 = (H5/5 + H4/4) / 2",
+    "  V = 0.377·Rk·n / (Io·Ik)",
+    "  Rk = c_def·P·H/1e5 + 0.0127·R",
+    "  dn = 60·df·stroke / cyl",
+    "",
+    "ДОПОЛНИТЕЛЬНО:",
+    "  GPS из соседей (РЭБ):",
+    "  neighbor_gps_enabled=true.",
+    "  Зоны недоверия (скачки GPS):",
+    "  doubt_radius_sec, doubt_min_points.",
+    "  Коэф. смятия шины:",
+    "  tire_deflection_coeff (деф. 0.84).",
+    "  Старт развёрнутым:",
+    "  start_maximized=true.",
 ]
 
 
@@ -2041,6 +3438,19 @@ def write_gps_lag_diag(filepath, gps_points, arr_t, arr_v,
                 f.write("  " + v + "\n")
             f.write("\n")
 
+            # ---------------- 11. Зоны недоверия ----------------
+            f.write(sub + "\n")
+            f.write("11. ЗОНЫ НЕДОВЕРИЯ (v0.56.5)\n")
+            f.write(sub + "\n")
+            _zones = getattr(self, "gps_doubt_zones", []) \
+                if "self" in dir() else []
+            # в контексте функции write_gps_lag_diag self нет,
+            # поэтому работаем с переданными аргументами
+            f.write("  См. консольный вывод.\n")
+            f.write("  Точки с аномальным ускорением "
+                    "исключены из корреляции.\n")
+            f.write("\n")
+
             f.write(sep + "\n")
             f.write("КОНЕЦ ОТЧЁТА\n")
             f.write(f"Версия: {VERSION}\n")
@@ -2058,6 +3468,1170 @@ def write_gps_lag_diag(filepath, gps_points, arr_t, arr_v,
         except Exception:
             pass
         return None
+
+
+# ================================================================
+# v0.58.10.2: HELPER SOURCE (tsp_frag_calc.py)
+# ================================================================
+SSA_SHIFT_HELPER_SOURCE = r'''#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""ssa_shift.py — прибавляет offset секунд к Start/End во всех Dialogue."""
+import argparse, re, sys
+
+RE = re.compile(r'^(Dialogue:\s*\d+,)(\d+:\d+:\d+\.\d+),(\d+:\d+:\d+\.\d+)(,.*)$')
+
+def to_sec(s):
+    h, m, rest = s.split(':')
+    a, b = rest.split('.')
+    # [PATCH-fix12] tolerant: .cc (2 знака) и .mmm (3 знака).
+    n = len(b)
+    if n == 2:
+        return int(h)*3600 + int(m)*60 + int(a) + int(b) / 100.0
+    if n == 3:
+        return int(h)*3600 + int(m)*60 + int(a) + int(b) / 1000.0
+    return int(h)*3600 + int(m)*60 + int(a) + int(b) / (10.0 ** n)
+
+def to_ssa(t):
+    if t < 0: t = 0
+    h = int(t // 3600); t -= h * 3600
+    m = int(t // 60); t -= m * 60
+    s = int(t)
+    # [PATCH-fix12] ms (было cs). При frame-snap в ssa_frame_time
+    # cs-точность даёт дубликаты/пропуски кадров.
+    ms = int(round((t - s) * 1000))
+    if ms >= 1000: s += 1; ms -= 1000
+    if s >= 60: m += 1; s -= 60
+    if m >= 60: h += 1; m -= 60
+    return f"{h:02d}:{m:02d}:{s:02d}.{ms:03d}"
+
+ap = argparse.ArgumentParser()
+ap.add_argument('--ssa', required=True)
+ap.add_argument('--offset', type=float, required=True)
+args = ap.parse_args()
+
+try:
+    with open(args.ssa, 'r', encoding='utf-8') as f:
+        lines = f.readlines()
+except OSError as e:
+    print(f'ERROR: {e}', file=sys.stderr); sys.exit(2)
+
+out, n = [], 0
+for line in lines:
+    m = RE.match(line)
+    if not m:
+        out.append(line); continue
+    st = to_sec(m.group(2)) + args.offset
+    en = to_sec(m.group(3)) + args.offset
+    new_line = m.group(1) + to_ssa(st) + ',' + to_ssa(en) + m.group(4)
+    if line.endswith('\n'):
+        new_line += '\n'
+    out.append(new_line)
+    n += 1
+
+with open(args.ssa, 'w', encoding='utf-8') as f:
+    f.writelines(out)
+print(f'[ssa_shift] {n} dialogues, offset {args.offset:+.3f}s -> {args.ssa}',
+      file=sys.stderr)
+sys.exit(0)
+'''
+
+
+# [patch_v0.58.9.9] PATCH_OTCHET_HELPER_SOURCE
+PATCH_OTCHET_HELPER_SOURCE = r'''#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""patch_otchet_tolerant.py — tolerant-парсер SSA.
+
+Режимы:
+  --ssa FILE       починить один .ssa (in-place)
+  --dir DIR        починить все *.ssa в папке
+  --rename-ts-ssa  в --dir: *.TS.ssa -> *.ssa
+"""
+import argparse, os, re, sys
+
+DIALOGUE_RE = re.compile(r'(?=Dialogue:\s*0,)')
+
+
+def fix_ssa_text(text):
+    warnings = []
+    if text.startswith('\ufeff'):
+        text = text[1:]
+    text = text.replace('\r\n', '\n').replace('\r', '\n')
+    text = re.sub(r'^ScriptType\s*=\s*v4\.00',
+                  'ScriptType: v4.00', text, flags=re.MULTILINE)
+    out_lines = []
+    n_dlg = 0
+    for line in text.split('\n'):
+        cnt = line.count('Dialogue:')
+        if cnt > 1:
+            pieces = DIALOGUE_RE.split(line)
+            buf = ''
+            for p in pieces:
+                p = p.strip()
+                if not p:
+                    continue
+                if p.startswith('Dialogue:'):
+                    if buf:
+                        out_lines.append(buf); buf = ''
+                    out_lines.append(p); n_dlg += 1
+                else:
+                    if out_lines and out_lines[-1].startswith('Dialogue:'):
+                        out_lines[-1] = out_lines[-1] + p
+                    else:
+                        buf = p
+            if buf:
+                out_lines.append(buf)
+        elif cnt == 1 and not line.startswith('Dialogue:'):
+            idx = line.find('Dialogue:')
+            head = line[:idx].rstrip()
+            tail = line[idx:].strip()
+            if head and out_lines and out_lines[-1].startswith('Dialogue:'):
+                out_lines[-1] = out_lines[-1] + head
+            elif head:
+                out_lines.append(head)
+            out_lines.append(tail); n_dlg += 1
+        elif cnt == 1:
+            out_lines.append(line); n_dlg += 1
+        else:
+            out_lines.append(line)
+    fixed = '\r\n'.join(out_lines)
+    fixed = re.sub(r'(\r\n){3,}', '\r\n\r\n', fixed)
+    if not fixed.endswith('\r\n'):
+        fixed += '\r\n'
+    if '[Events]' not in fixed:
+        warnings.append('[Events] not found')
+    return fixed, n_dlg, warnings
+
+
+def fix_ssa_file(path):
+    try:
+        with open(path, 'r', encoding='utf-8', errors='replace') as f:
+            text = f.read()
+    except OSError as e:
+        print('[patch_otchet] READ FAIL %s: %s' % (path, e),
+              file=sys.stderr)
+        return False, 0
+    if not text.strip():
+        print('[patch_otchet] EMPTY: %s' % path, file=sys.stderr)
+        return False, 0
+    fixed, n, warns = fix_ssa_text(text)
+    for w in warns:
+        print('[patch_otchet] WARN %s: %s' % (path, w), file=sys.stderr)
+    try:
+        with open(path, 'w', encoding='utf-8', newline='') as f:
+            f.write(fixed)
+    except OSError as e:
+        print('[patch_otchet] WRITE FAIL %s: %s' % (path, e),
+              file=sys.stderr)
+        return False, n
+    ok = (n > 0) and ('[Events]' in fixed)
+    print('[patch_otchet] %s: %d Dialogue, %d bytes, ok=%s'
+          % (os.path.basename(path), n, len(fixed), ok), file=sys.stderr)
+    return ok, n
+
+
+def rename_ts_ssa(dirpath):
+    if not os.path.isdir(dirpath):
+        return 0
+    n = 0
+    for name in os.listdir(dirpath):
+        if not name.lower().endswith('.ts.ssa'):
+            continue
+        src = os.path.join(dirpath, name)
+        base = name[:-len('.TS.ssa')]
+        dst = os.path.join(dirpath, base + '.ssa')
+        if os.path.exists(dst):
+            print('[patch_otchet] SKIP (target exists): %s' % dst,
+                  file=sys.stderr)
+            continue
+        try:
+            os.replace(src, dst)
+            print('[patch_otchet] rename: %s -> %s'
+                  % (name, os.path.basename(dst)), file=sys.stderr)
+            n += 1
+        except OSError as e:
+            print('[patch_otchet] RENAME FAIL %s: %s' % (src, e),
+                  file=sys.stderr)
+    return n
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--ssa')
+    ap.add_argument('--dir')
+    ap.add_argument('--rename-ts-ssa', action='store_true')
+    a = ap.parse_args()
+    if a.ssa:
+        ok, n = fix_ssa_file(a.ssa)
+        return 0 if (ok and n > 0) else 1
+    if a.dir:
+        if a.rename_ts_ssa:
+            print('[patch_otchet] renamed: %d' % rename_ts_ssa(a.dir),
+                  file=sys.stderr)
+        total = fixed = 0
+        for name in os.listdir(a.dir):
+            if not name.lower().endswith('.ssa'):
+                continue
+            total += 1
+            ok, _n = fix_ssa_file(os.path.join(a.dir, name))
+            if ok:
+                fixed += 1
+        print('[patch_otchet] dir %s: %d/%d fixed'
+              % (a.dir, fixed, total), file=sys.stderr)
+        return 0 if total > 0 and fixed == total else 1
+    ap.print_help(sys.stderr)
+    return 1
+
+
+if __name__ == '__main__':
+    sys.exit(main())
+'''
+
+# ================================================================
+# v0.58.10.3: HELPER SOURCE (ssa_add_audio_speed.py)
+# ================================================================
+SSA_ADD_AUDIO_SPEED_SOURCE = r'''#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""ssa_add_audio_speed.py — добавляет " [аудио: X.X км/ч; GPS: Y.Y км/ч]"
+к строке "Скорость: N км/ч" в каждой Dialogue .ssa.
+
+v0.58.10.7:
+  * --time-offset SEC: смещение для поиска в audio_speeds.csv.
+    Для полного .ssa: 0. Для фрагмента: t_start_eff из _full.txt.
+  * Сохраняет end time (был баг в v0.58.10.3).
+  * Читает 3 колонки CSV (t, V_audio, V_gps).
+
+usage:
+    ssa_add_audio_speed.py --ssa FILE.ssa --speeds-csv PATH
+                           [--split-fps N] [--time-offset SEC]
+                           [--dry-run]
+"""
+import argparse
+import os
+import re
+import statistics
+import sys
+
+RE_DIALOGUE = re.compile(
+    r'^(Dialogue:\s*\d+,)'
+    r'(\d+:\d+:\d+\.\d+),'
+    r'(\d+:\d+:\d+\.\d+),'
+    r'(.*)$'
+)
+RE_SPEED = re.compile(r'Скорость:\s*[0-9.]+\s*км/ч')
+RE_OLD_MARK = re.compile(r'\s*\[[^\]]*(?:аудио:|GPS:)[^\]]*\]')
+
+
+def hms_to_cs(hms):
+    # [PATCH-fix12] Возвращает ms (не cs, как раньше). Имя
+    # оставлено ради совместимости, но единица — миллисекунды.
+    h, m, rest = hms.split(':')
+    if '.' in rest:
+        s_part, frac = rest.split('.')
+        n = len(frac)
+        if n == 2:
+            sub_ms = int(frac) * 10
+        elif n == 3:
+            sub_ms = int(frac)
+        else:
+            sub_ms = int(round(int(frac) * 1000.0 / (10 ** n)))
+        return (int(h) * 3600 + int(m) * 60 + int(s_part)) * 1000 + sub_ms
+    return (int(h) * 3600 + int(m) * 60 + int(rest)) * 1000
+
+
+def cs_to_hms(cs):
+    # [PATCH-fix12] Принимает ms, отдаёт .mmm (3 знака).
+    if cs < 0:
+        cs = 0
+    h = cs // 3600000
+    cs -= h * 3600000
+    m = cs // 60000
+    cs -= m * 60000
+    s = cs // 1000
+    ms = cs % 1000
+    return "%02d:%02d:%02d.%03d" % (h, m, s, ms)
+
+
+def load_speeds(path):
+    times, v_audio, v_gps = [], [], []
+    with open(path, 'r', encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            parts = line.replace(';', ',').split(',')
+            if len(parts) < 2:
+                continue
+            try:
+                t = float(parts[0])
+                va = float(parts[1])
+            except ValueError:
+                continue
+            vg = None
+            if len(parts) >= 3 and parts[2].strip():
+                try:
+                    vg = float(parts[2])
+                except ValueError:
+                    vg = None
+            times.append(t)
+            v_audio.append(va)
+            v_gps.append(vg)
+    return times, v_audio, v_gps
+
+
+def _interp(t, times, values):
+    pairs = [(times[i], values[i]) for i in range(len(times))
+             if values[i] is not None]
+    if not pairs:
+        return None
+    if len(pairs) == 1:
+        return pairs[0][1]
+    ts = [p[0] for p in pairs]
+    vs = [p[1] for p in pairs]
+    if t <= ts[0]:
+        return vs[0]
+    if t >= ts[-1]:
+        return vs[-1]
+    lo, hi = 0, len(ts) - 1
+    while lo < hi - 1:
+        mid = (lo + hi) // 2
+        if ts[mid] <= t:
+            lo = mid
+        else:
+            hi = mid
+    t0, t1 = ts[lo], ts[hi]
+    v0, v1 = vs[lo], vs[hi]
+    if t1 <= t0:
+        return v0
+    frac = (t - t0) / (t1 - t0)
+    return v0 + frac * (v1 - v0)
+
+
+def _build_suffix(t_shown, time_offset, times, v_audio, v_gps):
+    """t_shown — время в .ssa; time_offset — сдвиг в полное время."""
+    t = t_shown + time_offset
+    va = _interp(t, times, v_audio)
+    vg = _interp(t, times, v_gps) if v_gps else None
+    parts = []
+    if va is not None:
+        parts.append('аудио: %.1f км/ч' % va)
+    if vg is not None:
+        parts.append('GPS: %.1f км/ч' % vg)
+    return (' [' + '; '.join(parts) + ']') if parts else ''
+
+
+def detect_eol(raw):
+    if '\r\n' in raw:
+        return '\r\n'
+    if '\r' in raw:
+        return '\r'
+    return '\n'
+
+
+def _median_dialogue_duration_sec(lines):
+    durs = []
+    for line in lines:
+        m = RE_DIALOGUE.match(line)
+        if not m:
+            continue
+        try:
+            # [PATCH-fix12] hms_to_cs теперь в ms, делим на 1000.
+            d = (hms_to_cs(m.group(3)) - hms_to_cs(m.group(2))) / 1000.0
+            if d > 0:
+                durs.append(d)
+        except Exception:
+            pass
+    return statistics.median(durs) if durs else 0.0
+
+
+def process_ssa(path, times, v_audio, v_gps, split_fps=0,
+                time_offset=0.0, dry_run=False):
+    with open(path, 'r', encoding='utf-8', newline='') as f:
+        raw = f.read()
+    eol = detect_eol(raw)
+    lines = raw.split(eol)
+
+    med = _median_dialogue_duration_sec(lines)
+    if split_fps > 0 and med > 0 and med < 0.7 / split_fps:
+        print('[ssa_add_audio_speed] median=%.4fs < %.4fs -> '
+              'already split, split_fps=0' % (med, 0.7 / split_fps),
+              file=sys.stderr)
+        split_fps = 0
+
+    out = []
+    n_modified = 0
+    n_total = 0
+    n_sub = 0
+
+    for line in lines:
+        m = RE_DIALOGUE.match(line)
+        if not m:
+            out.append(line)
+            continue
+        n_total += 1
+        start_str, end_str, tail = m.group(2), m.group(3), m.group(4)
+        start_cs = hms_to_cs(start_str)
+        end_cs = hms_to_cs(end_str)
+        tail_clean = RE_OLD_MARK.sub('', tail)
+
+        if split_fps > 0 and end_cs > start_cs:
+            D = end_cs - start_cs
+            # [PATCH-fix12] D в ms, делим на 1000.
+            n = max(1, int(round(D / 1000.0 * split_fps)))
+            any_sub = False
+            for i in range(n):
+                sub_s = start_cs + int(round(i * D / n))
+                sub_e = start_cs + int(round((i + 1) * D / n))
+                if sub_e <= sub_s:
+                    continue
+                # [PATCH-fix12] sub_s в ms.
+                t_shown = sub_s / 1000.0
+                suffix = _build_suffix(t_shown, time_offset,
+                                        times, v_audio, v_gps)
+                if RE_SPEED.search(tail_clean):
+                    nt = RE_SPEED.subn(
+                        lambda mm, _s=suffix: mm.group(0) + _s,
+                        tail_clean, count=1)[0]
+                else:
+                    nt = tail_clean
+                out.append(m.group(1) + cs_to_hms(sub_s) + ','
+                           + cs_to_hms(sub_e) + ',' + nt)
+                n_sub += 1
+                any_sub = True
+            if any_sub:
+                n_modified += 1
+            else:
+                out.append(line)
+        else:
+            # [PATCH-fix12] start_cs в ms.
+            t_shown = start_cs / 1000.0
+            suffix = _build_suffix(t_shown, time_offset,
+                                    times, v_audio, v_gps)
+            if not suffix:
+                out.append(line)
+                continue
+            if not RE_SPEED.search(tail_clean):
+                out.append(line)
+                continue
+            nt = RE_SPEED.subn(
+                lambda mm, _s=suffix: mm.group(0) + _s,
+                tail_clean, count=1)[0]
+            out.append(m.group(1) + start_str + ',' + end_str + ',' + nt)
+            n_modified += 1
+
+    if dry_run:
+        print('[ssa_add_audio_speed] DRY: %d/%d dialogues, '
+              'split=%d, offset=%.3fs, sub=%d'
+              % (n_modified, n_total, split_fps, time_offset,
+                 n_sub if n_sub else n_total), file=sys.stderr)
+        return n_modified, n_total
+
+    with open(path, 'w', encoding='utf-8', newline='') as f:
+        f.write(eol.join(out))
+    print('[ssa_add_audio_speed] %d/%d dialogues, split=%d, '
+          'offset=%.3fs, sub=%d -> %s'
+          % (n_modified, n_total, split_fps, time_offset,
+             n_sub if n_sub else n_total, path), file=sys.stderr)
+    return n_modified, n_total
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--ssa', required=True)
+    ap.add_argument('--speeds-csv', required=True)
+    ap.add_argument('--split-fps', type=int, default=0)
+    ap.add_argument('--time-offset', type=float, default=0.0)
+    ap.add_argument('--dry-run', action='store_true')
+    a = ap.parse_args()
+
+    if not os.path.isfile(a.ssa):
+        print('ERROR: ssa not found: %s' % a.ssa, file=sys.stderr)
+        return 2
+    if not os.path.isfile(a.speeds_csv):
+        print('ERROR: speeds csv not found: %s' % a.speeds_csv,
+              file=sys.stderr)
+        return 2
+    try:
+        times, v_audio, v_gps = load_speeds(a.speeds_csv)
+    except OSError as e:
+        print('ERROR: read csv: %s' % e, file=sys.stderr)
+        return 2
+    if not times:
+        print('ERROR: empty speeds csv', file=sys.stderr)
+        return 3
+    try:
+        n_mod, _ = process_ssa(a.ssa, times, v_audio, v_gps,
+                                split_fps=a.split_fps,
+                                time_offset=a.time_offset,
+                                dry_run=a.dry_run)
+    except OSError as e:
+        print('ERROR: ssa: %s' % e, file=sys.stderr)
+        return 2
+    return 0 if n_mod > 0 else 4
+
+
+if __name__ == '__main__':
+    sys.exit(main())
+'''
+
+
+# ==============================================================
+# v0.58.13: HELPER SOURCE (ssa_frame_time.py)
+# ==============================================================
+SSA_FRAME_TIME_SOURCE = r'''#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""ssa_frame_time.py - frame/time/MSK info per Dialogue."""
+import argparse
+import os
+import re
+import sys
+from datetime import datetime, timedelta
+
+
+RE_DIALOGUE = re.compile(
+    r'^(Dialogue:\s*\d+,)'
+    r'(\d+:\d+:\d+\.\d+),'
+    r'(\d+:\d+:\d+\.\d+),'
+    r'(.*)$'
+)
+
+
+def hms_to_sec(hms):
+    """Tolerant: .cc (2 знака) и .mmm (3 знака)."""
+    h, m, rest = hms.split(':')
+    s, frac = rest.split('.')
+    n = len(frac)
+    mult = 100 if n == 2 else (1000 if n == 3 else 10 ** n)
+    return int(h) * 3600 + int(m) * 60 + int(s) + int(frac) / float(mult)
+
+
+def sec_to_hms(t, precision='ms'):
+    """HH:MM:SS.cc или HH:MM:SS.mmm."""
+    if t < 0:
+        t = 0.0
+    if precision == 'cc':
+        cs_total = int(round(t * 100))
+        cc = cs_total % 100
+        s_total = cs_total // 100
+        s = s_total % 60
+        m = (s_total // 60) % 60
+        h = s_total // 3600
+        return '%02d:%02d:%02d.%02d' % (h, m, s, cc)
+    ms_total = int(round(t * 1000))
+    ms = ms_total % 1000
+    s_total = ms_total // 1000
+    s = s_total % 60
+    m = (s_total // 60) % 60
+    h = s_total // 3600
+    return '%02d:%02d:%02d.%03d' % (h, m, s, ms)
+
+
+def sec_to_ms_str(t):
+    """Время для доп. строки Кадр:.../time/ - всегда .3f."""
+    return sec_to_hms(t, precision='ms')
+
+
+def fmt_delta(sec):
+    a = abs(sec)
+    if a < 60:
+        return '%.0fs' % a
+    if a < 3600:
+        return '%.1fm' % (a / 60.0)
+    if a < 86400:
+        return '%.1fh' % (a / 3600.0)
+    return '%.1fd' % (a / 86400.0)
+
+
+def _read_text_auto(path):
+    try:
+        with open(path, 'rb') as f:
+            raw = f.read()
+    except Exception:
+        return None
+    for enc in ('utf-8-sig', 'utf-8', 'cp1251'):
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode('latin-1', errors='replace')
+
+
+def _parse_ssa_dt(ssa_path):
+    if not ssa_path or not os.path.isfile(ssa_path):
+        return None
+    text = _read_text_auto(ssa_path)
+    if text is None:
+        return None
+    for line in text.splitlines():
+        if not line.startswith('Dialogue:'):
+            continue
+        m = re.search(
+            r'Дата/Время:\s*'
+            r'(\d{4})-(\d{2})-(\d{2})\s+'
+            r'(\d{2}):(\d{2}):(\d{2})', line)
+        if m:
+            try:
+                return datetime(*map(int, m.groups()))
+            except Exception:
+                return None
+        break
+    return None
+
+
+def resolve_base_dt(ssa_path, mtime_path, warn_sec):
+    mt = None
+    if mtime_path and os.path.isfile(mtime_path):
+        try:
+            mt = datetime.fromtimestamp(os.path.getmtime(mtime_path))
+        except Exception:
+            pass
+
+    ssa_dt = _parse_ssa_dt(ssa_path)
+    if ssa_dt is not None:
+        if mt is not None:
+            try:
+                d = (ssa_dt - mt).total_seconds()
+                if abs(d) > warn_sec:
+                    print('[ssa_frame_time] SSA? ssa=%s mtime=%s d=%+.0fs'
+                          % (ssa_dt.isoformat(),
+                             mt.isoformat(), d), file=sys.stderr)
+                    return ssa_dt, '[ssa?]', 'd=' + fmt_delta(d)
+                print('[ssa_frame_time] SSA ssa=%s mtime=%s d=%+.0fs'
+                      % (ssa_dt.isoformat(), mt.isoformat(), d),
+                      file=sys.stderr)
+            except Exception:
+                pass
+        return ssa_dt, '[ssa]', ''
+
+    if mt is not None:
+        if mt.year < 2020 or mt.year > 2030:
+            print('[ssa_frame_time] MTIME? year=%d' % mt.year,
+                  file=sys.stderr)
+            return mt, '[mtime?]', 'year=%d' % mt.year
+        return mt, '[mtime]', ''
+
+    if mtime_path:
+        m = re.search(r'(\d{14})', os.path.basename(mtime_path))
+        if m:
+            s = m.group(1)
+            try:
+                return (datetime(int(s[0:4]), int(s[4:6]),
+                                  int(s[6:8]), int(s[8:10]),
+                                  int(s[10:12]), int(s[12:14])),
+                        '[name]', '')
+            except Exception:
+                pass
+
+    return None, '[-]', ''
+
+
+def build_tag(tag, reason):
+    if tag.endswith('?]') and reason:
+        return tag[:-1] + ' ' + reason + ']'
+    return tag
+
+
+def detect_eol(raw):
+    if '\r\n' in raw:
+        return '\r\n'
+    if '\r' in raw:
+        return '\r'
+    return '\n'
+
+
+def op_add_info(ssa_path, fps, t_start_eff, time_correction,
+                 mtime_path, warn_sec, time_precision,
+                 frame_end_frac=0.97, frame_start_eff_arg=0,
+                 ssa_full_path='', dry_run=False):
+    with open(ssa_path, 'r', encoding='utf-8', newline='') as f:
+        raw = f.read()
+    eol = detect_eol(raw)
+    lines = raw.split(eol)
+
+    # [fix14] base_dt приоритет: --ssa-full > --ssa > mtime > name
+    base_dt = None
+    src_tag = '[-]'
+    src_reason = ''
+    if ssa_full_path and os.path.isfile(ssa_full_path):
+        _bd_full = _parse_ssa_dt(ssa_full_path)
+        if _bd_full is not None:
+            base_dt = _bd_full
+            src_tag = '[ssa-full]'
+            src_reason = ''
+            print('[ssa_frame_time] base_dt: --ssa-full %s'
+                  % ssa_full_path, file=sys.stderr)
+        else:
+            print('[ssa_frame_time] WARN: --ssa-full %s не содержит '
+                  'Дата/Время, fallback на --ssa'
+                  % ssa_full_path, file=sys.stderr)
+    if base_dt is None:
+        base_dt, src_tag, src_reason = resolve_base_dt(
+            ssa_path, mtime_path, warn_sec)
+    tag_full = build_tag(src_tag, src_reason)
+    print('[ssa_frame_time] base_dt=%s tag=%s precision=%s'
+          % (base_dt.isoformat() if base_dt else None,
+             tag_full, time_precision), file=sys.stderr)
+
+    out = []
+    n_added = 0
+    n_total = 0
+
+    for line in lines:
+        m = RE_DIALOGUE.match(line)
+        if not m:
+            out.append(line)
+            continue
+        n_total += 1
+        start_str, end_str, tail = m.group(2), m.group(3), m.group(4)
+
+        if '\\NКадр:' in tail:
+            idx = tail.rfind('\\NКадр:')
+            tail = tail[:idx]
+
+        t_start = hms_to_sec(start_str)
+        t_end = hms_to_sec(end_str)
+
+        # [PATCH-fix11] Start — frame-snap (как fix9/fix10).
+        # End — две стратегии в зависимости от входной длительности:
+        #
+        # 1) SPLIT (input_dur_frames <= 1, кадр на Dialogue):
+        #    End = Start + (round(1000/fps) - 1) мс
+        #    -> единая длительность 32 мс для 30 fps.
+        #    Зазоры между Dialogue 1/2 мс чередуются.
+        #
+        # 2) FULL (input_dur_frames > 1, N кадров на Dialogue):
+        #    End = frame-snap(t_end) - 1 мс (как fix7).
+        #    -> сохраняет исходную длительность N/fps секунд
+        #    (например, 1 секунда = 999 мс, а не 32).
+        #    Без этого fix8-unified ломал полный .ssa.
+        frag_frame     = int(round(t_start * fps))
+        frag_end_frame = int(round(t_end   * fps))
+        # [fix13-msk] src_frame = frame_start_eff + frag_frame
+        # Привязка MSK к реальному кадру видео, а не
+        # round(t_start_eff*fps). Для фрагмента frame_start_eff
+        # приходит из _compute_fragment_info (floor(t_start_eff*fps)+2).
+        # Для full (t_start_eff=0, frame_start_eff_arg=0) — fallback
+        # на старую формулу.
+        if frame_start_eff_arg > 0:
+            src_frame = frame_start_eff_arg + frag_frame
+        else:
+            src_frame = int(round((t_start + t_start_eff) * fps))
+
+        t_start_exact = frag_frame / fps
+        _end_sec_raw  = frag_end_frame / fps
+
+        if time_precision == 'ms' and frag_end_frame > 0:
+            _start_ms         = int(round(t_start_exact * 1000))
+            _next_start_ms    = int(round(_end_sec_raw * 1000))
+            _input_dur_frames = frag_end_frame - frag_frame
+            if _input_dur_frames < 1:
+                _input_dur_frames = 1
+
+            # [fix11] Единая формула для SPLIT (N=1) и FULL (N>1):
+            #   dur_ms = round((1000/fps) * N * frac)
+            # SPLIT 30fps frac=0.97 -> 32 мс (gap 1 мс).
+            # SPLIT 30fps frac=1.00 -> 33 мс (наезд 1 точка).
+            # FULL  30fps 1с frac=0.97 -> 970 мс (gap 30 мс).
+            # FULL  30fps 1с frac=1.00 -> 1000 мс (касание,
+            #                          gap 0 мс).
+            _full_dur_ms = (1000.0 / fps) * _input_dur_frames \
+                * frame_end_frac
+            _dur_ms = int(round(_full_dur_ms))
+            if _dur_ms < 1:
+                _dur_ms = 1
+            _end_ms = _start_ms + _dur_ms
+
+            # clamp
+            if frame_end_frac < 0.9999:
+                # gap >= 1 мс: не наезжаем на следующий Dialogue
+                if _end_ms >= _next_start_ms:
+                    _end_ms = _next_start_ms - 1
+            else:
+                # frac ~ 1.0: касание D(N).end == D(N+1).start
+                # допустимо (устраняет "мёртвую зону" на стыке,
+                # из-за которой некоторые плееры "двоят" старый
+                # и новый субтитр), но не больше — иначе оба
+                # видны дольше 1 точки.
+                if _end_ms > _next_start_ms:
+                    _end_ms = _next_start_ms
+            if _end_ms < _start_ms:
+                _end_ms = _start_ms
+            t_end_exact = _end_ms / 1000.0
+        else:
+            t_end_exact = _end_sec_raw
+
+        new_start = sec_to_hms(t_start_exact, precision=time_precision)
+        new_end   = sec_to_hms(t_end_exact,   precision=time_precision)
+
+        t_frag = frag_frame / fps
+        time_str = sec_to_ms_str(t_frag)
+
+        if base_dt is not None:
+            t_src = src_frame / fps
+            dt = base_dt + timedelta(
+                seconds=t_src + time_correction)
+            msk_str = (dt.strftime('%d.%m.%Y %H:%M:%S.')
+                       + '%03d MSK' % (dt.microsecond // 1000))
+        else:
+            msk_str = '[-]'
+
+        if t_start_eff > 0.001:
+            prefix = ('\\NКадр:%d(в исходнике:%d кадр) / %s / %s %s'
+                      % (frag_frame, src_frame, time_str,
+                         msk_str, tag_full))
+        else:
+            prefix = ('\\NКадр:%d / %s / %s %s'
+                      % (src_frame, time_str, msk_str, tag_full))
+
+        new_line = (m.group(1) + new_start + ',' + new_end
+                    + ',' + tail + prefix)
+        out.append(new_line)
+        n_added += 1
+
+    if dry_run:
+        print('[ssa_frame_time] DRY: %d/%d precision=%s'
+              % (n_added, n_total, time_precision), file=sys.stderr)
+        return n_added, n_total
+
+    with open(ssa_path, 'w', encoding='utf-8', newline='') as f:
+        f.write(eol.join(out))
+    print('[ssa_frame_time] add-info: %d/%d -> %s (precision=%s)'
+          % (n_added, n_total, ssa_path, time_precision),
+          file=sys.stderr)
+    return n_added, n_total
+
+
+def op_apply_style(in_path, out_path):
+    with open(in_path, 'r', encoding='utf-8', newline='') as f:
+        raw = f.read()
+    eol = detect_eol(raw)
+    lines = raw.split(eol)
+
+    out = []
+    n_styles = 0
+    for line in lines:
+        if line.startswith('Style:'):
+            parts = line.split(',')
+            if len(parts) >= 16:
+                try:
+                    parts[12] = '5'
+                    parts[15] = '3'
+                    n_styles += 1
+                except IndexError:
+                    pass
+            out.append(','.join(parts))
+        else:
+            out.append(line)
+
+    with open(out_path, 'w', encoding='utf-8', newline='') as f:
+        f.write(eol.join(out))
+    print('[ssa_frame_time] apply-style: %d Style'
+          % n_styles, file=sys.stderr)
+    return n_styles
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    sub = ap.add_subparsers(dest='op', required=True)
+
+    a1 = sub.add_parser('add-info')
+    a1.add_argument('--ssa', required=True)
+    a1.add_argument('--ts-path', default='')
+    a1.add_argument('--fps', type=float, required=True)
+    a1.add_argument('--t-start-eff', type=float, default=0.0)
+    a1.add_argument('--time-correction', type=float, default=0.0)
+    a1.add_argument('--warn-sec', type=float, default=300.0)
+    a1.add_argument('--time-precision', choices=('cc', 'ms'),
+                    default='ms')
+    a1.add_argument('--frame-end-frac', type=float, default=0.97)
+    a1.add_argument('--frame-start-eff', type=int, default=0,
+                    dest='frame_start_eff_arg')
+    a1.add_argument('--ssa-full', default='',
+                    dest='ssa_full_arg')
+    a1.add_argument('--dry-run', action='store_true')
+    a1.add_argument('--base-dt', default='')      # back-compat
+    a1.add_argument('--source-tag', default='')   # back-compat
+
+    a2 = sub.add_parser('apply-style')
+    a2.add_argument('--in', dest='in_path', required=True)
+    a2.add_argument('--out', dest='out_path', required=True)
+
+    args = ap.parse_args()
+
+    if args.op == 'add-info':
+        if not os.path.isfile(args.ssa):
+            print('ERROR: ssa not found: %s' % args.ssa,
+                  file=sys.stderr)
+            return 2
+        if args.fps <= 0:
+            print('ERROR: fps <= 0', file=sys.stderr)
+            return 3
+        op_add_info(args.ssa, args.fps, args.t_start_eff,
+                     args.time_correction, args.ts_path,
+                     args.warn_sec, args.time_precision,
+                     frame_end_frac=args.frame_end_frac,
+                     frame_start_eff_arg=args.frame_start_eff_arg,
+                     ssa_full_path=args.ssa_full_arg,
+                     dry_run=args.dry_run)
+        return 0
+
+    if args.op == 'apply-style':
+        if not os.path.isfile(args.in_path):
+            print('ERROR: ssa not found: %s' % args.in_path,
+                  file=sys.stderr)
+            return 2
+        op_apply_style(args.in_path, args.out_path)
+        return 0
+
+    return 1
+
+
+if __name__ == '__main__':
+    sys.exit(main())
+'''
+
+
+HELPER_SOURCE = r'''#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+tsp_frag_calc.py — расчёт start_pkt/end_pkt для нарезки TS по _full.txt.
+Генерируется автоматически из audio_speed_calc.py (HELPER_SOURCE).
+
+usage:
+    tsp_frag_calc.py --full-txt <path> --fps <float>
+                     --frame-start <1-based> --frame-end <1-based>
+                     [--plan Z|X] [--next-idr-pkt <N>]
+                     --out <path>
+
+вывод: одна строка "START_PKT END_PKT" в файл <path>.
+"""
+import argparse
+import re
+import sys
+
+LINE_RE = re.compile(
+    r"^Фр\.(\d+)\s+PID:0x([0-9A-Fa-f]{4})\s+Пакеты:(\d+)\((\d+)-(\d+)\)\s*$"
+)
+ALLOWED_START_PIDS = {0x0000, 0x0040, 0x0100, 0x0200, 0x0201}
+
+
+def parse_full_txt(path):
+    frame_map = {}
+    all_rows = []
+    with open(path, 'r', encoding='utf-8', errors='replace') as f:
+        for line in f:
+            m = LINE_RE.match(line)
+            if not m:
+                continue
+            fr = int(m.group(1))
+            pid = int(m.group(2), 16)
+            pmin = int(m.group(4))
+            pmax = int(m.group(5))
+            all_rows.append((fr, pid, pmin, pmax))
+            if pid == 0x0200:
+                if fr not in frame_map:
+                    frame_map[fr] = {'min': pmin, 'max': pmax}
+                else:
+                    frame_map[fr]['min'] = min(frame_map[fr]['min'], pmin)
+                    frame_map[fr]['max'] = max(frame_map[fr]['max'], pmax)
+    return frame_map, all_rows
+
+
+def _video_frames(all_rows):
+    frames = {}
+    for fr, pid, pmin, pmax in all_rows:
+        if pid != 0x0200:
+            continue
+        if fr not in frames:
+            frames[fr] = [pmin, pmax]
+        else:
+            if pmin < frames[fr][0]:
+                frames[fr][0] = pmin
+            if pmax > frames[fr][1]:
+                frames[fr][1] = pmax
+    return frames
+
+
+def calc_start_pkt(frame_start, all_rows):
+    """v0.58.10.5: старт = first_video_packet(frame_start)
+    минус PAT/PMT/SDT/audio в окне 500 пакетов перед ним.
+    GPS (0x0300) в прелюдии не берётся."""
+    if frame_start <= 1:
+        return 0
+    vid = _video_frames(all_rows)
+    if frame_start not in vid:
+        return 0
+    first_vid = vid[frame_start][0]
+
+    prev_max = 0
+    for fr, (mn, mx) in vid.items():
+        if fr < frame_start and mx > prev_max:
+            prev_max = mx
+
+    WINDOW = 500
+    lo = max(prev_max + 1, first_vid - WINDOW)
+    hi = first_vid
+    allowed = {0x0000, 0x0040, 0x0100, 0x0200, 0x0201}
+    candidates = []
+    for fr, pid, pmin, pmax in all_rows:
+        if pid not in allowed:
+            continue
+        if pmax < lo:
+            continue
+        if pmin >= hi:
+            continue
+        cand = max(pmin, lo)
+        if cand < hi:
+            candidates.append(cand)
+    return min(candidates) if candidates else first_vid
+
+
+def calc_end_pkt(frame_end, all_rows, plan='Z', next_idr_pkt=None):
+    """v0.58.10.5: конец = last_video_packet(frame_end)
+    плюс PAT/PMT/SDT/audio в окне 500 пакетов после него,
+    но не дальше first_video_packet(frame_end+1)."""
+    if plan == 'X' and next_idr_pkt is not None and next_idr_pkt > 0:
+        return next_idr_pkt - 1
+    vid = _video_frames(all_rows)
+    if not vid:
+        return None
+    if frame_end not in vid:
+        cands = [fr for fr in vid if fr <= frame_end]
+        frame_end = max(cands) if cands else min(vid.keys())
+    if frame_end not in vid:
+        return None
+    last_vid = vid[frame_end][1]
+
+    next_vid_min = None
+    for fr, (mn, mx) in vid.items():
+        if fr > frame_end:
+            if next_vid_min is None or mn < next_vid_min:
+                next_vid_min = mn
+
+    WINDOW = 500
+    hi = last_vid + WINDOW
+    if next_vid_min is not None:
+        hi = min(hi, next_vid_min)
+    allowed = {0x0000, 0x0040, 0x0100, 0x0200, 0x0201}
+    max_end = last_vid
+    for fr, pid, pmin, pmax in all_rows:
+        if pid not in allowed:
+            continue
+        if pmax <= last_vid:
+            continue
+        if pmin >= hi:
+            continue
+        end_cand = min(pmax, hi - 1)
+        if end_cand > max_end:
+            max_end = end_cand
+    return max_end
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--full-txt', required=True)
+    ap.add_argument('--fps', type=float, required=True)
+    ap.add_argument('--frame-start', type=int, required=True)
+    ap.add_argument('--frame-end', type=int, required=True)
+    ap.add_argument('--plan', choices=['Z', 'X'], default='Z')
+    ap.add_argument('--next-idr-pkt', type=int, default=None)
+    ap.add_argument('--out', required=True)
+    args = ap.parse_args()
+
+    if args.fps <= 0:
+        print('ERROR: fps must be > 0', file=sys.stderr)
+        sys.exit(3)
+    if args.frame_start < 1:
+        print('ERROR: frame_start must be >= 1', file=sys.stderr)
+        sys.exit(4)
+    if args.frame_end < args.frame_start:
+        print('ERROR: frame_end < frame_start', file=sys.stderr)
+        sys.exit(4)
+
+    try:
+        frame_map, all_rows = parse_full_txt(args.full_txt)
+    except OSError as e:
+        print('ERROR: read _full.txt: %s' % e, file=sys.stderr)
+        sys.exit(2)
+    if not all_rows:
+        print('ERROR: _full.txt empty or unparsable', file=sys.stderr)
+        sys.exit(2)
+    if not frame_map:
+        print('ERROR: no video packets (PID 0x0200) in _full.txt',
+              file=sys.stderr)
+        sys.exit(3)
+
+    start_pkt = calc_start_pkt(args.frame_start, all_rows)
+    end_pkt = calc_end_pkt(args.frame_end, all_rows,
+                           args.plan, args.next_idr_pkt)
+    if end_pkt is None:
+        print('ERROR: end_pkt not found', file=sys.stderr)
+        sys.exit(5)
+    if start_pkt >= end_pkt:
+        print('ERROR: start_pkt (%d) >= end_pkt (%d)'
+              % (start_pkt, end_pkt), file=sys.stderr)
+        sys.exit(5)
+
+    print('[helper] frame_start=%d frame_end=%d plan=%s '
+          'start_pkt=%d end_pkt=%d'
+          % (args.frame_start, args.frame_end, args.plan,
+             start_pkt, end_pkt), file=sys.stderr)
+
+    try:
+        with open(args.out, 'w', encoding='utf-8') as f:
+            f.write('%d %d\n' % (start_pkt, end_pkt))
+    except OSError as e:
+        print('ERROR: write %s: %s' % (args.out, e), file=sys.stderr)
+        sys.exit(6)
+
+    sys.exit(0)
+
+
+if __name__ == '__main__':
+    main()
+'''
+
+
+class _EndpointLocator(matplotlib.ticker.Locator):
+    """[fix2/3-v2f] Locator с гарантированными тиками на краях xlim.
+
+    Возвращает: int(round(xlim[0])) + nice-тики из AutoLocator
+    (только промежуточные) + int(round(xlim[1])).
+    Благодаря этому подписи кадра/времени всегда есть под началом
+    и под концом видимой шкалы — при любом зуме/панораме.
+    """
+
+    def __call__(self):
+        try:
+            vmin, vmax = self.axis.get_view_interval()
+        except Exception:
+            return []
+        return self.tick_values(vmin, vmax)
+
+    def tick_values(self, vmin, vmax):
+        if vmin > vmax:
+            vmin, vmax = vmax, vmin
+        rvmin = int(round(vmin))
+        rvmax = int(round(vmax))
+        ticks = [rvmin]
+        try:
+            auto = matplotlib.ticker.AutoLocator()
+            try:
+                auto.set_axis(self.axis)
+            except Exception:
+                pass
+            auto_ticks = list(auto.tick_values(vmin, vmax))
+        except Exception:
+            auto_ticks = []
+        for t in auto_ticks:
+            try:
+                rt = int(round(t))
+            except Exception:
+                continue
+            if rvmin < rt < rvmax and rt not in ticks:
+                ticks.append(rt)
+        if rvmax != ticks[-1]:
+            ticks.append(rvmax)
+        return ticks
 
 
 class AudioSpeedAnalyzer:
@@ -2152,6 +4726,12 @@ class AudioSpeedAnalyzer:
         self._footer_text = None
         self._sys_info_printed = False
         self._closing = False
+        # [fix2/3] GUI: коррекция MSK
+        self._ssa_base_dt = None
+        # [fix2/3-v2] штамп диапазона — две части (начало/конец)
+        self._range_start_text = None
+        self._range_end_text = None
+        self._range_msk_text = None  # back-compat
 
         # v0.53: оверлей GPS-скорости и подписи пиков
         self.speed_overlay_h5 = False
@@ -2174,12 +4754,31 @@ class AudioSpeedAnalyzer:
         self.gps_lag_calib_h4 = None
         self.gps_lag_calib_info = None
 
+        # v0.56.5: расширение GPS за счёт соседних файлов
+        self.gps_points_full = []          # с точками соседей
+        self.gps_neighbor_info = None      # статистика добора
+        self.gps_doubt_zones = []          # зоны недоверия
+        self.gps_weights = []              # веса 0/1
+        self.gps_valid_stats = None        # сколько выброшено
+
+        # v0.58.0: ручная коррекция dGPS.
         _override_init = config.get('gps_lag_override')
+        self.gps_lag_manual = bool(config.get('gps_lag_manual', False))
+        # v0.58.1: None = ручное значение ещё не задано.
+        # 0.0 — валидное значение, поэтому нужен отдельный
+        # сентинел, чтобы не путать "не задано" с "ноль".
+        self._gps_lag_manual_input = None
         if _override_init is not None:
             try:
-                self.gps_lag = float(_override_init)
+                self._gps_lag_manual_input = float(_override_init)
+                self.gps_lag_manual = True
+                self.gps_lag = self._gps_lag_manual_input
             except (ValueError, TypeError):
-                pass
+                self.gps_lag_manual = False
+                self._gps_lag_manual_input = None
+        if self.gps_lag_manual and self._gps_lag_manual_input is None:
+            # v0.58.1: manual без значения — принудительно Авто.
+            self.gps_lag_manual = False
 
         sm = config.get('spec_mode', 'time')
         if sm == 'freq':
@@ -2201,7 +4800,8 @@ class AudioSpeedAnalyzer:
         f4 = h4_c / 4.0
         f = (f5 + f4) / 2.0
         n = 60.0 * f * stroke / cyl
-        Rk = 0.85 * P * H / 100000.0 + 0.0127 * R
+        _c_def = float(self.cfg.get('tire_deflection_coeff', 0.84))
+        Rk = _c_def * P * H / 100000.0 + 0.0127 * R
         self.cfg['_rk'] = Rk
         V = 0.377 * Rk * n / (Io * Ik)
         return f, n, Rk, V
@@ -2290,14 +4890,19 @@ class AudioSpeedAnalyzer:
             f.write("  f4 = H4ц / 4\n")
             f.write("  f  = (f5 + f4) / 2\n")
             f.write("  n  = 60 * f * stroke / cylinders\n")
-            f.write("  Rk = 0.85 * P * H / 100000 + 0.0127 * R\n")
+            _c_rep = float(
+                self.cfg.get('tire_deflection_coeff', 0.84))
+            f.write("  Rk = c_def * P * H / 100000 + 0.0127 * R"
+                    "  (c_def=%.4f)\n" % _c_rep)
             f.write("  V  = 0.377 * Rk * n / (Io * Ik)\n")
             f.write("  df = ((H5max-H5min)/5 + (H4max-H4min)/4) / 2 / 2\n")
             f.write("  dn = 60 * df * stroke / cyl\n")
             f.write("  dV = 0.377 * Rk * dn / (Io * Ik)\n\n")
 
-            f.write(f"Rk = 0.85 * {P} * {H} / 100000 + 0.0127 * {R} = "
-                    f"{Rk_val:.4f} м\n\n")
+            _c_rep2 = float(
+                self.cfg.get('tire_deflection_coeff', 0.84))
+            f.write(f"Rk = {_c_rep2:.4f} * {P} * {H} / 100000 + "
+                    f"0.0127 * {R} = {Rk_val:.4f} м\n\n")
 
             f.write("Пошаговый расчёт:\n")
             f.write(f"{'N':>3s}  {'Время,с':>8s}  {'H5 min':>10s}  "
@@ -2412,24 +5017,32 @@ class AudioSpeedAnalyzer:
                             f"MD5: {p['md5']}   Дата: {p['date']}\n")
 
     def _effective_lag(self):
-        """Эффективный лаг GPS.
+        """Эффективный лаг GPS (v0.58.0).
 
-        Возвращает gps_lag_override из конфига, если он задан;
-        иначе — self.gps_lag (результат корреляции либо значение
-        из конфига, прочитанное в __init__).
+        1) Ручной режим (gps_lag_manual=True) -> _gps_lag_manual_input.
+        2) Иначе gps_lag_override из конфига (если задан).
+        3) Иначе self.gps_lag (результат корреляции).
         """
+        if (self.gps_lag_manual
+                and self._gps_lag_manual_input is not None):
+            try:
+                _v = float(self._gps_lag_manual_input)
+                print(f"[GPS-lag-src] manual={_v:+.4f}",
+                      file=sys.stderr, flush=True)
+                return _v
+            except (ValueError, TypeError):
+                pass
         _override = self.cfg.get('gps_lag_override')
         if _override is not None:
             try:
                 _v = float(_override)
-                # DEBUG: [GPS-lag-src]
-                print(f"[GPS-lag-src] override={_v:+.4f} (raw={_override!r})",
+                print(f"[GPS-lag-src] override={_v:+.4f} "
+                      f"(raw={_override!r})",
                       file=sys.stderr, flush=True)
                 return _v
             except (ValueError, TypeError):
                 pass
         _v = float(self.gps_lag)
-        # DEBUG: [GPS-lag-src]
         print(f"[GPS-lag-src] self.gps_lag={_v:+.4f} "
               f"(override={_override!r})",
               file=sys.stderr, flush=True)
@@ -2530,6 +5143,10 @@ class AudioSpeedAnalyzer:
         return gps_frames, gps_v_sm, dt_med, lag_used
 
     def _save_window_geometry(self):
+        # v0.58.5: сохраняем "восстановленный" размер окна
+        # (win.geometry() на Windows-Tk возвращает именно его,
+        # а не maximized-размер). Следующий запуск начнётся с
+        # этого размера и сразу развернётся через state('zoomed').
         try:
             mgr = self.fig.canvas.manager
             win = mgr.window
@@ -2551,6 +5168,69 @@ class AudioSpeedAnalyzer:
                 self.cfg['win_y'] = int(g.y())
         except Exception:
             pass
+
+    def _maximize_window(self):
+        """v0.58.5: чистый state('zoomed') без изменения размеров.
+
+        Никаких set_size_inches / geometry(screen) — они
+        ПРЕПЯТСТВУЮТ развороту: WM видит окно, уже имеющее
+        размер экрана, и state('zoomed') игнорирует.
+        """
+        def _mlog(msg):
+            # [batch-fix-v2] без maximize.log — только stderr.
+            try:
+                print(msg, file=sys.stderr)
+            except Exception:
+                pass
+
+        win = None
+        try:
+            win = self.fig.canvas.manager.window
+        except Exception as e:
+            _mlog(f"[maximize] no window: {e}")
+            return
+        if win is None:
+            _mlog("[maximize] window is None")
+            return
+        _mlog(f"[maximize] window type: {type(win).__name__}")
+
+        # 1) Tk (Windows / Linux)
+        try:
+            if hasattr(win, 'state'):
+                win.state('zoomed')
+                _mlog("[maximize] state('zoomed') OK")
+                return
+        except Exception as e:
+            _mlog(f"[maximize] state('zoomed'): {e}")
+
+        # 2) Tk attributes — некоторые Linux-сборки Tk
+        try:
+            if hasattr(win, 'attributes'):
+                win.attributes('-zoomed', True)
+                _mlog("[maximize] attributes('-zoomed') OK")
+                return
+        except Exception as e:
+            _mlog(f"[maximize] attributes: {e}")
+
+        # 3) Qt
+        try:
+            if hasattr(win, 'showMaximized'):
+                win.showMaximized()
+                _mlog("[maximize] showMaximized OK")
+                return
+        except Exception as e:
+            _mlog(f"[maximize] showMaximized: {e}")
+
+        # 4) GTK
+        try:
+            if hasattr(win, 'maximize'):
+                win.maximize()
+                _mlog("[maximize] maximize OK")
+                return
+        except Exception as e:
+            _mlog(f"[maximize] maximize: {e}")
+
+        _mlog("[maximize] ALL methods failed")
 
     def _restore_window_geometry(self):
         w = self.cfg.get('win_w')
@@ -2637,9 +5317,51 @@ class AudioSpeedAnalyzer:
         try:
             gps_raw, self.gps_method = extract_gps(self.filepath)
             if gps_raw:
-                self.gps_points = gps_to_relative_time(gps_raw)
+                # v0.56.5: сначала валидация точек текущего файла
+                gps_valid, vstats = validate_gps_points(gps_raw,
+                                                         self.cfg)
+                self.gps_valid_stats = vstats
+                if vstats["dropped"] > 0:
+                    print("GPS: отброшено %d из %d точек "
+                          "(0=%d, range=%d, epoch=%d, speed=%d)" 
+                          % (vstats["dropped"], vstats["total"],
+                             vstats["reason_zero"],
+                             vstats["reason_range"],
+                             vstats["reason_epoch"],
+                             vstats["reason_speed"]),
+                          file=sys.stderr)
+                # v0.56.5: добор из соседних файлов
+                merged_epoch, ninfo = merge_gps_from_neighbors(
+                    self.filepath, self.cfg, gps_valid)
+                self.gps_neighbor_info = ninfo
+
+                # v0.58.0: шкала GPS привязана к первому epoch
+                # ТЕКУЩЕГО файла, а не к первому объединённому.
+                # Иначе при наличии соседа N-1 origin уезжает
+                # назад на длительность соседа и find_gps_lag
+                # в окне ±5с истинный лаг не находит.
+                _current_first_epoch = None
+                if gps_valid:
+                    _current_first_epoch = min(p[0] for p in gps_valid)
+                self.gps_points_full = gps_to_relative_time(
+                    merged_epoch, _current_first_epoch)
+                # Для обратной совместимости: gps_points — это
+                # то же самое (вся склейка), но без смещения
+                # (t_rel от первой точки объединённого массива).
+                # Для корреляции используется именно полный массив.
+                self.gps_points = self.gps_points_full
+
                 print(f"GPS: {len(self.gps_points)} меток "
                       f"({self.gps_method})")
+                if ninfo and (ninfo["added_prev"] or ninfo["added_next"]):
+                    print("  Сосед -1: %s, +%d точек" 
+                          % (ninfo["prev_file"] or "-",
+                             ninfo["added_prev"]),
+                          file=sys.stderr)
+                    print("  Сосед +1: %s, +%d точек" 
+                          % (ninfo["next_file"] or "-",
+                             ninfo["added_next"]),
+                          file=sys.stderr)
                 if self.gps_points:
                     first = self.gps_points[0]
                     last = self.gps_points[-1]
@@ -2651,6 +5373,8 @@ class AudioSpeedAnalyzer:
                 print("GPS: меток не найдено")
         except Exception as e:
             print(f"GPS: ошибка извлечения ({e})")
+            import traceback
+            traceback.print_exc()
             self.gps_points = []
 
         hop = max(1, int(self.sr / self.cfg['target_fps']))
@@ -2663,7 +5387,22 @@ class AudioSpeedAnalyzer:
         self._footer_text = None
         self._sys_info_printed = False
         self.build_gui()
+        # v0.58.5: сначала восстановить сохранённый размер
+        # (если есть) — чтобы окно открылось "нормального"
+        # размера, а не полноэкранного. Иначе state('zoomed')
+        # WM игнорирует: окно уже на весь экран.
         self._restore_window_geometry()
+
+        # v0.58.5: если просили старт развёрнутым — развернуть
+        # ПОСЛЕ того, как окно нарисуется. draw_idle+пауза
+        # даёт Tk замапить окно, и WM принимает 'zoomed'.
+        if self.cfg.get('start_maximized', True):
+            try:
+                self.fig.canvas.draw_idle()
+                plt.pause(0.001)
+            except Exception:
+                pass
+            self._maximize_window()
 
         if self.h5 and self.h4:
             self.calc_harmonics()
@@ -2717,6 +5456,29 @@ class AudioSpeedAnalyzer:
         self.fig.subplots_adjust(left=0.08, right=0.83,
                                  top=0.94, bottom=0.13)
 
+        # [fix2/3-v2c] Штамп диапазона в 2 частях.
+        # Сдвинуты на 10 символов влево от краёв графика.
+        # При fontsize=7 monospace 1 символ ≈ 0.004 fig-fraction,
+        # 10 символов ≈ 0.04. Края ax_spec: left=0.08, right=0.83.
+        # После сдвига: слева 0.04, справа 0.79.
+        # Для другого сдвига — крутить _shift (например 0.06 = 15 симв.).
+        _shift = 0.04       # сдвиг влево только для «конец»
+        # v2h: fs=10 (как у тиков), «начало» на x=0.02 (как статус),
+        # y=0.078 — зазор до top статуса (0.055).
+        _y = 0.078
+        self._range_start_text = self.fig.text(
+            0.02, _y, '',
+            fontsize=10, va='top', ha='left', family='monospace',
+            color='black',
+            zorder=52
+        )
+        self._range_end_text = self.fig.text(
+            0.83 - _shift, _y, '',
+            fontsize=10, va='top', ha='right', family='monospace',
+            color='black',
+            zorder=52
+        )
+
         self._draw_spectrogram()
 
         self.ax_spec.set_autoscalex_on(False)
@@ -2731,7 +5493,7 @@ class AudioSpeedAnalyzer:
 
         btn_x = 0.84
         btn_w = 0.14
-        btn_h = 0.032
+        btn_h = 0.026  # batch: место под 26 кнопок (Жалоба)
         btn_gap = 0.002
         btn_help_w = 0.025
         btn_main_w = btn_w - btn_help_w - 0.002
@@ -2756,6 +5518,10 @@ class AudioSpeedAnalyzer:
             ('Вперед', '_step_forward', False, None),
             ('Удалить поз.', '_btn_delete_pos', False, None),
             ('Применить', '_btn_apply', False, None),
+            ('Видео', '_btn_video_integrity', False, None),
+            ('Make Disk', '_btn_make_disk', False, None),
+            ('→MP4', '_btn_merge_ts', False, None),
+            ('Жалоба', '_btn_batch_complaint', False, None),
             ('Выход', '_btn_exit', False, None),
         ]
         n_btns = len(btn_labels)
@@ -2851,19 +5617,27 @@ class AudioSpeedAnalyzer:
 
         tb_y = 0.005
         tb_h = 0.022
-        tb_w = 0.04
-        tb_step = 0.09
-        tb_x = 0.10
+        tb_w = 0.036
+        tb_step = 0.064      # fix2/3: 11 полей вместо 10
+        tb_x = 0.055
         _tb_defs = [
             ('x_start', 'Xнач,с'), ('x_end', 'Xкон,с'), ('dx', 'dX,с'),
             ('y_min', 'Fmin'), ('y_max', 'Fmax'),
             ('width', 'Шир'), ('step', 'Шаг'), ('color', 'Цвет'),
             ('peak', 'Пик'),
+            ('gps_lag', 'ΔGPS,с'),   # v0.58.0: ручная коррекция
+            ('msk_corr', 'МСК,с'),   # fix2/3: коррекция MSK
         ]
         for i, (name, label) in enumerate(_tb_defs):
+            _init_val = ''
+            if name == 'gps_lag':
+                _init_val = (f"{self._gps_lag_manual_input:.3f}"
+                             if self.gps_lag_manual else '')
+            elif name == 'msk_corr':
+                _init_val = f"{float(self.cfg.get('ssa_time_correction_sec', 0.0)):+.3f}"
             tb = TextBox(
                 self.fig.add_axes([tb_x + i * tb_step, tb_y, tb_w, tb_h]),
-                label, initial=''
+                label, initial=_init_val
             )
             setattr(self, f'tb_{name}', tb)
             tb.on_submit(getattr(self, f'_on_field_{name}'))
@@ -2872,13 +5646,24 @@ class AudioSpeedAnalyzer:
             self.tb_x_start, self.tb_x_end, self.tb_dx,
             self.tb_y_min, self.tb_y_max,
             self.tb_width, self.tb_step, self.tb_color, self.tb_peak,
+            self.tb_gps_lag,
+            self.tb_msk_corr,        # fix2/3
         ]
+
+        # v0.58.0: переключатель GPS: Авто/Ручн.
+        _ax_gpsmode = self.fig.add_axes([0.745, 0.005, 0.085, 0.022])
+        self._btn_gps_mode = Button(_ax_gpsmode, 'GPS: Авто')
+        self._btn_gps_mode.label.set_fontsize(8)
+        self._btn_gps_mode.on_clicked(
+            lambda _: self._btn_gps_mode_clicked())
+        self._update_gps_mode_button()
         self._tb_focused_idx = -1
         for idx, tb in enumerate(self._tb_list):
             self._patch_textbox(tb, idx)
 
         plt.rcParams['keymap.save'] = []
         plt.rcParams['keymap.pan'] = []
+        plt.rcParams['keymap.home'] = []
 
         # v0.56.0: перехват кнопки floppy disk в тулбаре.
         # Клик по дискете вызывает нашу _toolbar_save_png(),
@@ -2895,6 +5680,9 @@ class AudioSpeedAnalyzer:
         self.fig.canvas.mpl_connect('button_press_event', self._on_click)
         self.fig.canvas.mpl_connect('motion_notify_event', self._on_motion)
         self.fig.canvas.mpl_connect('close_event', self._on_close)
+
+        # [fix2/3] первичная отрисовка надписи диапазона/MSK
+        self._update_range_msk_text()
 
     def _patch_textbox(self, tb, idx):
         orig_click = tb._click
@@ -3021,6 +5809,11 @@ class AudioSpeedAnalyzer:
         self.ax_spec.xaxis.set_major_formatter(
             plt.FuncFormatter(lambda x, _: f'{int(x)}\n{x/self._xaxis_fps:.3f}с')
         )
+        # [fix2/3-v2f] тики всегда и на краях xlim
+        try:
+            self.ax_spec.xaxis.set_major_locator(_EndpointLocator())
+        except NameError:
+            pass
 
     def _on_toggle_spec(self, _=None):
         self.spec_mode = 'power' if self.spec_mode == 'time' else 'time'
@@ -3149,9 +5942,14 @@ class AudioSpeedAnalyzer:
         self._draw_speed_extremes()
 
     def _update_speed_overlay_buttons(self):
+        # v0.57.9.2: цвета активных кнопок совпадают с цветами
+        # соответствующих кривых GPS на графике:
+        #   GPS→H5 — маджента #ff00cc -> светлая подсветка #ff99ff
+        #   GPS→H4 — голубой  #00ccff -> светлая подсветка #99eeff
+        # Кнопка «Подп.V» — без изменений (подписи 4 разных цветов).
         states = [
-            ('h5',     self.speed_overlay_h5, '#ffddaa', '#ffcc88'),
-            ('h4',     self.speed_overlay_h4, '#ffccee', '#ffaadd'),
+            ('h5',     self.speed_overlay_h5, '#ff99ff', '#ff66ff'),
+            ('h4',     self.speed_overlay_h4, '#99eeff', '#66ddff'),
             ('labels', self.speed_labels_on,  '#ffffcc', '#ffff88'),
         ]
         for which, active, on_color, on_hover in states:
@@ -3406,28 +6204,24 @@ class AudioSpeedAnalyzer:
         if x1_view < x0_view:
             x0_view, x1_view = x1_view, x0_view
 
-        def _add_label(f_x, f_y, v_val, color, is_max):
-            txt_str = f'{v_val:.1f}'
-            if is_max:
-                txt = self.ax_spec.text(
-                    f_x, f_y, txt_str,
-                    fontsize=8, color=color,
-                    ha='center', va='bottom',
-                    fontweight='bold', zorder=15
-                )
-            else:
-                txt = self.ax_spec.text(
-                    f_x, f_y, txt_str,
-                    fontsize=8, color=color,
-                    ha='center', va='top',
-                    fontweight='bold', zorder=15
-                )
-            txt.set_path_effects([
-                pe.Stroke(linewidth=2.5, foreground='black'),
-                pe.Normal()
-            ])
-            self._speed_label_objs.append(txt)
+        # v0.57.9: собираем кандидатов в буфер, потом фильтруем
+        # налезающие подписи ПО X И ПО Y одновременно — вне
+        # зависимости от цвета. Устраняет:
+        #   * "10[6.3]6.4"  (два пика одного цвета близко по X)
+        #   * маджента+голубая в одной точке (разные цвета,
+        #     но близки и по X, и по Y — на пересечении кривых).
+        candidates = []
 
+        def _queue(f_x, f_y, v_val, color, is_max):
+            candidates.append({
+                'x': float(f_x),
+                'y': float(f_y),
+                'text': f'{v_val:.1f}',
+                'color': color,
+                'is_max': bool(is_max),
+            })
+
+        # ---------- GPS-секция ----------
         if (self.speed_overlay_h5 or self.speed_overlay_h4) \
                 and self.gps_points and len(self.gps_points) >= 2 \
                 and self.h5 is not None and self.h4 is not None:
@@ -3437,7 +6231,6 @@ class AudioSpeedAnalyzer:
                 V_ref = 0.0
 
             if V_ref > 1.0:
-                # v0.55.8: единая калибровка, что и в _draw_speed_overlay.
                 k5, k4 = self._gps_k5k4()
                 if k5 <= 1e-9 or k4 <= 1e-9:
                     k5 = self.h5 / V_ref
@@ -3467,29 +6260,31 @@ class AudioSpeedAnalyzer:
                                 key=lambda i: gv_vis[i])[:20]
                             mins_idx.sort()
 
-                        label_pts = [(float(gf_vis[i]), float(gv_vis[i]),
-                                      True) for i in peaks_idx]
-                        label_pts += [(float(gf_vis[i]), float(gv_vis[i]),
-                                       False) for i in mins_idx]
+                        label_pts = [(float(gf_vis[i]),
+                                      float(gv_vis[i]), True)
+                                     for i in peaks_idx]
+                        label_pts += [(float(gf_vis[i]),
+                                       float(gv_vis[i]), False)
+                                      for i in mins_idx]
                     else:
-                        # Узкий диапазон: точек мало (0–2).
-                        # Подписываем все доступные и интерполированные.
-                        label_pts = [(float(gf_vis[i]), float(gv_vis[i]),
-                                      True) for i in range(len(gf_vis))]
+                        label_pts = [(float(gf_vis[i]),
+                                      float(gv_vis[i]), True)
+                                     for i in range(len(gf_vis))]
 
                     if self.speed_overlay_h5:
                         for f_x, v_val, is_max in label_pts:
                             if v_val < 5.0:
                                 continue
-                            _add_label(f_x, v_val * k5, v_val,
-                                       '#ff00cc', is_max)
+                            _queue(f_x, v_val * k5, v_val,
+                                   '#ff00cc', is_max)
                     if self.speed_overlay_h4:
                         for f_x, v_val, is_max in label_pts:
                             if v_val < 5.0:
                                 continue
-                            _add_label(f_x, v_val * k4, v_val,
-                                       '#00ccff', is_max)
+                            _queue(f_x, v_val * k4, v_val,
+                                   '#00ccff', is_max)
 
+        # ---------- Аудио-секция ----------
         if self.tube_t and self.tube_h5_centers and self.tube_h4_centers:
             t_arr = np.array(self.tube_t, dtype=float)
             h5_c_arr = np.array(self.tube_h5_centers, dtype=float)
@@ -3519,41 +6314,98 @@ class AudioSpeedAnalyzer:
                 v_vis = v_audio[vis2]
 
                 min_dist2 = max(1, int(round(3.0 / dt_step)))
-                peaks_idx2 = _find_peaks_simple(v_vis,
-                                                min_distance=min_dist2)
-                mins_idx2 = _find_extrema_simple(v_vis,
-                                                 min_distance=min_dist2,
-                                                 invert=True)
+                peaks_idx2 = _find_peaks_simple(
+                    v_vis, min_distance=min_dist2)
+                mins_idx2 = _find_extrema_simple(
+                    v_vis, min_distance=min_dist2, invert=True)
 
                 if len(peaks_idx2) > 20:
-                    peaks_idx2 = sorted(peaks_idx2,
-                                        key=lambda i: -v_vis[i])[:20]
+                    peaks_idx2 = sorted(
+                        peaks_idx2, key=lambda i: -v_vis[i])[:20]
                     peaks_idx2.sort()
                 if len(mins_idx2) > 20:
-                    mins_idx2 = sorted(mins_idx2,
-                                       key=lambda i: v_vis[i])[:20]
+                    mins_idx2 = sorted(
+                        mins_idx2, key=lambda i: v_vis[i])[:20]
                     mins_idx2.sort()
 
                 for idx in peaks_idx2:
                     v_val = float(v_vis[idx])
                     if v_val < 5.0:
                         continue
-                    _add_label(float(t_vis[idx]), float(h5_vis[idx]),
-                               v_val, '#ffff00', True)
-                    _add_label(float(t_vis[idx]), float(h4_vis[idx]),
-                               v_val, '#00ff00', True)
+                    _queue(float(t_vis[idx]),
+                           float(h5_vis[idx]), v_val,
+                           '#ffff00', True)
+                    _queue(float(t_vis[idx]),
+                           float(h4_vis[idx]), v_val,
+                           '#00ff00', True)
 
                 for idx in mins_idx2:
                     v_val = float(v_vis[idx])
                     if v_val < 5.0:
                         continue
-                    _add_label(float(t_vis[idx]), float(h5_vis[idx]),
-                               v_val, '#ffff00', False)
-                    _add_label(float(t_vis[idx]), float(h4_vis[idx]),
-                               v_val, '#00ff00', False)
+                    _queue(float(t_vis[idx]),
+                           float(h5_vis[idx]), v_val,
+                           '#ffff00', False)
+                    _queue(float(t_vis[idx]),
+                           float(h4_vis[idx]), v_val,
+                           '#00ff00', False)
+
+        # ---------- Фильтрация: X+Y, все цвета разом ----------
+        # Пороги подобраны по видимой ширине подписи из 5 знаков
+        # при fontsize=8 с чёрной обводкой (stroke 2.5) + запас
+        # на неровную ширину цифр и округление до кадра.
+        # Значения читаются из конфига и могут меняться без
+        # правки .py:
+        #   label_pad_x_frac  — доля видимой ширины оси X
+        #   label_pad_y_frac  — доля видимой высоты оси Y
+        # Больше -> подписей меньше, но они никогда не наезжают.
+        x_range = float(x1_view - x0_view)
+        ylims = self.ax_spec.get_ylim()
+        y_range = float(ylims[1] - ylims[0])
+        _px = float(self.cfg.get('label_pad_x_frac', 0.10))
+        _py = float(self.cfg.get('label_pad_y_frac', 0.06))
+        min_dx = (x_range * _px) if x_range > 1e-9 else 0.0
+        min_dy = (y_range * _py) if y_range > 1e-9 else 0.0
+
+        # Сортируем по X — так первыми остаются самые левые
+        # подписи, а следующие проверяются против них.
+        candidates.sort(key=lambda cc: cc['x'])
+
+        kept = []
+        for c in candidates:
+            blocked = False
+            for k in kept:
+                if abs(c['x'] - k['x']) < min_dx \
+                        and abs(c['y'] - k['y']) < min_dy:
+                    blocked = True
+                    break
+            if not blocked:
+                kept.append(c)
+
+        # ---------- Отрисовка ----------
+        for c in kept:
+            is_max = c['is_max']
+            txt = self.ax_spec.text(
+                c['x'], c['y'], c['text'],
+                fontsize=8, color=c['color'],
+                ha='center',
+                va='bottom' if is_max else 'top',
+                fontweight='bold', zorder=15
+            )
+            txt.set_path_effects([
+                pe.Stroke(linewidth=2.5, foreground='black'),
+                pe.Normal()
+            ])
+            self._speed_label_objs.append(txt)
+
+        # --- DIAG (можно удалить после проверки) ---
+        print(f"[labels] candidates={len(candidates)} "
+              f"kept={len(kept)} "
+              f"min_dx={min_dx:.1f}frames "
+              f"min_dy={min_dy:.1f}Hz",
+              file=sys.stderr, flush=True)
 
         self.fig.canvas.draw_idle()
-
     def _draw_speed_extremes(self):
         """Отмечает Vmax и Vmin в видимом диапазоне времени для каждого
         активного источника.
@@ -3561,7 +6413,13 @@ class AudioSpeedAnalyzer:
         Показываются ТОЛЬКО когда подписи пиков (speed_labels_on)
         выключены. Если включён режим «Подп.V», локальные максимумы и
         минимумы уже подписаны в _draw_speed_labels — и глобальные
-        Vmax/Vmin дублировать не нужно. Подпись — только число (%.1f).
+        Vmax/Vmin дублировать не нужно.
+
+        v0.57.9.1: буфер + фильтр X+Y, чтобы подписи разных источников
+        (например, GPS-H5 и аудио-H5), оказавшиеся рядом по времени
+        И по частоте, не налезали друг на друга. Пороги — те же
+        label_pad_x_frac / label_pad_y_frac, что и в
+        _draw_speed_labels.
         """
         for obj in getattr(self, '_extreme_objs', []):
             try:
@@ -3570,8 +6428,6 @@ class AudioSpeedAnalyzer:
                 pass
         self._extreme_objs = []
 
-        # Если включён режим подписей локальных пиков — глобальные
-        # Vmax/Vmin не рисуем: они уже покрыты подписями.
         if self.speed_labels_on:
             self.fig.canvas.draw_idle()
             return
@@ -3589,39 +6445,18 @@ class AudioSpeedAnalyzer:
         if x1_view < x0_view:
             x0_view, x1_view = x1_view, x0_view
 
-        def _add_marker(f_x, f_y, v_val, color, is_max):
-            marker, = self.ax_spec.plot(
-                [f_x], [f_y],
-                marker='D' if is_max else 'v',
-                color=color, markersize=7,
-                markeredgecolor='black', markeredgewidth=1.0,
-                linestyle='None', zorder=18,
-                clip_on=False
-            )
-            self._extreme_objs.append(marker)
-            # v0.53.6: подписи не уезжают за края окна.
-            _xr = x1_view - x0_view
-            _mg = 0.06 * _xr if _xr > 0 else 0.0
-            if f_x > x1_view - _mg:
-                _ha = 'right'
-            elif f_x < x0_view + _mg:
-                _ha = 'left'
-            else:
-                _ha = 'center'
-            txt = self.ax_spec.text(
-                f_x, f_y, f'{v_val:.1f}',
-                fontsize=8, color=color,
-                ha=_ha,
-                va='bottom' if is_max else 'top',
-                fontweight='bold', zorder=19,
-                clip_on=False
-            )
-            txt.set_path_effects([
-                pe.Stroke(linewidth=2.5, foreground='black'),
-                pe.Normal()
-            ])
-            self._extreme_objs.append(txt)
+        candidates = []
 
+        def _queue(f_x, f_y, v_val, color, is_max):
+            candidates.append({
+                'x': float(f_x),
+                'y': float(f_y),
+                'v': float(v_val),
+                'color': color,
+                'is_max': bool(is_max),
+            })
+
+        # ---------- Аудио: Vmax/Vmin на H5 и H4 -------------------
         if has_audio:
             t_arr = np.array(self.tube_t, dtype=float)
             h5_c_arr = np.array(self.tube_h5_centers, dtype=float)
@@ -3649,22 +6484,23 @@ class AudioSpeedAnalyzer:
 
                     if v_max_g >= 5.0:
                         i_max = int(np.argmax(v_vis))
-                        _add_marker(float(t_vis[i_max]),
-                                    float(h5_vis[i_max]),
-                                    v_max_g, '#ffff00', True)
-                        _add_marker(float(t_vis[i_max]),
-                                    float(h4_vis[i_max]),
-                                    v_max_g, '#00ff00', True)
+                        _queue(float(t_vis[i_max]),
+                               float(h5_vis[i_max]),
+                               v_max_g, '#ffff00', True)
+                        _queue(float(t_vis[i_max]),
+                               float(h4_vis[i_max]),
+                               v_max_g, '#00ff00', True)
 
                     if v_min_g >= 5.0:
                         i_min = int(np.argmin(v_vis))
-                        _add_marker(float(t_vis[i_min]),
-                                    float(h5_vis[i_min]),
-                                    v_min_g, '#ffff00', False)
-                        _add_marker(float(t_vis[i_min]),
-                                    float(h4_vis[i_min]),
-                                    v_min_g, '#00ff00', False)
+                        _queue(float(t_vis[i_min]),
+                               float(h5_vis[i_min]),
+                               v_min_g, '#ffff00', False)
+                        _queue(float(t_vis[i_min]),
+                               float(h4_vis[i_min]),
+                               v_min_g, '#00ff00', False)
 
+        # ---------- GPS: Vmax/Vmin на H5-кривой и H4-кривой -------
         if has_gps:
             try:
                 V_ref = self._calc_speed(self.h5, self.h4)[3]
@@ -3672,7 +6508,6 @@ class AudioSpeedAnalyzer:
                 V_ref = 0.0
 
             if V_ref > 1.0:
-                # v0.55.8: единая калибровка, что и в _draw_speed_overlay.
                 k5, k4 = self._gps_k5k4()
                 if k5 <= 1e-9 or k4 <= 1e-9:
                     k5 = self.h5 / V_ref
@@ -3681,36 +6516,2574 @@ class AudioSpeedAnalyzer:
                 gf_vis, gv_vis, _ = self._gps_view_samples(
                     x0_view, x1_view)
 
-                if gf_vis is not None and gv_vis is not None \
-                        and len(gf_vis) >= 1:
+                if gf_vis is not None and gv_vis is not None and len(gf_vis) >= 1:
                     v_max_g = float(gv_vis.max())
                     v_min_g = float(gv_vis.min())
 
                     if v_max_g >= 5.0:
                         i_max = int(np.argmax(gv_vis))
                         if self.speed_overlay_h5:
-                            _add_marker(float(gf_vis[i_max]),
-                                        v_max_g * k5, v_max_g,
-                                        '#ff00cc', True)
+                            _queue(float(gf_vis[i_max]),
+                                   v_max_g * k5, v_max_g,
+                                   '#ff00cc', True)
                         if self.speed_overlay_h4:
-                            _add_marker(float(gf_vis[i_max]),
-                                        v_max_g * k4, v_max_g,
-                                        '#00ccff', True)
+                            _queue(float(gf_vis[i_max]),
+                                   v_max_g * k4, v_max_g,
+                                   '#00ccff', True)
 
-                    # Минимум рисуем только если он отличается от
-                    # максимума — при единственной точке они совпадают.
                     if v_min_g >= 5.0 and v_min_g < v_max_g:
                         i_min = int(np.argmin(gv_vis))
                         if self.speed_overlay_h5:
-                            _add_marker(float(gf_vis[i_min]),
-                                        v_min_g * k5, v_min_g,
-                                        '#ff00cc', False)
+                            _queue(float(gf_vis[i_min]),
+                                   v_min_g * k5, v_min_g,
+                                   '#ff00cc', False)
                         if self.speed_overlay_h4:
-                            _add_marker(float(gf_vis[i_min]),
-                                        v_min_g * k4, v_min_g,
-                                        '#00ccff', False)
+                            _queue(float(gf_vis[i_min]),
+                                   v_min_g * k4, v_min_g,
+                                   '#00ccff', False)
+
+        # ---------- Фильтрация: X+Y, все цвета разом ----------
+        x_range = float(x1_view - x0_view)
+        ylims = self.ax_spec.get_ylim()
+        y_range = float(ylims[1] - ylims[0])
+        _px = float(self.cfg.get('label_pad_x_frac', 0.10))
+        _py = float(self.cfg.get('label_pad_y_frac', 0.06))
+        min_dx = (x_range * _px) if x_range > 1e-9 else 0.0
+        min_dy = (y_range * _py) if y_range > 1e-9 else 0.0
+
+        candidates.sort(key=lambda cc: cc['x'])
+
+        kept = []
+        for c in candidates:
+            blocked = False
+            for k in kept:
+                if abs(c['x'] - k['x']) < min_dx and abs(c['y'] - k['y']) < min_dy:
+                    blocked = True
+                    break
+            if not blocked:
+                kept.append(c)
+
+        for c in kept:
+            marker, = self.ax_spec.plot(
+                [c['x']], [c['y']],
+                marker='D' if c['is_max'] else 'v',
+                color=c['color'], markersize=7,
+                markeredgecolor='black', markeredgewidth=1.0,
+                linestyle='None', zorder=18,
+                clip_on=False
+            )
+            self._extreme_objs.append(marker)
+
+            _xr = x1_view - x0_view
+            _mg = 0.06 * _xr if _xr > 0 else 0.0
+            if c['x'] > x1_view - _mg:
+                _ha = 'right'
+            elif c['x'] < x0_view + _mg:
+                _ha = 'left'
+            else:
+                _ha = 'center'
+
+            txt = self.ax_spec.text(
+                c['x'], c['y'], f"{c['v']:.1f}",
+                fontsize=8, color=c['color'],
+                ha=_ha,
+                va='bottom' if c['is_max'] else 'top',
+                fontweight='bold', zorder=19,
+                clip_on=False
+            )
+            txt.set_path_effects([
+                pe.Stroke(linewidth=2.5, foreground='black'),
+                pe.Normal()
+            ])
+            self._extreme_objs.append(txt)
+
+        print(f"[extremes] candidates={len(candidates)} "
+              f"kept={len(kept)} "
+              f"min_dx={min_dx:.1f}frames "
+              f"min_dy={min_dy:.1f}Hz",
+              file=sys.stderr, flush=True)
 
         self.fig.canvas.draw_idle()
+
+    def _find_video_dir(self):
+        """v0.58.7: ищет папку Video с .ts-фрагментами.
+
+        Порядок поиска:
+          1) <папка текущего .ts>/Video (регистронезависимо);
+          2) <папка скрипта>/Video.
+        Возвращает путь к папке с хотя бы одним .TS или None.
+        """
+        try:
+            file_dir = os.path.dirname(os.path.abspath(self.filepath))
+        except Exception:
+            file_dir = None
+        try:
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+        except NameError:
+            script_dir = None
+
+        candidates = []
+        for base in (file_dir, script_dir):
+            if base and base not in candidates:
+                candidates.append(base)
+
+        # Регистронезависимые варианты имени — на случай
+        # нестандартных настроек Windows/Linux (NTFS хранит
+        # как создано, на Linux всё через isdir).
+        video_names = ('Video', 'video', 'VIDEO',
+                       'ВИДЕО', 'Видео', 'видео')
+
+        for base in candidates:
+            try:
+                entries = os.listdir(base)
+            except Exception:
+                continue
+            # Строим карту реальных имён подпапок в нижнем регистре
+            lower_to_real = {}
+            for e in entries:
+                full = os.path.join(base, e)
+                if os.path.isdir(full):
+                    lower_to_real.setdefault(e.lower(), e)
+            for want in video_names:
+                real = lower_to_real.get(want.lower())
+                if real is None:
+                    continue
+                full = os.path.join(base, real)
+                try:
+                    ts_count = sum(
+                        1 for f in os.listdir(full)
+                        if f.upper().endswith('.TS'))
+                except Exception:
+                    ts_count = 0
+                if ts_count > 0:
+                    return full
+        return None
+
+    def _btn_video_integrity(self, _=None):
+        """v0.58.6: проверка непрерывности видео.
+
+        Запускает ts_integrity_check.py (или .exe) рядом с
+        audio_speed_calc на папке текущего .ts файла. В отдельном
+        потоке, чтобы UI оставался отзывчивым.
+        """
+        if (getattr(self, '_video_check_running', False)
+                or getattr(self, '_make_disk_running', False)
+                or getattr(self, '_merge_running', False)):
+            print("Другая операция уже идёт", file=sys.stderr)
+            return
+
+        try:
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+        except NameError:
+            script_dir = os.getcwd()
+
+        script = None
+        for candidate_name in ('ts_integrity_check.py',
+                               'ts_integrity_check.exe'):
+            candidate = os.path.join(script_dir, candidate_name)
+            if os.path.isfile(candidate):
+                script = candidate
+                break
+
+        if script is None:
+            self._show_info_dialog(
+                'Скрипт ts_integrity_check не найден рядом с '
+                'audio_speed_calc.\n'
+                'Ожидалось: '
+                + os.path.join(script_dir, 'ts_integrity_check.py'),
+                title='Проверка видео',
+            )
+            return
+
+        # v0.58.7: приоритет папки Video.
+        _video_dir = self._find_video_dir()
+        if _video_dir is not None:
+            ts_dir = _video_dir
+            ts_dir_tag = ' (Video)'
+        else:
+            ts_dir = os.path.dirname(os.path.abspath(self.filepath)) or '.'
+            ts_dir_tag = ''
+        try:
+            _n_ts = sum(1 for f in os.listdir(ts_dir)
+                        if f.upper().endswith('.TS'))
+        except Exception:
+            _n_ts = 0
+
+        base = os.path.splitext(os.path.basename(self.filepath))[0]
+        # [vi] папка для отчётов «Видео» — в структуре <series>/
+        # (рядом с ssa/, txt/, gpx/). Не путать с папкой Video/,
+        # которую ищет _find_video_dir (регистронезависимо).
+        _vi_dir = os.path.join(ts_dir, 'video_integrity')
+        try:
+            os.makedirs(_vi_dir, exist_ok=True)
+        except OSError as _e_vi:
+            print(f"  [WARN] не удалось создать {_vi_dir}: {_e_vi}",
+                  file=sys.stderr)
+            _vi_dir = ts_dir  # fallback — писать рядом с .ts
+        out_path = os.path.join(
+            _vi_dir, f"{base}_video_integrity.txt")
+
+        if script.lower().endswith('.exe'):
+            cmd = [script, ts_dir]
+        else:
+            cmd = [sys.executable, script, ts_dir, '-e', 'utf-8']
+
+        print(f"\nПроверка видео: запуск {os.path.basename(script)}")
+        print(f"  Папка: {ts_dir}{ts_dir_tag}")
+        print(f"  Файлов .TS: {_n_ts}")
+        print("  Это может занять несколько минут...")
+        sys.stdout.flush()
+
+        import threading
+        import time as _time
+        result = {'stdout': '', 'stderr': '', 'rc': -1, 'done': False}
+
+        def _worker():
+            try:
+                env = os.environ.copy()
+                env['PYTHONIOENCODING'] = 'utf-8'
+                proc = subprocess.run(
+                    cmd, capture_output=True, timeout=1800,
+                    encoding='utf-8', errors='replace',
+                    env=env,
+                )
+                result['stdout'] = proc.stdout or ''
+                result['stderr'] = proc.stderr or ''
+                result['rc'] = proc.returncode
+            except subprocess.TimeoutExpired:
+                result['stderr'] = 'Timeout 30 min'
+            except Exception as e:
+                result['stderr'] = str(e)
+            finally:
+                result['done'] = True
+
+        self._video_check_running = True
+        t = threading.Thread(target=_worker, daemon=True)
+        t.start()
+
+        try:
+            while not result['done']:
+                try:
+                    self.status.set_text(
+                        'Проверка видео выполняется... '
+                        '(это может занять несколько минут)')
+                    self.fig.canvas.draw_idle()
+                    plt.pause(0.2)
+                except Exception:
+                    _time.sleep(0.2)
+        finally:
+            self._video_check_running = False
+
+        stdout = result['stdout']
+        stderr = result['stderr']
+        rc = result['rc']
+
+        try:
+            with open(out_path, 'w', encoding='utf-8') as f:
+                f.write(stdout)
+                if stderr:
+                    f.write('\n\n=== STDERR ===\n')
+                    f.write(stderr)
+            saved = True
+        except Exception as e:
+            print(f"Не удалось сохранить отчёт: {e}",
+                  file=sys.stderr)
+            saved = False
+
+        errors = 0
+        warnings = 0
+        conclusion = ''
+        for line in stdout.splitlines():
+            s = line.strip()
+            if s.startswith('Ошибок:'):
+                try:
+                    v = s.split(':')[1].split(',')[0].strip()
+                    errors = int(v)
+                except Exception:
+                    pass
+            elif s.startswith('Предупреждений:'):
+                try:
+                    v = s.split(':')[1].split(',')[0].strip()
+                    warnings = int(v)
+                except Exception:
+                    pass
+            elif ('ЗАКЛЮЧЕНИЕ:' in s or 'ИТОГ:' in s) \
+                    and not conclusion:
+                conclusion = s
+
+        self.update_status()
+
+        parts = [f"Папка: {ts_dir}{ts_dir_tag}"]
+        parts.append(f"Файлов .TS: {_n_ts}")
+        parts.append(f"Возврат: {rc}")
+        if saved:
+            parts.append(f"Отчёт: {os.path.basename(out_path)}")
+        else:
+            parts.append("Отчёт: НЕ СОХРАНЁН")
+        parts.append(f"Ошибок: {errors}")
+        parts.append(f"Предупреждений: {warnings}")
+        if conclusion:
+            parts.append('')
+            parts.append(conclusion[:500])
+        self._show_info_dialog('\n'.join(parts),
+                               title='Проверка видео')
+        print(f"Проверка видео завершена: ошибок {errors}, "
+              f"предупр. {warnings}")
+        if saved:
+            print(f"  Отчёт: {out_path}")
+
+    def _btn_merge_ts(self, _=None):
+        """v0.58.12: КАЖДЫЙ .ts -> свой .mp4 (+ .ssa). Output в mp4/."""
+        if (getattr(self, '_make_disk_running', False)
+                or getattr(self, '_video_check_running', False)
+                or getattr(self, '_merge_running', False)):
+            print("Другая операция уже идёт", file=sys.stderr)
+            return
+
+        try:
+            import tkinter as tk
+            from tkinter import filedialog
+            root = tk.Tk()
+            root.withdraw()
+            init_dir = (os.path.dirname(self.filepath)
+                        or os.getcwd())
+            folder = filedialog.askdirectory(
+                title='Папка с .ts (например 2k/ или 4k/)',
+                initialdir=init_dir)
+            try:
+                root.destroy()
+            except Exception:
+                pass
+        except Exception as e:
+            print(f"Диалог выбора папки недоступен: {e}",
+                  file=sys.stderr)
+            return
+
+        if not folder or not os.path.isdir(folder):
+            return
+
+        import importlib.util
+        helper_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            'merge_ts_ssa_v2.py')
+        if not os.path.isfile(helper_path):
+            self._show_info_dialog(
+                'merge_ts_ssa.py не найден рядом с audio_speed_calc.py:\n'
+                + helper_path, title='TS→MP4')
+            return
+        try:
+            spec = importlib.util.spec_from_file_location(
+                'merge_ts_ssa', helper_path)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+        except Exception as e:
+            self._show_info_dialog(
+                f'Не удалось загрузить merge_ts_ssa.py:\n{e}',
+                title='TS→MP4')
+            return
+
+        ts_list = mod.find_ts_list(folder)
+        if not ts_list:
+            self._show_info_dialog(
+                f'В папке {folder}\nнет .ts',
+                title='TS→MP4')
+            return
+
+        print(f"\nTS→MP4: {folder} ({len(ts_list)} .ts)")
+        for ts in ts_list:
+            ssa = mod._find_ssa_for(ts, folder)
+            print('  ' + os.path.basename(ts)
+                  + '  ssa=' + ('OK' if ssa else 'нет'))
+        sys.stdout.flush()
+
+        import threading
+        import time as _time
+        result = {'done': False, 'results': [], 'error': None}
+
+        _mp4_full_gui = bool(self.cfg.get('mp4_full', True))
+
+        def _worker():
+            try:
+                result['results'] = mod.remux_all(
+                    folder, mp4_full=_mp4_full_gui, log_cb=print)
+            except Exception as e:
+                import traceback
+                result['error'] = (str(e) + '\n'
+                                   + traceback.format_exc())
+            finally:
+                result['done'] = True
+
+        self._merge_running = True
+        t = threading.Thread(target=_worker, daemon=True)
+        t.start()
+
+        busy_obj = None
+        try:
+            busy_obj = self.fig.text(
+                0.02, 0.075, 'TS\u2192MP4...',
+                fontsize=9, va='top', ha='left', color='#cc4400',
+                bbox=dict(boxstyle='round', fc='#fff4e0',
+                          alpha=0.92, edgecolor='#cc4400', lw=1.0))
+            self.fig.canvas.draw_idle()
+        except Exception:
+            busy_obj = None
+
+        _dots = 0
+        try:
+            while not result['done']:
+                try:
+                    _dots = (_dots + 1) % 4
+                    if busy_obj is not None:
+                        busy_obj.set_text(
+                            'TS\u2192MP4' + '.' * _dots)
+                    self.fig.canvas.draw_idle()
+                    plt.pause(0.3)
+                except Exception:
+                    _time.sleep(0.3)
+        finally:
+            if busy_obj is not None:
+                try:
+                    busy_obj.remove()
+                except Exception:
+                    pass
+            self._merge_running = False
+            try:
+                self.update_status()
+                self.fig.canvas.draw_idle()
+            except Exception:
+                pass
+
+        if result['error']:
+            self._show_info_dialog(
+                'Ошибка TS→MP4:\n' + result['error'],
+                title='TS→MP4')
+            return
+
+        results = result['results']
+        ok = sum(1 for r in results if r['rc'] == 0)
+        fail = len(results) - ok
+        lines = [f'Папка: {folder}',
+                 f'Обработано: {len(results)}',
+                 f'Успешно: {ok}',
+                 f'Ошибок: {fail}',
+                 '']
+        if results and results[0].get('mp4'):
+            mp4_dir = os.path.dirname(results[0]['mp4'])
+            lines.append(f'MP4: {mp4_dir}')
+        for r in results:
+            mark = 'OK  ' if r['rc'] == 0 else 'FAIL'
+            lines.append(f'  [{mark}] {os.path.basename(r["ts"])}')
+        self._show_info_dialog('\n'.join(lines),
+                                title='TS→MP4 завершено')
+        print(f'TS→MP4 завершено: OK={ok}, FAIL={fail}')
+
+    def _show_info_dialog(self, text, title='Информация'):
+        """v0.58.6: всплывающее информационное окно."""
+        try:
+            import tkinter as tk
+            from tkinter import messagebox
+            root = tk.Tk()
+            root.withdraw()
+            try:
+                messagebox.showinfo(title, text[:4000])
+            finally:
+                try:
+                    root.destroy()
+                except Exception:
+                    pass
+        except Exception as e:
+            print(f"[{title}] {text}", file=sys.stderr)
+
+    def _compute_full_audio_speeds(self, step_sec=None):
+        """v0.58.10.5: скорость по ВСЕМУ файлу — на КАЖДЫЙ КАДР.
+
+        Возвращает [(t_sec, V_audio_kmh, V_gps_kmh_or_None), ...].
+
+        Шаг = 1/fps (один кадр). GPS-скорость — сглаженная
+        (gps_smooth_sec), с учётом _effective_lag() — берётся из
+        self._gps_shifted_arrays(). Если GPS отключена флагом
+        ssa_gps_speed_enabled=False или GPS-точек нет — v_gps=None.
+        """
+        if not self.harm_freqs or self.S_db is None or self.n_frames <= 0:
+            return []
+        if self.h5 is None or self.h4 is None:
+            return []
+
+        fps = float(self.cfg['target_fps'])
+        if fps <= 0:
+            fps = 30.0
+
+        # v0.58.10.5: шаг — один кадр, а не time_step.
+        if step_sec is None:
+            step_sec = 1.0 / fps
+        try:
+            step_sec = float(step_sec)
+        except (TypeError, ValueError):
+            step_sec = 1.0 / fps
+        if step_sec <= 0:
+            step_sec = 1.0 / fps
+
+        peak_hz = self.peak_search_hz
+        step_frames_float = step_sec * fps
+        if step_frames_float < 1.0:
+            step_frames_float = 1.0
+
+        h5_arr = np.array(self.harm_freqs)
+        h4_arr = np.array(self.harm_freqs)
+        h5_idx = int(np.argmin(np.abs(h5_arr - self.h5)))
+        h4_idx = int(np.argmin(np.abs(h4_arr - self.h4)))
+        f_lo5, f_hi5 = get_search_bounds(self.harm_freqs, self.n_harm, h5_idx)
+        f_lo4, f_hi4 = get_search_bounds(self.harm_freqs, self.n_harm, h4_idx)
+
+        # GPS — сглаженная скорость, сдвиг = _effective_lag()
+        gps_frames = None
+        gps_speeds_sm = None
+        if self.cfg.get('ssa_gps_speed_enabled', True):
+            try:
+                gf, gv, _dt, _lag = self._gps_shifted_arrays()
+                if gf is not None and gv is not None and len(gf) >= 2:
+                    gps_frames = np.asarray(gf, dtype=float)
+                    gps_speeds_sm = np.asarray(gv, dtype=float)
+            except Exception as _ge:
+                print(f"[audio_speeds] GPS-подмес не удался: {_ge}",
+                      file=sys.stderr)
+
+        def _interp_gps(frame_f):
+            if gps_frames is None:
+                return None
+            f = float(frame_f)
+            if f < gps_frames[0]:
+                return float(gps_speeds_sm[0])
+            if f > gps_frames[-1]:
+                return float(gps_speeds_sm[-1])
+            return float(np.interp(f, gps_frames, gps_speeds_sm))
+
+        f_start = 0
+        f_end = self.n_frames
+        n_steps = max(1,
+                      int(math.floor((f_end - f_start)
+                                     / step_frames_float)) + 1)
+
+        expected_h5 = self.h5
+        expected_h4 = self.h4
+        results = []
+
+        for step_i in range(n_steps):
+            fs = f_start + int(round(step_i * step_frames_float))
+            if fs >= f_end:
+                break
+            fe = min(f_start + int(round((step_i + 1) * step_frames_float)),
+                     f_end)
+
+            cur_h5 = expected_h5
+            cur_h4 = expected_h4
+            h5_centers = []
+            h4_centers = []
+            for frame_i in range(fs, fe):
+                if frame_i >= self.n_frames:
+                    break
+                col = self.S_db[:, frame_i]
+                cur_h5 = find_peak_near(self.freqs, col, cur_h5,
+                                        peak_hz, f_lo5, f_hi5)
+                cur_h4 = find_peak_near(self.freqs, col, cur_h4,
+                                        peak_hz, f_lo4, f_hi4)
+                h5_centers.append(cur_h5)
+                h4_centers.append(cur_h4)
+
+            if h5_centers:
+                expected_h5 = h5_centers[-1]
+            if h4_centers:
+                expected_h4 = h4_centers[-1]
+
+            h5_c = (sum(h5_centers) / len(h5_centers)
+                    if h5_centers else 0.0)
+            h4_c = (sum(h4_centers) / len(h4_centers)
+                    if h4_centers else 0.0)
+            try:
+                _, _, _, V_val = self._calc_speed(h5_c, h4_c)
+            except Exception:
+                V_val = 0.0
+
+            v_gps = _interp_gps(fs)
+            results.append((fs / fps, float(V_val), v_gps))
+
+        return results
+
+
+    def _parse_ssa_dt(self, ssa_path):
+        """Возвращает datetime из первого Dialogue .ssa."""
+        if not ssa_path or not os.path.isfile(ssa_path):
+            return None
+        try:
+            with open(ssa_path, 'r', encoding='utf-8',
+                      errors='replace') as f:
+                for line in f:
+                    if not line.startswith('Dialogue:'):
+                        continue
+                    m = re.search(
+                        r'Дата/'
+                        r'Время:'
+                        r'\s*(\d{4})-(\d{2})-(\d{2})\s+'
+                        r'(\d{2}):(\d{2}):(\d{2})', line)
+                    if m:
+                        return datetime.datetime(*map(int, m.groups()))
+                    break
+        except Exception:
+            return None
+        return None
+
+    def _compute_ssa_base_dt(self, ssa_candidates=None):
+        """Возвращает (datetime|None, source_tag str).
+
+        Fallback: ssa -> mtime .ts -> name .ts -> [-].
+        [ssa?] если |ssa - mtime| > ssa_msk_discrepancy_warn_sec.
+        """
+        ts_path = self.filepath
+        ts_mtime = None
+        try:
+            ts_mtime = datetime.datetime.fromtimestamp(
+                os.path.getmtime(ts_path))
+        except Exception:
+            pass
+
+        ssa_dt = None
+        if ssa_candidates:
+            for cand in ssa_candidates:
+                if cand and os.path.isfile(cand):
+                    ssa_dt = self._parse_ssa_dt(cand)
+                    if ssa_dt is not None:
+                        break
+
+        if ssa_dt is not None:
+            if ts_mtime is not None:
+                try:
+                    _warn = float(self.cfg.get(
+                        'ssa_msk_discrepancy_warn_sec', 300.0))
+                    if abs((ssa_dt - ts_mtime).total_seconds()) > _warn:
+                        return ssa_dt, '[ssa?]'
+                except Exception:
+                    pass
+            return ssa_dt, '[ssa]'
+
+        if ts_mtime is not None:
+            if ts_mtime.year < 2020 or ts_mtime.year > 2030:
+                return ts_mtime, '[mtime?]'
+            return ts_mtime, '[mtime]'
+
+        try:
+            m = re.search(r'(\d{14})', os.path.basename(ts_path))
+            if m:
+                s = m.group(1)
+                return (datetime.datetime(int(s[0:4]), int(s[4:6]),
+                                           int(s[6:8]), int(s[8:10]),
+                                           int(s[10:12]), int(s[12:14])),
+                        '[name]')
+        except Exception:
+            pass
+
+        return None, '[-]'
+
+    def _btn_make_disk(self, _=None):
+        """v0.58.9: пакетная генерация отчётов (make_disk.cmd)."""
+        if (getattr(self, '_make_disk_running', False)
+                or getattr(self, '_video_check_running', False)
+                or getattr(self, '_merge_running', False)):
+            print("Другая операция уже идёт", file=sys.stderr)
+            return
+
+        try:
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+        except NameError:
+            script_dir = os.getcwd()
+
+        ts_file = os.path.abspath(self.filepath)
+        ts_dir = os.path.dirname(ts_file)
+        base = os.path.splitext(os.path.basename(ts_file))[0]
+        ts_name = os.path.basename(ts_file)  # v0.58.9.7.1
+
+        # v0.58.9.6: расширенный поиск. Ищем в нескольких
+        # папках (script_dir, ts_dir, exe_dir) + PATH.
+        # Для otchet поддерживаем glob otchet*0x300* / otchet*
+        # — имя может быть с суффиксом версии.
+        _search_dirs = [script_dir, ts_dir]
+        if getattr(sys, 'frozen', False):
+            _search_dirs.append(
+                os.path.dirname(os.path.abspath(sys.executable)))
+        _seen_dirs = []
+        for _d in _search_dirs:
+            if _d and _d not in _seen_dirs:
+                _seen_dirs.append(_d)
+        _search_dirs = _seen_dirs
+
+        def _find_exact(names):
+            from shutil import which as _which
+            _tried = []
+            for name in names:
+                for d in _search_dirs:
+                    p = os.path.join(d, name)
+                    _tried.append(p)
+                    if os.path.isfile(p):
+                        return p, _tried
+                p = _which(name)
+                if p:
+                    _tried.append(p)
+                    return p, _tried
+            return None, _tried
+
+        def _find_glob(patterns):
+            import glob as _glob
+            _tried = []
+            for d in _search_dirs:
+                for pat in patterns:
+                    full = os.path.join(d, pat)
+                    _tried.append(full)
+                    hits = sorted(_glob.glob(full))
+                    for h in hits:
+                        if os.path.isfile(h):
+                            return h, _tried
+            return None, _tried
+
+        tool_exiftool, _ = _find_exact(
+            ['exiftool.exe', 'exiftool'])
+        tool_tsanalyze, _tsa_tried = _find_exact(
+            ['tsanalyze.exe', 'tsanalyze'])
+        tool_mediainfo, _mi_tried = _find_exact(
+            ['MediaInfo.exe', 'mediainfo'])
+
+        # otchet: сначала точные имена, потом glob.
+        tool_otchet, _ot_tried = _find_exact([
+            'otchet_0x300_для_ssa_26.py',
+            'otchet_0x300_для_ssa_26.exe',
+        ])
+        if tool_otchet is None:
+            tool_otchet, _ot_glob_tried = _find_glob([
+                'otchet_0x300*.py', 'otchet_0x300*.exe',
+                'otchet*.py', 'otchet*.exe',
+            ])
+            _ot_tried.extend(_ot_glob_tried)
+
+        if tool_tsanalyze is None:
+            _names = ', '.join(_tsa_tried)
+            print('  [SKIP] tsanalyze не найден. Искали: '
+                  + _names, file=sys.stderr)
+        if tool_mediainfo is None:
+            _names = ', '.join(_mi_tried)
+            print('  [SKIP] MediaInfo не найден. Искали: '
+                  + _names, file=sys.stderr)
+        if tool_otchet is None:
+            _names = ', '.join(_ot_tried)
+            print('  [SKIP] otchet_0x300 не найден — .ssa '
+                  'и _full.txt НЕ будут созданы.',
+                  file=sys.stderr)
+            print('         Искали: ' + _names, file=sys.stderr)
+            print('         Положите otchet_0x300_для_ssa_26.py '
+                  'в ' + script_dir + ' и повторите.',
+                  file=sys.stderr)
+
+        reports_dir = os.path.join(ts_dir, base + "_reports")
+        try:
+            os.makedirs(reports_dir, exist_ok=True)
+        except Exception as e:
+            self._show_info_dialog(
+                "Не удалось создать папку отчётов:\n"
+                + reports_dir + "\n\n" + str(e),
+                title="Make Disk")
+            return
+
+        # Формат-строка для exiftool (без cmd-эскейпинга)
+        _exiftool_c = "%d deg %d' %.2f"
+        _exiftool_d = "%Y:%m:%d %H:%M:%S"
+
+        steps = []
+
+        # 1. exiftool verbose
+        exiftool_out = os.path.join(
+            reports_dir, ts_name + '_exiftool_orig.txt')
+        # v0.58.9.5: exiftool ВСЕГДА в steps (если tool_exiftool
+        # есть), с флагом skip_if_exists. Пропуск при готовом
+        # exiftool_orig.txt выполняет _worker (GUI) и сам .cmd
+        # (см. _generate_make_disk_cmd). Проверка размера, а не
+        # только существования — пустой файл пересоздаётся.
+        if tool_exiftool:
+            steps.append({
+                'name': 'exiftool',
+                'cmd': [tool_exiftool, '-v2',
+                        '-c', _exiftool_c,
+                        '-d', _exiftool_d,
+                        '-ee3', '-G', '-t', ts_file],
+                'out': exiftool_out,
+                'skip_if_exists': True,
+            })
+        else:
+            print("  [SKIP] exiftool не найден", file=sys.stderr)
+
+        # 2. otchet_0x300 -> SSA + full.txt + console-лог
+        # v0.58.9.6: диагностика [SKIP] выше уже напечатана,
+        # если tool_otchet == None. Если найден — добавляем шаг.
+        if tool_otchet:
+            ssa_out = os.path.join(reports_dir, ts_name + ".ssa")
+            console_out = os.path.join(
+                reports_dir, ts_name + '_orig.txt')
+            if tool_otchet.lower().endswith('.exe'):
+                otchet_cmd = [tool_otchet,
+                              '-i', exiftool_out,
+                              '-o', ssa_out]
+            else:
+                otchet_cmd = [sys.executable, tool_otchet,
+                              '-i', exiftool_out,
+                              '-o', ssa_out]
+            steps.append({
+                'name': 'otchet_0x300 (SSA)',
+                'cmd': otchet_cmd,
+                'out': console_out,
+                'out_ssa': ssa_out,  # v0.58.9.8: для проверки
+            })
+            # [patch_v0.58.9.9]
+            _patch_py = os.path.join(script_dir,
+                                     'patch_otchet_tolerant.py')
+            if os.path.isfile(_patch_py):
+                steps.append({
+                    'name': 'patch_ssa',
+                    'cmd': [sys.executable, _patch_py,
+                            '--ssa', ssa_out],
+                    'out': os.path.join(reports_dir,
+                                        'patch_ssa.log'),
+                })
+
+
+        # 3. tsanalyze
+        if tool_tsanalyze:
+            steps.append({
+                'name': 'tsanalyze',
+                'cmd': [tool_tsanalyze, ts_file],
+                'out': os.path.join(reports_dir,
+                                    ts_name + '_tsanalize.txt'),
+            })
+        else:
+            print("  [SKIP] tsanalyze не найден", file=sys.stderr)
+
+        # 4. MediaInfo
+        if tool_mediainfo:
+            steps.append({
+                'name': 'MediaInfo',
+                'cmd': [tool_mediainfo, ts_file],
+                'out': os.path.join(reports_dir,
+                                    ts_name + '_MediaInfo.txt'),
+            })
+        else:
+            print("  [SKIP] MediaInfo не найден", file=sys.stderr)
+
+        # 5. GPX (нужен gpx.fmt)
+        gpx_fmt = None
+        for cand in (os.path.join(script_dir, 'gpx.fmt'),
+                     os.path.join(ts_dir, 'gpx.fmt')):
+            if os.path.isfile(cand):
+                gpx_fmt = cand
+                break
+        if tool_exiftool and gpx_fmt:
+            steps.append({
+                'name': 'GPX',
+                'cmd': [tool_exiftool, '-ee3',
+                        '-p', gpx_fmt, ts_file],
+                'out': os.path.join(reports_dir,
+                                    ts_name + '.gpx'),
+            })
+        elif tool_exiftool:
+            print("  [SKIP] GPX: нет gpx.fmt", file=sys.stderr)
+
+        if not steps:
+            self._show_info_dialog(
+                "Не найдено ни одного инструмента.\n\n"
+                "Ожидались рядом с audio_speed_calc "
+                "(или в PATH):\n"
+                "  exiftool(.exe)\n"
+                "  tsanalyze(.exe)\n"
+                "  MediaInfo(.exe)\n"
+                "  otchet_0x300_для_ssa_26.py\n"
+                "  gpx.fmt (для GPX)",
+                title="Make Disk")
+            return
+
+        # v0.58.10.2: авто-создание helper-а (первый Make Disk)
+        _frag_helper_path = os.path.join(script_dir, 'tsp_frag_calc.py')
+        try:
+            _need_update = True
+            if os.path.isfile(_frag_helper_path):
+                with open(_frag_helper_path, 'r', encoding='utf-8') as _rf:
+                    if _rf.read() == HELPER_SOURCE:
+                        _need_update = False
+            if _need_update:
+                with open(_frag_helper_path, 'w', encoding='utf-8') as _wf:
+                    _wf.write(HELPER_SOURCE)
+                print('[MAKE] helper обновлён: ' + _frag_helper_path
+                      + ' (' + str(len(HELPER_SOURCE)) + ' байт)')
+            else:
+                print('[MAKE] helper уже актуален: ' + _frag_helper_path)
+        except Exception as _he:
+            print('[MAKE] WARN: не удалось обновить helper: '
+                  + str(_he), file=sys.stderr)
+
+        _ssa_helper_path = os.path.join(script_dir, 'ssa_shift.py')
+        try:
+            _ssa_need = True
+            if os.path.isfile(_ssa_helper_path):
+                with open(_ssa_helper_path, 'r', encoding='utf-8') as _rf2:
+                    if _rf2.read() == SSA_SHIFT_HELPER_SOURCE:
+                        _ssa_need = False
+            if _ssa_need:
+                with open(_ssa_helper_path, 'w', encoding='utf-8') as _wf2:
+                    _wf2.write(SSA_SHIFT_HELPER_SOURCE)
+                print('[MAKE] ssa_shift.py обновлён: ' + _ssa_helper_path)
+        except Exception as _se:
+            print('[MAKE] WARN: не удалось создать ssa_shift.py: '
+                  + str(_se), file=sys.stderr)
+        # [patch_v0.58.9.9] автогенерация patch-helper-а
+        _patch_helper_path = os.path.join(
+            script_dir, 'patch_otchet_tolerant.py')
+        try:
+            _patch_need = True
+            if os.path.isfile(_patch_helper_path):
+                with open(_patch_helper_path, 'r',
+                          encoding='utf-8') as _rpf:
+                    if _rpf.read() == PATCH_OTCHET_HELPER_SOURCE:
+                        _patch_need = False
+            if _patch_need:
+                with open(_patch_helper_path, 'w',
+                          encoding='utf-8') as _wpf:
+                    _wpf.write(PATCH_OTCHET_HELPER_SOURCE)
+                print('[MAKE] patch_otchet_tolerant.py '
+                      'обновлён: ' + _patch_helper_path)
+        except Exception as _pe:
+            print('[MAKE] WARN: не удалось создать '
+                  'patch_otchet_tolerant.py: ' + str(_pe),
+                  file=sys.stderr)
+
+
+        # v0.58.9.3: генерируем .cmd со всеми командами Make Disk
+        # v0.58.10.3: аудио-скорости для вписывания в .ssa
+        _audio_speeds_csv = None
+        if (self.cfg.get('ssa_add_audio_speed', True)
+                and tool_otchet and self.harm_freqs):
+            print('[MAKE] Аудио-скорости для .ssa...')
+            try:
+                _speeds = self._compute_full_audio_speeds()
+                if _speeds:
+                    _audio_speeds_csv = os.path.join(
+                        reports_dir, 'audio_speeds.csv')
+                    with open(_audio_speeds_csv, 'w',
+                              encoding='utf-8') as _f:
+                        _f.write('# t_sec,V_audio_kmh,V_gps_kmh\n')
+                        for _row in _speeds:
+                            _t, _va, _vg = _row[0], _row[1], _row[2]
+                            _vg_s = (('%.4f' % _vg)
+                                     if _vg is not None else '')
+                            _f.write('%.4f,%.4f,%s\n'
+                                     % (_t, _va, _vg_s))
+                    print('[MAKE] audio_speeds.csv: %d точек'
+                          % len(_speeds))
+                else:
+                    print('[MAKE] WARN: аудио-скорости пусты',
+                          file=sys.stderr)
+            except Exception as _e:
+                print('[MAKE] WARN: аудио-скорости не посчитаны: %s'
+                      % _e, file=sys.stderr)
+                _audio_speeds_csv = None
+
+        # Автогенерация ssa_add_audio_speed.py
+        _ssa_audio_helper_path = os.path.join(
+            script_dir, 'ssa_add_audio_speed.py')
+        try:
+            _need = True
+            if os.path.isfile(_ssa_audio_helper_path):
+                with open(_ssa_audio_helper_path, 'r',
+                          encoding='utf-8') as _rf:
+                    if _rf.read() == SSA_ADD_AUDIO_SPEED_SOURCE:
+                        _need = False
+            if _need:
+                with open(_ssa_audio_helper_path, 'w',
+                          encoding='utf-8') as _wf:
+                    _wf.write(SSA_ADD_AUDIO_SPEED_SOURCE)
+                print('[MAKE] ssa_add_audio_speed.py обновлён: '
+                      + _ssa_audio_helper_path)
+        except Exception as _ae:
+            print('[MAKE] WARN: ssa_add_audio_speed.py: '
+                  + str(_ae), file=sys.stderr)
+
+        # [fix11.1] Автогенерация ssa_frame_time.py.
+        # В v0.58.13 SSA_FRAME_TIME_SOURCE определён, но
+        # _btn_make_disk не записывал его на диск, тогда как
+        # _generate_make_disk_cmd ссылается на
+        # %SSA_FRAME_TIME_HELPER% = <dir>/ssa_frame_time.py.
+        # Если файла нет — .cmd падает с Errno 2.
+        _ssa_ft_helper_path = os.path.join(
+            script_dir, 'ssa_frame_time.py')
+        try:
+            _ft_need = True
+            if os.path.isfile(_ssa_ft_helper_path):
+                with open(_ssa_ft_helper_path, 'r',
+                          encoding='utf-8') as _rft:
+                    if _rft.read() == SSA_FRAME_TIME_SOURCE:
+                        _ft_need = False
+            if _ft_need:
+                with open(_ssa_ft_helper_path, 'w',
+                          encoding='utf-8') as _wft:
+                    _wft.write(SSA_FRAME_TIME_SOURCE)
+                print('[MAKE] ssa_frame_time.py обновлён: '
+                      + _ssa_ft_helper_path)
+            else:
+                print('[MAKE] ssa_frame_time.py актуален')
+        except Exception as _fte:
+            print('[MAKE] WARN: не удалось создать '
+                  'ssa_frame_time.py: ' + str(_fte),
+                  file=sys.stderr)
+
+        # [py-GUI] Интеграция make_disk_py.py (v0.58.13-py-GUI)
+        # Если make_disk_py.py рядом с audio_speed_calc.py —
+        # используем его вместо .cmd-пайплайна. Иначе fallback.
+        try:
+            import sys as _sys_gui
+            try:
+                _script_dir_gui = os.path.dirname(
+                    os.path.abspath(__file__))
+            except NameError:
+                _script_dir_gui = script_dir
+            if _script_dir_gui not in _sys_gui.path:
+                _sys_gui.path.insert(0, _script_dir_gui)
+            from make_disk_py import make_disk_run as _mdp_run
+            _mdp_available = True
+            print('[py-GUI] make_disk_py найден — используем его')
+        except Exception as _e_mdp:
+            _mdp_run = None
+            _mdp_available = False
+            print('[py-GUI] make_disk_py недоступен: '
+                  + str(_e_mdp) + ' — fallback на .cmd',
+                  file=sys.stderr)
+
+        if _mdp_available:
+            import threading as _thr_mdp
+            import time as _time_mdp
+            # синхронизируем analyze_start/analyze_dur в cfg
+            self.cfg['analyze_start'] = int(self.analyze_start)
+            self.cfg['analyze_dur'] = int(self.analyze_dur)
+            self._make_disk_running = True
+            _res = {'rcs': [], 'done': False}
+
+            def _mdp_worker():
+                try:
+                    _r = _mdp_run(ts_file, self.cfg,
+                                  script_dir=script_dir)
+                    _res['rcs'] = _r or []
+                except Exception as _e_w:
+                    import traceback
+                    print('[make_disk_py] exception: '
+                          + str(_e_w), file=sys.stderr)
+                    traceback.print_exc()
+                    _res['rcs'] = [('make_disk_py exception', 1)]
+                finally:
+                    _res['done'] = True
+
+            _t = _thr_mdp.Thread(target=_mdp_worker, daemon=True)
+            _t.start()
+
+            _busy = None
+            try:
+                # fix-busy-overlap: busy -> y=0.115
+                # (выше штампов MSK на y=0.078, ниже ax_spec bottom=0.13)
+                _busy = self.fig.text(
+                    0.02, 0.115, 'Make Disk выполняется...',
+                    fontsize=9, va='top', ha='left', color='#cc4400',
+                    bbox=dict(boxstyle='round', fc='#fff4e0',
+                              alpha=0.92, edgecolor='#cc4400', lw=1.0))
+                self.fig.canvas.draw_idle()
+            except Exception:
+                _busy = None
+
+            _dots = 0
+            try:
+                while not _res['done']:
+                    try:
+                        _dots = (_dots + 1) % 4
+                        if _busy is not None:
+                            _busy.set_text(
+                                'Make Disk выполняется' + '.' * _dots)
+                        self.fig.canvas.draw_idle()
+                        plt.pause(0.3)
+                    except Exception:
+                        _time_mdp.sleep(0.3)
+            finally:
+                if _busy is not None:
+                    try:
+                        _busy.remove()
+                    except Exception:
+                        pass
+                self._make_disk_running = False
+                try:
+                    self.update_status()
+                except Exception:
+                    pass
+                try:
+                    self.fig.canvas.draw_idle()
+                except Exception:
+                    pass
+
+            self._show_make_disk_summary(_res['rcs'], reports_dir)
+            return
+        # --- Конец интеграции make_disk_py ---
+
+        _cmd_path = self._generate_make_disk_cmd(
+            tool_exiftool, tool_otchet, tool_tsanalyze,
+            tool_mediainfo, gpx_fmt, ts_file,
+            reports_dir, base,
+            audio_speeds_csv=_audio_speeds_csv)
+
+        print("\nMake Disk: " + str(len(steps)) + " шагов")
+        print("  Файл:   " + os.path.basename(ts_file))
+        print("  Отчёты: " + reports_dir)
+        for i, st in enumerate(steps, 1):
+            print("    " + str(i) + ". " + st['name'])
+        sys.stdout.flush()
+
+        # ================================================================
+        # v0.58.10.1 (TEMP / DEBUG)
+        # ================================================================
+        # Встроенный _worker ВРЕМЕННО ОТКЛЮЧЁН.
+        # Вместо него — синхронный запуск сгенерированного .cmd
+        # в ТЕКУЩЕЙ консоли.
+        #
+        # ВАЖНО: из .cmd удаляется строка `pause`.
+        #   Без этого subprocess.call() «висит» в GUI-контексте
+        #   (нет stdin / нет живого терминала, чтобы нажать клавишу).
+        #   Сам .cmd при обычном запуске руками (двойной клик из
+        #   проводника) — как и раньше, имеет pause в конце.
+        #   Здесь, для temp-режима, мы его вырезаем ПОСЛЕ генерации
+        #   и ПЕРЕД запуском.
+        #
+        # Вернуть встроенный _worker: восстановить файл из .bak_*.
+        #
+        # ПРИМЕЧАНИЕ ПРО КОДИРОВКУ:
+        #   .cmd содержит `chcp 866`, после его выполнения консоль
+        #   остаётся в CP866. Python выводит в UTF-8
+        #   (reconfigure(encoding='utf-8')), поэтому ПОСЛЕ .cmd
+        #   кириллица может отображаться некорректно до
+        #   `chcp 65001` или перезапуска терминала.
+        # ================================================================
+        if _cmd_path and os.path.isfile(_cmd_path):
+            # --- вырезаем `pause` из .cmd ---------------------------
+            try:
+                with open(_cmd_path, 'rb') as _f:
+                    _raw = _f.read()
+                _lines_b = _raw.split(b'\r\n')
+                _kept = [ln for ln in _lines_b
+                         if ln.strip().lower() != b'pause']
+                _raw2 = b'\r\n'.join(_kept)
+                if _raw2 != _raw:
+                    with open(_cmd_path, 'wb') as _f:
+                        _f.write(_raw2)
+                    print("[ВРЕМЕННО] Из .cmd удалена строка `pause`.")
+            except Exception as _e:
+                print("[ВРЕМЕННО] Не удалось убрать `pause`: "
+                      + str(_e))
+
+            print("\n[ВРЕМЕННО] Запуск .cmd (встроенный _worker отключён)")
+            print("  .cmd: " + _cmd_path)
+            print("  Ожидание завершения .cmd...")
+            sys.stdout.flush()
+            _rc = -1
+            try:
+                _env = os.environ.copy()
+                _env['PYTHONIOENCODING'] = 'utf-8'
+                _env['PYTHONUNBUFFERED'] = '1'
+                _env['PYTHONUTF8'] = '1'
+                _rc = subprocess.call(
+                    ['cmd', '/c', _cmd_path],
+                    cwd=os.path.dirname(_cmd_path) or ts_dir,
+                    env=_env,
+                )
+            except Exception as _e:
+                print("Ошибка запуска .cmd: " + str(_e))
+            print("\n[ВРЕМЕННО] .cmd завершён, rc=" + str(_rc))
+            if os.path.isdir(reports_dir):
+                print("  Файлы в " + reports_dir + ":")
+                try:
+                    _files = sorted(os.listdir(reports_dir))
+                except Exception:
+                    _files = []
+                if not _files:
+                    print("    (пусто)")
+                for _fn in _files:
+                    _full = os.path.join(reports_dir, _fn)
+                    if os.path.isfile(_full):
+                        try:
+                            _sz = os.path.getsize(_full)
+                        except Exception:
+                            _sz = 0
+                        print("    " + _fn + " (" + str(_sz) + " байт)")
+            else:
+                print("  Папка отчётов не найдена: " + reports_dir)
+            sys.stdout.flush()
+            self._show_info_dialog(
+                "ВРЕМЕННЫЙ РЕЖИМ: встроенный _worker отключён.\n"
+                "`pause` из .cmd удалён, .cmd выполнен в консоли.\n\n"
+                "rc = " + str(_rc) + "\n\n"
+                ".cmd: " + _cmd_path + "\n"
+                "Отчёты: " + reports_dir,
+                title='Make Disk (TEMP: .cmd)')
+            return
+        # ================================================================
+        # Конец блока v0.58.10.1 (TEMP / DEBUG)
+        # ================================================================
+        # Если _cmd_path по какой-то причине не создан — сюда
+        # проваливаемся и работает старый _worker (страховка).
+        # --- Запуск в фоновом потоке с tee в консоль и файл ---
+        import threading
+        import time as _time
+
+        self._make_disk_running = True
+        result = {'rcs': [], 'done': False}
+
+        def _worker():
+            log_path = os.path.join(reports_dir, 'make_disk.log')
+            try:
+                log_f = open(log_path, 'w', encoding='utf-8')
+            except Exception:
+                log_f = None
+
+            def _emit(text):
+                try:
+                    sys.stdout.write(text)
+                    sys.stdout.flush()
+                except Exception:
+                    pass
+                if log_f is not None:
+                    try:
+                        log_f.write(text)
+                        log_f.flush()
+                    except Exception:
+                        pass
+
+            try:
+                env = os.environ.copy()
+                env['PYTHONIOENCODING'] = 'utf-8'
+                env['PYTHONUNBUFFERED'] = '1'
+                env['PYTHONUTF8'] = '1'
+                for i, step in enumerate(steps, 1):
+                    _emit("\n=== [" + str(i) + "/"
+                          + str(len(steps)) + "] "
+                          + step['name'] + " ===\n")
+                    rc = -1
+
+                    # v0.58.9.5: skip_if_exists — не пересоздавать
+                    # существующий непустой файл. Недописанный/пустой
+                    # пересоздаётся (размер 0).
+                    _skip_out = step.get('out')
+                    if (step.get('skip_if_exists') and _skip_out
+                            and os.path.isfile(_skip_out)
+                            and os.path.getsize(_skip_out) > 0):
+                        _emit("  [SKIP] файл уже есть: "
+                              + os.path.basename(_skip_out)
+                              + " (" + str(os.path.getsize(_skip_out))
+                              + " байт)\n")
+                        result['rcs'].append((step['name'], 0))
+                        _emit("[OK] " + step['name']
+                              + " (rc=0, skipped)\n")
+                        continue
+
+                    try:
+                        # v0.58.9.2: stderr ОТДЕЛЬНО от stdout.
+                        # Раньше stderr=subprocess.STDOUT мешал
+                        # предупреждения exiftool ("Warning:
+                        # FileName encoding must be specified...")
+                        # в середину генерируемого track.gpx —
+                        # файл ломался и не открывался в
+                        # Google Earth/QGIS.
+                        # v0.58.9.4: bufsize=0 (unbuffered)
+                        # вместо bufsize=1 (line buffering).
+                        # line buffering не поддерживается в
+                        # binary mode (PIPE -> bytes), Python 3.8
+                        # выдавал RuntimeWarning. bufsize=0
+                        # работает без предупреждений, читаем
+                        # два pipe в двух потоках без буферизации.
+                        proc = subprocess.Popen(
+                            step['cmd'],
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                            env=env,
+                            bufsize=0,
+                        )
+
+                        def _drain_out(_proc=proc,
+                                       _out=step['out'],
+                                       _emit=_emit):
+                            try:
+                                with open(_out, 'w',
+                                          encoding='utf-8') as fout:
+                                    for raw in _proc.stdout:
+                                        text = raw.decode(
+                                            'utf-8',
+                                            errors='replace')
+                                        _emit(text)
+                                        try:
+                                            fout.write(text)
+                                            fout.flush()
+                                        except Exception:
+                                            pass
+                            except Exception as e:
+                                _emit('\n[stdout] ERROR: '
+                                      + str(e) + '\n')
+
+                        def _drain_err(_proc=proc,
+                                       _emit=_emit):
+                            try:
+                                for raw in _proc.stderr:
+                                    text = raw.decode(
+                                        'utf-8',
+                                        errors='replace')
+                                    _emit('[stderr] ' + text)
+                            except Exception:
+                                pass
+
+                        import threading as _thr
+                        t_out = _thr.Thread(
+                            target=_drain_out, daemon=True)
+                        t_err = _thr.Thread(
+                            target=_drain_err, daemon=True)
+                        t_out.start()
+                        t_err.start()
+                        t_out.join()
+                        t_err.join()
+                        rc = proc.wait()
+                    except Exception as e:
+                        _emit("\nERROR: " + str(e) + "\n")
+                        rc = -1
+                    # v0.58.9.8: для otchet проверяем, что .ssa
+                    # реально создан. otchet может вернуть rc=0,
+                    # ничего не создав (sys.exit(1) в нём не было
+                    # до фикса v-tol).
+                    if (rc == 0
+                            and step.get('name', '').startswith(
+                                'otchet_0x300')):
+                        _ssa = step.get('out_ssa')
+                        if not _ssa:
+                            # fallback: попробуем найти .ssa рядом
+                            _ssa = None
+                        if _ssa:
+                            _ssa_ok = (os.path.isfile(_ssa)
+                                       and os.path.getsize(_ssa) > 0)
+                            if not _ssa_ok:
+                                _emit("  [FAIL] .ssa не создан: "
+                                      + os.path.basename(_ssa) + "\n")
+                                rc = 1
+                            else:
+                                _emit("  .ssa: "
+                                      + os.path.basename(_ssa)
+                                      + " (" + str(os.path.getsize(_ssa))
+                                      + " байт)\n")
+
+                    result['rcs'].append((step['name'], rc))
+                    status = 'OK' if rc == 0 else 'FAIL'
+                    _emit("[" + status + "] " + step['name']
+                          + " (rc=" + str(rc) + ")\n")
+            finally:
+                if log_f is not None:
+                    try:
+                        log_f.close()
+                    except Exception:
+                        pass
+                result['done'] = True
+
+        t = threading.Thread(target=_worker, daemon=True)
+        t.start()
+
+        # v0.58.9.5: индикатор «Make Disk выполняется…» —
+        # отдельной строкой ВЫШЕ статуса. Существующий
+        # self.status НЕ перезаписывается: там может быть
+        # информация длиннее самой надписи, и терять её
+        # на время работы нельзя.
+        busy_obj = None
+        try:
+            busy_obj = self.fig.text(
+                0.02, 0.075,
+                'Make Disk выполняется...',
+                fontsize=9, va='top', ha='left',
+                color='#cc4400',
+                bbox=dict(boxstyle='round',
+                          fc='#fff4e0', alpha=0.92,
+                          edgecolor='#cc4400', lw=1.0)
+            )
+            self.fig.canvas.draw_idle()
+        except Exception:
+            busy_obj = None
+
+        _dots = 0
+        try:
+            while not result['done']:
+                try:
+                    _dots = (_dots + 1) % 4
+                    if busy_obj is not None:
+                        busy_obj.set_text(
+                            'Make Disk выполняется'
+                            + '.' * _dots)
+                    self.fig.canvas.draw_idle()
+                    plt.pause(0.3)
+                except Exception:
+                    _time.sleep(0.3)
+        finally:
+            if busy_obj is not None:
+                try:
+                    busy_obj.remove()
+                except Exception:
+                    pass
+            self._make_disk_running = False
+            try:
+                self.update_status()
+            except Exception:
+                pass
+            try:
+                self.fig.canvas.draw_idle()
+            except Exception:
+                pass
+
+        self._show_make_disk_summary(result['rcs'], reports_dir)
+
+    def _show_make_disk_summary(self, rcs, reports_dir):
+        """v0.58.9: финальный диалог Make Disk."""
+        lines = ['Отчёты: ' + os.path.basename(reports_dir)]
+        if rcs:
+            lines.append('')
+            for name, rc in rcs:
+                mark = 'OK  ' if rc == 0 else 'FAIL'
+                lines.append('  [' + mark + '] ' + name
+                             + ' (rc=' + str(rc) + ')')
+        else:
+            lines.append('')
+            lines.append('  (нет данных о шагах)')
+        try:
+            files = sorted(
+                f for f in os.listdir(reports_dir)
+                if not f.startswith('.'))
+            if files:
+                lines.append('')
+                lines.append('Файлы:')
+                for fn in files:
+                    try:
+                        sz = os.path.getsize(
+                            os.path.join(reports_dir, fn))
+                        lines.append('  ' + fn
+                                     + ' (' + str(sz) + ' байт)')
+                    except Exception:
+                        lines.append('  ' + fn)
+        except Exception:
+            pass
+        self._show_info_dialog('\n'.join(lines),
+                                title='Make Disk завершён')
+        print('\nMake Disk завершён. Отчёты: ' + reports_dir)
+
+    def _compute_fragment_info(self, ts_file):
+        """v0.58.10.2: вычисляет параметры нарезки фрагмента.
+
+        Возвращает dict:
+          enabled, reason_disabled,
+          fps_cfg, fps_used, fps_source, has_b_frames,
+          t_start_req, t_end_req, t_start_eff,
+          frame_start_eff, frame_end_final, actual_dur,
+          fragment_filename, plan, next_idr_pkt,
+          log_lines (list[str]).
+        """
+        info = {
+            'enabled': False,
+            'reason_disabled': None,
+            'fps_cfg': float(self.cfg.get('target_fps', 30.0)),
+            'fps_used': None,
+            'fps_source': None,
+            'has_b_frames': 0,
+            't_start_req': 0.0,
+            't_end_req': 0.0,
+            't_start_eff': 0.0,
+            'frame_start_eff': 0,
+            'frame_end_final': 0,
+            'actual_dur': 0.0,
+            'fragment_filename': None,
+            'plan': 'Z',
+            'next_idr_pkt': None,
+            'log_lines': [],
+        }
+        log = info['log_lines']
+
+        if self.analyze_dur <= 0:
+            info['reason_disabled'] = 'empty selection (analyze_dur=0)'
+            log.append('[FRAG] skipped: ' + info['reason_disabled'])
+            return info
+
+        fps_cfg = info['fps_cfg']
+        if fps_cfg <= 0:
+            fps_cfg = 30.0
+            info['fps_cfg'] = fps_cfg
+        t_start_req = float(self.analyze_start) / fps_cfg
+        t_end_req = (self.analyze_start + self.analyze_dur) / fps_cfg
+        info['t_start_req'] = t_start_req
+        info['t_end_req'] = t_end_req
+        log.append('[FRAG] requested: %.3f-%.3fs (dur=%.3fs)'
+                   % (t_start_req, t_end_req,
+                      t_end_req - t_start_req))
+        if t_end_req <= t_start_req:
+            info['reason_disabled'] = (
+                'invalid range (t_end=%.3f <= t_start=%.3f)'
+                % (t_end_req, t_start_req))
+            log.append('[FRAG] skipped: ' + info['reason_disabled'])
+            return info
+
+        ffprobe = _find_exec('ffprobe')
+        if ffprobe:
+            try:
+                r = subprocess.run(
+                    [ffprobe, '-v', 'error',
+                     '-select_streams', 'v:0',
+                     '-show_entries',
+                     'stream=avg_frame_rate,r_frame_rate,has_b_frames',
+                     '-of', 'default=noprint_wrappers=1',
+                     ts_file],
+                    capture_output=True, text=True, timeout=30,
+                    encoding='utf-8', errors='replace',
+                )
+                data = {}
+                for line in r.stdout.strip().splitlines():
+                    if '=' in line:
+                        k, v = line.split('=', 1)
+                        data[k.strip()] = v.strip()
+
+                def _fr(s):
+                    try:
+                        a, b = s.split('/')
+                        a, b = float(a), float(b)
+                        return (a / b) if b > 0 else None
+                    except Exception:
+                        return None
+
+                avg = _fr(data.get('avg_frame_rate', ''))
+                rfr = _fr(data.get('r_frame_rate', ''))
+                try:
+                    has_b = int(data.get('has_b_frames', '0') or '0')
+                except Exception:
+                    has_b = 0
+                info['has_b_frames'] = has_b
+                log.append('[FRAG] ffprobe: avg=%s r=%s has_b_frames=%d'
+                           % (avg, rfr, has_b))
+                if avg and avg > 0:
+                    info['fps_used'] = avg
+                    info['fps_source'] = 'ffprobe/avg_frame_rate'
+                elif rfr and rfr > 0:
+                    info['fps_used'] = rfr
+                    info['fps_source'] = 'ffprobe/r_frame_rate'
+                else:
+                    info['fps_used'] = fps_cfg
+                    info['fps_source'] = 'FALLBACK/target_fps'
+                log.append('[FRAG] fps_target=%.3f fps_real=%.3f '
+                           'fps_used=%.3f source=%s'
+                           % (fps_cfg, info['fps_used'],
+                              info['fps_used'], info['fps_source']))
+                delta = abs(info['fps_used'] - fps_cfg)
+                if delta > 0.5:
+                    log.append('[FRAG] WARN: |fps_used - fps_target| '
+                               '= %.3f > 0.5 (нарезка по fps_real)'
+                               % delta)
+            except Exception as e:
+                info['fps_used'] = fps_cfg
+                info['fps_source'] = ('FALLBACK/target_fps (ffprobe err: %s)'
+                                      % e)
+                log.append('[FRAG] WARN: ffprobe error: %s' % e)
+        else:
+            info['fps_used'] = fps_cfg
+            info['fps_source'] = 'FALLBACK/target_fps (ffprobe not found)'
+            log.append('[FRAG] WARN: ffprobe не найден')
+
+        fps_used = info['fps_used']
+        if not fps_used or fps_used <= 0:
+            info['reason_disabled'] = 'invalid fps (fps_used=0)'
+            log.append('[FRAG] skipped: ' + info['reason_disabled'])
+            return info
+
+        # IDR-snap backward
+        max_snap = 3.0
+        idr_found = None
+        if ffprobe:
+            try:
+                t_lo = max(0.0, t_start_req - max_snap)
+                t_hi = t_start_req + 0.05
+                r = subprocess.run(
+                    [ffprobe, '-v', 'error',
+                     '-select_streams', 'v:0',
+                     '-skip_frame', 'nokey',
+                     '-show_entries',
+                     'frame=pkt_pts_time,pts_time,pos',
+                     '-of', 'default=noprint_wrappers=1',
+                     '-read_intervals', '%.3f%%%.3f' % (t_lo, t_hi),
+                     ts_file],
+                    capture_output=True, text=True, timeout=60,
+                    encoding='utf-8', errors='replace',
+                )
+                keys = []
+                cur = {}
+                for line in r.stdout.splitlines():
+                    if '=' not in line:
+                        if cur:
+                            keys.append(cur)
+                            cur = {}
+                        continue
+                    k, v = line.split('=', 1)
+                    cur[k.strip()] = v.strip()
+                if cur:
+                    keys.append(cur)
+                cand = []
+                for kd in keys:
+                    pt = None
+                    for name in ('pkt_pts_time', 'pts_time'):
+                        if name in kd:
+                            try:
+                                pt = float(kd[name])
+                                break
+                            except Exception:
+                                pass
+                    if pt is None:
+                        continue
+                    cand.append(pt)
+                if cand:
+                    le = [t for t in cand if t <= t_start_req + 1e-6]
+                    if le:
+                        idr_found = max(le)
+            except Exception as e:
+                log.append('[FRAG] WARN: ffprobe IDR scan error: %s' % e)
+
+        if idr_found is not None:
+            if (t_start_req - idr_found) <= max_snap:
+                t_start_eff = idr_found
+                log.append('[FRAG] snap: t_start %.3f -> %.3fs '
+                           '(IDR, %+.3fs)'
+                           % (t_start_req, t_start_eff,
+                              t_start_eff - t_start_req))
+            else:
+                info['reason_disabled'] = (
+                    'IDR too far (nearest %.3fs, snap %.3fs > %.1fs)'
+                    % (idr_found, t_start_req - idr_found, max_snap))
+                log.append('[FRAG] skipped: ' + info['reason_disabled'])
+                return info
+        else:
+            t_start_eff = t_start_req
+            log.append('[FRAG] snap: no IDR found — use t_start as-is')
+
+        info['t_start_eff'] = t_start_eff
+        frame_start_eff = int(math.floor(t_start_eff * fps_used)) + 2
+        if frame_start_eff < 1:
+            frame_start_eff = 1
+        frame_end_final = int(math.ceil(t_end_req * fps_used)) + 1
+        if frame_end_final < frame_start_eff:
+            frame_end_final = frame_start_eff
+
+        # План X при B-кадрах
+        plan = 'Z'
+        next_idr_pkt = None
+        if info['has_b_frames'] > 0 and ffprobe:
+            plan = 'X'
+            try:
+                r = subprocess.run(
+                    [ffprobe, '-v', 'error',
+                     '-select_streams', 'v:0',
+                     '-skip_frame', 'nokey',
+                     '-show_entries',
+                     'frame=pkt_pts_time,pts_time,pos',
+                     '-of', 'default=noprint_wrappers=1',
+                     '-read_intervals',
+                     '%.3f%%%.3f' % (t_end_req, t_end_req + 2.0),
+                     ts_file],
+                    capture_output=True, text=True, timeout=60,
+                    encoding='utf-8', errors='replace',
+                )
+                keys_after = []
+                cur = {}
+                for line in r.stdout.splitlines():
+                    if '=' not in line:
+                        if cur:
+                            keys_after.append(cur)
+                            cur = {}
+                        continue
+                    k, v = line.split('=', 1)
+                    cur[k.strip()] = v.strip()
+                if cur:
+                    keys_after.append(cur)
+                best = None
+                for kd in keys_after:
+                    pt = None
+                    for name in ('pkt_pts_time', 'pts_time'):
+                        if name in kd:
+                            try:
+                                pt = float(kd[name])
+                                break
+                            except Exception:
+                                pass
+                    if pt is None or pt <= t_end_req:
+                        continue
+                    if 'pos' not in kd:
+                        continue
+                    try:
+                        ppos = int(kd['pos'])
+                    except Exception:
+                        continue
+                    if best is None or pt < best[0]:
+                        best = (pt, ppos)
+                if best is not None:
+                    next_idr_pkt = int(best[1] // 188)
+                    frame_end_final = max(
+                        frame_start_eff,
+                        int(math.floor(best[0] * fps_used)))
+                    log.append('[FRAG] plan=X: next_IDR t=%.3fs '
+                               'pkt=%d -> end_pkt=%d '
+                               'frame_end_final=%d'
+                               % (best[0], next_idr_pkt,
+                                  next_idr_pkt - 1, frame_end_final))
+                else:
+                    log.append('[FRAG] plan=X: next IDR не найден; '
+                               'end_pkt = последний пакет файла')
+            except Exception as e:
+                log.append('[FRAG] WARN: ffprobe next-IDR error: %s' % e)
+        elif info['has_b_frames'] == 0:
+            log.append('[FRAG] plan=Z (no B-frames)')
+
+        actual_dur = (frame_end_final - frame_start_eff + 1) / fps_used
+        ts_base = os.path.splitext(os.path.basename(ts_file))[0]
+        info['fragment_filename'] = ('%s_%.3fs.TS'
+                                     % (ts_base, actual_dur))
+        info['frame_start_eff'] = frame_start_eff
+        info['frame_end_final'] = frame_end_final
+        info['actual_dur'] = actual_dur
+        _corr = float(self.cfg.get('ssa_shift_correction_sec', -1.0))
+        info['snap_abs'] = float(t_start_req - t_start_eff) + _corr
+        info['plan'] = plan
+        info['next_idr_pkt'] = next_idr_pkt
+        info['enabled'] = True
+
+        log.append('[FRAG] frames: frame_start_eff=%d frame_end_final=%d '
+                   '(%d кадров)'
+                   % (frame_start_eff, frame_end_final,
+                      frame_end_final - frame_start_eff + 1))
+        log.append('[FRAG] actual: dur=%.3fs -> filename=%s'
+                   % (actual_dur, info['fragment_filename']))
+        return info
+
+
+    def _generate_make_disk_cmd(self, tool_exiftool, tool_otchet,
+                                 tool_tsanalyze, tool_mediainfo,
+                                 gpx_fmt, ts_file, reports_dir, base,
+                                 audio_speeds_csv=None):
+        """v0.58.10.2 [frag]: .cmd с полным .TS и фрагментом.
+
+        Порядок (вариант A):
+          [1] exiftool (full)
+          [2] otchet  (full)         — из него _full.txt
+          [3] fragment_calc (helper) — считает start_pkt/end_pkt
+          [4] tsp -i a-b             — <ts>_<X.XXX>s.TS
+          [5] tsanalyze (full)
+          [6] MediaInfo (full)
+          [7] gpx (full)
+          [8] exiftool  [frag]   [SKIP если tsp провалился]
+          [9] otchet    [frag]
+          [10] tsanalyze [frag]
+          [11] MediaInfo [frag]
+          [12] gpx       [frag]
+        """
+        ts_name = os.path.basename(ts_file)
+        if ts_name.upper().endswith('A.TS'):
+            series = '4k'
+        else:
+            series = '2k'
+
+        ts_dir = os.path.dirname(os.path.abspath(ts_file))
+        cmd_path = os.path.join(ts_dir, "make_disk_" + base + ".cmd")
+
+        # --- Старые артефакты ---
+        _old_cmd = os.path.join(reports_dir, "make_disk_" + base + ".cmd")
+        if (os.path.isfile(_old_cmd)
+                and os.path.abspath(_old_cmd) != os.path.abspath(cmd_path)):
+            try:
+                os.remove(_old_cmd)
+            except Exception:
+                pass
+        for _old in ('track.kml', '_gpx_to_kml.fmt'):
+            _p = os.path.join(reports_dir, _old)
+            if os.path.isfile(_p):
+                try:
+                    os.remove(_p)
+                except Exception:
+                    pass
+
+        # --- gpx.fmt рядом с .ts ---
+        _gpx_src = gpx_fmt
+        _gpx_dst = os.path.join(ts_dir, 'gpx.fmt')
+        if _gpx_src and os.path.isfile(_gpx_src):
+            try:
+                if os.path.abspath(_gpx_src) != os.path.abspath(_gpx_dst):
+                    shutil.copy2(_gpx_src, _gpx_dst)
+            except Exception:
+                pass
+
+        # --- tsp ---
+        tool_tsp, _tsp_tried = None, []
+        try:
+            from shutil import which as _which
+            for _n in ('tsp.exe', 'tsp'):
+                _p = _which(_n)
+                if _p:
+                    tool_tsp = _p
+                    break
+        except Exception:
+            pass
+        if tool_tsp is None:
+            print("  [SKIP] tsp не найден в PATH — фрагмент не режется",
+                  file=sys.stderr)
+
+        # --- Параметры фрагмента ---
+        frag = self._compute_fragment_info(ts_file)
+        self._last_fragment_info = frag
+        for _ll in frag.get('log_lines', []):
+            print(_ll)
+            sys.stderr.flush()
+        frag_enabled = (frag['enabled']
+                        and tool_tsp is not None
+                        and tool_otchet is not None)
+        frag_reason = frag.get('reason_disabled')
+        if frag['enabled'] and not frag_enabled:
+            if tool_tsp is None:
+                frag_reason = 'tsp not found'
+            elif tool_otchet is None:
+                frag_reason = 'otchet not found'
+            print('  [SKIP] fragment: ' + frag_reason)
+        if frag_enabled:
+            print('  Фрагмент: ' + frag['fragment_filename']
+                  + '  (%.3fs, кадры %d-%d, plan=%s)'
+                  % (frag['actual_dur'], frag['frame_start_eff'],
+                     frag['frame_end_final'], frag['plan']))
+
+        def _q(s):
+            s2 = str(s).replace('%', '%%')
+            if ' ' in s2 or '\t' in s2:
+                return '"' + s2 + '"'
+            return s2
+
+        def _se(s):
+            for ch in ('^', '&', '<', '>', '|', '(', ')'):
+                s = s.replace(ch, '^' + ch)
+            return s
+
+        has_gpx = bool(tool_exiftool and _gpx_src)
+        total = 1  # copy_full_ts (always)
+        total += sum([bool(tool_exiftool), bool(tool_otchet),
+                     bool(tool_tsanalyze), bool(tool_mediainfo),
+                     has_gpx])
+        if tool_otchet:
+            total += 1  # ssa_shift [full] (+copy sidecar)
+        if tool_otchet and audio_speeds_csv:
+            total += 1  # ssa_audio_speed [full] (+copy sidecar)
+        if tool_otchet:
+            total += 2  # ssa_frame_time add-info + apply-style [full]
+        if frag_enabled:
+            total += 2  # fragment_calc + tsp
+            if tool_otchet:
+                total += 1  # ssa_shift [frag] (+copy sidecar)
+            if tool_otchet and audio_speeds_csv:
+                total += 1  # ssa_audio_speed [frag] (+copy sidecar)
+            if tool_otchet:
+                total += 2  # ssa_frame_time add-info + apply-style [frag]
+            total += sum([bool(tool_exiftool), bool(tool_otchet),
+                          bool(tool_tsanalyze), bool(tool_mediainfo),
+                          has_gpx])
+
+        # --- Шапка .cmd ---
+        lines = []
+        lines.append("@echo off")
+        lines.append("chcp 866 >nul")
+        lines.append("rem " + "=" * 62)
+        lines.append("rem Make Disk (auto-generated by audio_speed_calc)")
+        lines.append("rem Source:    " + ts_name)
+        lines.append("rem Series:    " + series)
+        lines.append("rem Generated: "
+                     + datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+        lines.append("rem Version:   v" + VERSION)
+        lines.append("rem " + "=" * 62)
+        # [FRAG] комментарии
+        if frag.get('log_lines'):
+            for _ll in frag['log_lines']:
+                _ll_se = _ll.replace('^', '^^').replace('&', '^&')
+                _ll_se = _ll_se.replace('<', '^<').replace('>', '^>')
+                _ll_se = _ll_se.replace('|', '^|').replace('(', '^(')
+                _ll_se = _ll_se.replace(')', '^)')
+                lines.append("rem " + _ll_se)
+        if frag_enabled:
+            lines.append("rem [FRAG] fragment_filename="
+                         + frag['fragment_filename'])
+        elif frag.get('reason_disabled') or not frag_enabled:
+            lines.append("rem [FRAG] skipped: " + str(frag_reason))
+        lines.append("")
+        lines.append('cd /d "%~dp0"')
+        # PYTHON + FRAG_HELPER
+        try:
+            _py_path = os.path.abspath(sys.executable)
+        except Exception:
+            _py_path = 'python'
+        try:
+            _sd = os.path.dirname(os.path.abspath(__file__))
+        except Exception:
+            _sd = ts_dir
+        _frag_helper = os.path.join(_sd, 'tsp_frag_calc.py')
+        lines.append('set "PYTHON=' + _py_path + '"')
+        lines.append('set "FRAG_HELPER=' + _frag_helper + '"')
+        _ssa_helper = os.path.join(_sd, 'ssa_shift.py')
+        lines.append('set "SSA_HELPER=' + _ssa_helper + '"')        # [patch_v0.58.9.9] env для patch-helper-а
+        _ssa_audio_helper_path = os.path.join(
+            _sd, 'ssa_add_audio_speed.py')
+        lines.append('set "SSA_AUDIO_HELPER='
+                     + _ssa_audio_helper_path + '"')
+        _ssa_frame_time_path = os.path.join(
+            _sd, 'ssa_frame_time.py')
+        lines.append('set "SSA_FRAME_TIME_HELPER='
+                     + _ssa_frame_time_path + '"')
+        _patch_helper_cmd = os.path.join(
+            _sd, 'patch_otchet_tolerant.py')
+        lines.append('set "PATCH_HELPER=' + _patch_helper_cmd + '"')
+
+        lines.append("")
+        for sub in ('', 'ssa', 'exiftool', 'tsanalize',
+                    'MediaInfo', 'txt', 'gpx', 'video_integrity'):
+            d = series if not sub else series + '\\' + sub
+            lines.append('if not exist "%s" mkdir "%s"' % (d, d))
+        lines.append("")
+        lines.append("echo Make Disk: серия " + series
+                     + ", шагов " + str(total))
+        lines.append("echo Отчёты: %CD%\\" + series)
+        lines.append("echo.")
+        lines.append("")
+
+        n = 0
+
+        # [1] copy_full_ts -> <series>/
+        n += 1
+        lines.append("")
+        lines.append("echo === [%d/%d] copy_full_ts ===" % (n, total))
+        lines.append('if exist "%s\\%s" goto :copy_full_ts_skip'
+                     % (series, ts_name))
+        lines.append('copy /y "%s" "%s\\%s" >nul'
+                     % (ts_name, series, ts_name))
+        lines.append('if errorlevel 1 (echo   [FAIL] copy_full_ts) '
+                     'else (echo   [OK] copy_full_ts)')
+        lines.append('goto :copy_full_ts_done')
+        lines.append(':copy_full_ts_skip')
+        lines.append('echo   [SKIP] copy_full_ts - already exists')
+        lines.append(':copy_full_ts_done')
+
+        # [2] exiftool (full)
+        if tool_exiftool:
+            n += 1
+            out = series + '\\exiftool\\' + ts_name + '_exiftool_orig.txt'
+            var = "SKIP_" + str(n)
+            q = _q(out)
+            lines.append("")
+            lines.append("echo === [%d/%d] exiftool ===" % (n, total))
+            lines.append('set "%s="' % var)
+            # FIX_PERCENT_MARKER
+            lines.append('if exist %s for %%%%A in (%s) do '
+                         'if %%%%~zA GTR 0 set "%s=1"' % (q, q, var))
+            lines.append('if defined %s (' % var)
+            lines.append('    echo   [SKIP] exiftool - файл уже есть')
+            lines.append(') else (')
+            parts = [
+                'exiftool', '-v2',
+                '-c', _q("%d deg %d' %.2f"),
+                '-d', _q("%Y:%m:%d %H:%M:%S"),
+                '-ee3', '-G', '-t', _q(ts_name),
+            ]
+            lines.append('    ' + ' '.join(parts) + ' > ' + q)
+            lines.append('    if errorlevel 1 (echo   [FAIL] exiftool) '
+                         'else (echo   [OK] exiftool)')
+            lines.append(')')
+
+        # [v0.58.10.8] Cleanup stale .ssa
+        # Без этого ren падает при существующем target
+        # (Windows ren не перезаписывает) -> ssa_shift
+        # применяется к уже сдвинутому файлу -> двойной сдвиг.
+        lines.append(
+            "rem [v0.58.10.8] Cleanup stale .ssa (full)")
+        for _clean_path in [
+            series + '\\ssa\\' + ts_name + '.ssa',
+            series + '\\ssa\\' + base + '.ssa',
+            series + '\\' + base + '.ssa',
+        ]:
+            lines.append('if exist "%s" del /q "%s" '
+                         '>nul 2>&1'
+                         % (_clean_path, _clean_path))
+        
+        # [2] otchet (full)
+        if tool_otchet:
+            n += 1
+            name = 'otchet_0x300 SSA'
+            ns = _se(name)
+            ssa_rel = series + '\\ssa\\' + ts_name + '.ssa'
+            exif_rel = (series + '\\exiftool\\' + ts_name
+                        + '_exiftool_orig.txt')
+            console_rel = (series + '\\txt\\' + ts_name + '_orig.txt')
+            lines.append("")
+            lines.append("echo === [%d/%d] %s ===" % (n, total, ns))
+            if tool_otchet.lower().endswith('.exe'):
+                parts = [_q(tool_otchet), '-i', _q(exif_rel),
+                         '-o', _q(ssa_rel)]
+            else:
+                parts = [_q(_py_path), _q(tool_otchet),
+                         '-i', _q(exif_rel), '-o', _q(ssa_rel)]
+            lines.append(' '.join(parts) + ' > ' + _q(console_rel))
+            lines.append('if errorlevel 1 (echo   [FAIL] %s) '
+                         'else (echo   [OK] %s)' % (ns, ns))
+            full_pat = series + '\\ssa\\*_full.txt'
+            full_dst = series + '\\txt\\'
+            lines.append('if exist "%s" move /y "%s" "%s" >nul 2>nul'
+                         % (full_pat, full_pat, full_dst))
+            # [PATCH-v0.58.10.0] patch SOURCE .TS.ssa -> ren -> copy sidecar
+            _ssa_full_src = series + '\\ssa\\' + ts_name + '.ssa'
+            _ssa_full_renamed_bn = os.path.splitext(ts_name)[0] + '.ssa'
+            _ssa_full_renamed = series + '\\ssa\\' + _ssa_full_renamed_bn
+            _ssa_full_dst = series + '\\' + _ssa_full_renamed_bn
+            # 1) patch source
+            lines.append('if exist "%%PATCH_HELPER%%" if exist "%s" ('
+                         '"%%PYTHON%%" "%%PATCH_HELPER%%" --ssa "%s" '
+                         '>nul 2>&1 '
+                         '&& echo   [OK] patch_ssa '
+                         '|| echo   [FAIL] patch_ssa)'
+                         % (_ssa_full_src, _ssa_full_src))
+            # 2) ren .TS.ssa -> .ssa в ssa/
+            lines.append('if exist "%s" ren "%s" "%s" >nul 2>&1 '
+                         '&& echo   [OK] rename_ssa '
+                         '|| echo   [FAIL] rename_ssa'
+                         % (_ssa_full_src, _ssa_full_src,
+                            _ssa_full_renamed_bn))
+            # 3) ssa_shift [full] — сдвиг времени полного .ssa,
+            # затем copy в sidecar рядом с .ts.
+            n += 1
+            _full_shift = float(
+                self.cfg.get('full_ssa_shift_sec', 0.0))
+            lines.append("")
+            lines.append("echo === [%d/%d] ssa_shift [full] ==="
+                         % (n, total))
+            lines.append('if not exist "%s" ('
+                         % _ssa_full_renamed)
+            lines.append('    echo   [SKIP] ssa_shift [full] - '
+                         '.ssa not found')
+            lines.append(') else (')
+            lines.append('    "%%PYTHON%%" "%%SSA_HELPER%%" '
+                         '--ssa "%s" --offset %.4f'
+                         % (_ssa_full_renamed, _full_shift))
+            lines.append('    if errorlevel 1 '
+                         '(echo   [FAIL] ssa_shift [full]) '
+                         'else (echo   [OK] ssa_shift [full])')
+            lines.append('    copy /y "%s" "%s" >nul 2>nul'
+                         % (_ssa_full_renamed, _ssa_full_dst))
+            lines.append('    if errorlevel 1 '
+                         '(echo   [FAIL] copy_sidecar [full]) '
+                         'else (echo   [OK] copy_sidecar [full])')
+            lines.append(')')
+
+
+        # [FULL-AUDIO-SPEED] v0.58.10.3: аудио-скорость -> .ssa
+        if tool_otchet and audio_speeds_csv:
+            n += 1
+            _ssa_full_audio = (series + '\\ssa\\'
+                               + os.path.splitext(ts_name)[0] + '.ssa')
+            _ssa_full_audio_dst = (series + '\\'
+                                   + os.path.splitext(ts_name)[0] + '.ssa')
+            _csv_rel = os.path.basename(reports_dir) + '\\audio_speeds.csv'
+            lines.append("")
+            lines.append("echo === [%d/%d] ssa_audio_speed [full] ==="
+                         % (n, total))
+            lines.append('if not exist "%s" ('
+                         % _q(_ssa_full_audio))
+            lines.append('    echo   [SKIP] ssa_audio_speed - '
+                         '.ssa not found')
+            lines.append(') else if not exist "%s" ('
+                         % _q(_csv_rel))
+            lines.append('    echo   [SKIP] ssa_audio_speed - '
+                         'audio_speeds.csv not found')
+            lines.append(') else (')
+            _split_fps_cmd = (int(self.cfg.get('target_fps', 30))
+                              if self.cfg.get('ssa_split_per_frame',
+                                              False)
+                              else 0)
+            lines.append('    "%%PYTHON%%" "%%SSA_AUDIO_HELPER%%" '
+                         '--ssa "%s" --speeds-csv "%s" '
+                         '--split-fps %d'
+                         % (_ssa_full_audio, _csv_rel,
+                            _split_fps_cmd))
+            lines.append('    if errorlevel 1 '
+                         '(echo   [FAIL] ssa_audio_speed [full]) '
+                         'else (echo   [OK] ssa_audio_speed [full])')
+            lines.append('    copy /y "%s" "%s" >nul 2>nul'
+                         % (_ssa_full_audio, _ssa_full_audio_dst))
+            lines.append('    if errorlevel 1 '
+                         '(echo   [FAIL] copy_sidecar [audio]) '
+                         'else (echo   [OK] copy_sidecar [audio])')
+            lines.append(')')
+
+        # [FRAME-TIME-FULL] v0.58.13
+        if tool_otchet:
+            _ft_full_in = (series + '\\ssa\\'
+                           + os.path.splitext(ts_name)[0] + '.ssa')
+            _ft_full_out = (series + '\\'
+                            + os.path.splitext(ts_name)[0] + '.ssa')
+            _ft_ts_path = series + '\\' + ts_name
+            _ft_warn = float(self.cfg.get(
+                'ssa_msk_discrepancy_warn_sec', 300.0))
+            _ft_time_corr = float(self.cfg.get(
+                'ssa_time_correction_sec', 0.0))
+            _ft_fps = float(frag.get('fps_used')
+                            or self.cfg.get('target_fps', 25))
+
+            n += 1
+            lines.append("")
+            lines.append("echo === [%d/%d] ssa_frame_time [full] ==="
+                         % (n, total))
+            lines.append('if exist "%s" (' % _q(_ft_full_in))
+            lines.append('    "%%PYTHON%%" "%%SSA_FRAME_TIME_HELPER%%" '
+                         'add-info --ssa "%s" --ts-path "%s" '
+                         '--fps %.6f --t-start-eff 0.0 '
+                         '--time-correction %.6f --warn-sec %.1f --time-precision %s'
+                         % (_ft_full_in, _ft_ts_path, _ft_fps,
+                            _ft_time_corr, _ft_warn,
+                            'ms' if self.cfg.get(
+                                'ssa_time_precision_ms', True)
+                            else 'cc'))
+            lines.append('    if errorlevel 1 '
+                         '(echo   [FAIL] ssa_frame_time) '
+                         'else (echo   [OK] ssa_frame_time)')
+            lines.append(') else (')
+            lines.append('    echo   [SKIP] ssa_frame_time - '
+                         '.ssa not found')
+            lines.append(')')
+
+            n += 1
+            lines.append("")
+            lines.append(
+                "echo === [%d/%d] ssa_frame_time_style [full] ==="
+                % (n, total))
+            lines.append('if exist "%s" (' % _q(_ft_full_in))
+            lines.append('    "%%PYTHON%%" "%%SSA_FRAME_TIME_HELPER%%" '
+                         'apply-style --in "%s" --out "%s"'
+                         % (_ft_full_in, _ft_full_out))
+            lines.append('    if errorlevel 1 '
+                         '(echo   [FAIL] ssa_frame_time_style) '
+                         'else (echo   [OK] ssa_frame_time_style)')
+            lines.append(') else (')
+            lines.append('    echo   [SKIP] ssa_frame_time_style - '
+                         '.ssa not found')
+            lines.append(')')
+
+        # --- БЛОК ФРАГМЕНТА ---
+        if frag_enabled:
+            frag_name = frag['fragment_filename']
+            full_txt = series + '\\txt\\' + ts_name + '_full.txt'
+            frag_txt = reports_dir + '\\frag.txt'
+            # relative to ts_dir (--full-txt в .cmd: относительно cwd)
+            frag_ts_rel = series + '\\' + frag_name
+            # [3] fragment_calc
+            n += 1
+            lines.append("")
+            lines.append("echo === [%d/%d] fragment_calc ===" % (n, total))
+            lines.append('if not exist "%s" (' % _q(full_txt))
+            lines.append('    echo   [SKIP] _full.txt не создан — '
+                         'фрагмент не режется')
+            lines.append(') else (')
+            _args = [
+                '"%PYTHON%"', '"%FRAG_HELPER%"',
+                '--full-txt', _q(full_txt),
+                '--fps', '%.6f' % frag['fps_used'],
+                '--frame-start', str(frag['frame_start_eff']),
+                '--frame-end', str(frag['frame_end_final']),
+                '--plan', frag['plan'],
+            ]
+            if frag.get('next_idr_pkt'):
+                _args += ['--next-idr-pkt', str(frag['next_idr_pkt'])]
+            _args += ['--out', _q(frag_txt)]
+            lines.append('    ' + ' '.join(_args))
+            lines.append('    if errorlevel 1 (echo   [FAIL] fragment_calc) '
+                         'else (echo   [OK] fragment_calc)')
+            lines.append(')')
+            # [4] tsp — goto-основа (см. FIX_PERCENT_MARKER)
+            n += 1
+            lines.append("")
+            lines.append("echo === [%d/%d] tsp ===" % (n, total))
+            lines.append('if not exist %s goto :frag_tsp_skip'
+                         % _q(frag_txt))
+            lines.append('set "START_PKT="')
+            lines.append('set "END_PKT="')
+            lines.append('for /f "usebackq tokens=1,2" %%%%a in (%s) do ('
+                         % _q(frag_txt))
+            lines.append('    set "START_PKT=%%a"')
+            lines.append('    set "END_PKT=%%b"')
+            lines.append(')')
+            lines.append('if not defined START_PKT goto :frag_tsp_fail')
+            lines.append('if not defined END_PKT goto :frag_tsp_fail')
+            lines.append('%s -I file %s -P filter '
+                         '-i "%%START_PKT%%-%%END_PKT%%" '
+                         '-O file %s'
+                         % (_q(tool_tsp), _q(ts_name),
+                            _q(frag_ts_rel)))
+            lines.append('if errorlevel 1 (echo   [FAIL] tsp) '
+                         'else (echo   [OK] tsp)')
+            lines.append('goto :frag_tsp_end')
+            lines.append(':frag_tsp_skip')
+            lines.append('echo   [SKIP] frag.txt нет — tsp не запускаю')
+            lines.append('goto :frag_tsp_end')
+            lines.append(':frag_tsp_fail')
+            lines.append('echo   [FAIL] START_PKT/END_PKT не определён')
+            lines.append(':frag_tsp_end')
+
+            # Отчёты по фрагменту (под if exist <fragment>.TS)
+            frag_guard = 'if not exist "%s" (' % _q(frag_ts_rel)
+            frag_guard_end = ') else ('
+            # [8] exiftool [frag]
+            if tool_exiftool:
+                n += 1
+                out = (series + '\\exiftool\\' + frag_name
+                       + '_exiftool_orig.txt')
+                lines.append("")
+                lines.append("echo === [%d/%d] exiftool [frag] ==="
+                             % (n, total))
+                lines.append(frag_guard)
+                lines.append('    echo   [SKIP] fragment не создан — '
+                             'exiftool [frag]')
+                lines.append(frag_guard_end)
+                parts = [
+                    'exiftool', '-v2',
+                    '-c', _q("%d deg %d' %.2f"),
+                    '-d', _q("%Y:%m:%d %H:%M:%S"),
+                    '-ee3', '-G', '-t', _q(frag_ts_rel),
+                ]
+                lines.append('    ' + ' '.join(parts) + ' > ' + _q(out))
+                lines.append('    if errorlevel 1 '
+                             '(echo   [FAIL] exiftool [frag]) '
+                             'else (echo   [OK] exiftool [frag])')
+                lines.append(')')
+            # [v0.58.10.8] Cleanup stale .ssa [frag]
+            _frag_base_clean = os.path.splitext(frag_name)[0]
+            lines.append(
+                "rem [v0.58.10.8] Cleanup stale .ssa (frag)")
+            for _clean_path in [
+                series + '\\ssa\\' + frag_name + '.ssa',
+                series + '\\ssa\\' + _frag_base_clean + '.ssa',
+                series + '\\' + _frag_base_clean + '.ssa',
+            ]:
+                lines.append('if exist "%s" del /q "%s" '
+                             '>nul 2>&1'
+                             % (_clean_path, _clean_path))
+            
+            # [9] otchet [frag]
+            if tool_otchet:
+                n += 1
+                name = 'otchet frag'
+                ns = _se(name)
+                ssa_rel = series + '\\ssa\\' + frag_name + '.ssa'
+                exif_rel = (series + '\\exiftool\\' + frag_name
+                            + '_exiftool_orig.txt')
+                console_rel = (series + '\\txt\\' + frag_name + '_orig.txt')
+                lines.append("")
+                lines.append("echo === [%d/%d] %s ===" % (n, total, ns))
+                lines.append(frag_guard)
+                lines.append('    echo   [SKIP] fragment не создан — '
+                             'otchet [frag]')
+                lines.append(frag_guard_end)
+                if tool_otchet.lower().endswith('.exe'):
+                    parts = [_q(tool_otchet), '-i', _q(exif_rel),
+                             '-o', _q(ssa_rel)]
+                else:
+                    parts = [_q(_py_path), _q(tool_otchet),
+                             '-i', _q(exif_rel), '-o', _q(ssa_rel)]
+                lines.append('    ' + ' '.join(parts) + ' > '
+                             + _q(console_rel))
+                lines.append('    if errorlevel 1 (echo   [FAIL] %s) '
+                             'else (echo   [OK] %s)' % (ns, ns))
+                full_pat = series + '\\ssa\\*_full.txt'
+                full_dst = series + '\\txt\\'
+                lines.append('    if exist "%s" move /y "%s" "%s" '
+                             '>nul 2>nul' % (full_pat, full_pat, full_dst))
+                # [PATCH-v0.58.10.0] patch SOURCE .TS.ssa -> ren
+                # (copy sidecar — в блоке [8] ssa_shift, ПОСЛЕ сдвига)
+                _ssa_frag_src = series + '\\ssa\\' + frag_name + '.ssa'
+                _ssa_frag_renamed_bn = os.path.splitext(frag_name)[0] + '.ssa'
+                _ssa_frag_renamed = series + '\\ssa\\' + _ssa_frag_renamed_bn
+                # 1) patch source
+                lines.append('    if exist "%%PATCH_HELPER%%" '
+                             'if exist "%s" ('
+                             '"%%PYTHON%%" "%%PATCH_HELPER%%" '
+                             '--ssa "%s" >nul 2>&1 '
+                             '&& echo   [OK] patch_ssa [frag] '
+                             '|| echo   [FAIL] patch_ssa [frag])'
+                             % (_ssa_frag_src, _ssa_frag_src))
+                # 2) ren source .TS.ssa -> .ssa в ssa/
+                lines.append('    if exist "%s" ren "%s" "%s" '
+                             '>nul 2>&1 '
+                             '&& echo   [OK] rename_ssa [frag] '
+                             '|| echo   [FAIL] rename_ssa [frag]'
+                             % (_ssa_frag_src, _ssa_frag_src,
+                                _ssa_frag_renamed_bn))
+
+                lines.append(')')
+            # SIDECAR_SSA_v1_SNAP [PATCH-v0.58.10.0]
+            # ssa_shift применяется к источнику ПОСЛЕ patch+ren,
+            # затем источник копируется в sidecar.
+            _snap_abs = float(frag.get('snap_abs', 0.0))
+            if tool_otchet:
+                n += 1
+                _ssa_frag_path = (series + '\\ssa\\'
+                                  + os.path.splitext(frag_name)[0] + '.ssa')
+                _ssa_frag_dst = (series + '\\'
+                                 + os.path.splitext(frag_name)[0] + '.ssa')
+                lines.append('')
+                lines.append("echo === [%d/%d] ssa_shift [frag] ===" % (n, total))
+                lines.append('if not exist "%s" (' % _q(_ssa_frag_path))
+                lines.append('    echo   [SKIP] ssa_shift - .ssa not found')
+                lines.append(') else (')
+                lines.append('    "%%PYTHON%%" "%%SSA_HELPER%%" --ssa "%s" --offset %.4f'
+                             % (_ssa_frag_path, _snap_abs))
+                lines.append('    if errorlevel 1 (echo   [FAIL] ssa_shift) '
+                             'else (echo   [OK] ssa_shift)')
+                lines.append('    copy /y "%s" "%s" >nul 2>nul'
+                             % (_ssa_frag_path, _ssa_frag_dst))
+                lines.append('    if errorlevel 1 (echo   [FAIL] copy_sidecar) '
+                             'else (echo   [OK] copy_sidecar)')
+                lines.append(')')
+            # [FRAG-AUDIO-SPEED] v0.58.10.7: аудио+GPS -> .ssa фрагмента
+            if tool_otchet and audio_speeds_csv:
+                n += 1
+                _ssa_frag_audio = (series + '\\ssa\\'
+                                   + os.path.splitext(frag_name)[0]
+                                   + '.ssa')
+                _ssa_frag_audio_dst = (series + '\\'
+                                       + os.path.splitext(frag_name)[0]
+                                       + '.ssa')
+                _frag_offset = float(frag.get('t_start_eff', 0.0))
+                _split_fps_frag = (int(self.cfg.get('target_fps', 30))
+                                   if self.cfg.get(
+                                       'ssa_split_per_frame', False)
+                                   else 0)
+                lines.append("")
+                lines.append("echo === [%d/%d] ssa_audio_speed [frag] ==="
+                             % (n, total))
+                lines.append('if not exist "%s" ('
+                             % _q(_ssa_frag_audio))
+                lines.append('    echo   [SKIP] ssa_audio_speed [frag] - '
+                             '.ssa not found')
+                lines.append(') else (')
+                lines.append('    "%%PYTHON%%" "%%SSA_AUDIO_HELPER%%" '
+                             '--ssa "%s" --speeds-csv "%s" '
+                             '--split-fps %d --time-offset %.4f'
+                             % (_ssa_frag_audio, _csv_rel,
+                                _split_fps_frag, _frag_offset))
+                lines.append('    if errorlevel 1 '
+                             '(echo   [FAIL] ssa_audio_speed [frag]) '
+                             'else (echo   [OK] ssa_audio_speed [frag])')
+                lines.append('    copy /y "%s" "%s" >nul 2>nul'
+                             % (_ssa_frag_audio, _ssa_frag_audio_dst))
+                lines.append('    if errorlevel 1 '
+                             '(echo   [FAIL] copy_sidecar [frag_audio]) '
+                             'else (echo   [OK] copy_sidecar [frag_audio])')
+                lines.append(')')
+            
+            # [FRAME-TIME-FRAG] v0.58.13
+            if tool_otchet:
+                _ft_frag_in = (series + '\\ssa\\'
+                               + os.path.splitext(frag_name)[0]
+                               + '.ssa')
+                _ft_frag_out = (series + '\\'
+                                + os.path.splitext(frag_name)[0]
+                                + '.ssa')
+                _ft_frag_t_start = float(frag.get('t_start_eff', 0.0))
+                # v0.58.13-fix4: mtime берём у родительского полного .ts
+                _ft_frag_ts_path = series + '\\' + ts_name
+                _ft_frag_warn = float(self.cfg.get(
+                    'ssa_msk_discrepancy_warn_sec', 300.0))
+                _ft_frag_time_corr = float(self.cfg.get(
+                    'ssa_time_correction_sec', 0.0))
+                _ft_frag_precision = (
+                    'ms' if self.cfg.get(
+                        'ssa_time_precision_ms', True)
+                    else 'cc')
+                _ft_frag_fps = float(frag.get('fps_used')
+                                     or self.cfg.get('target_fps', 25))
+
+                n += 1
+                lines.append("")
+                lines.append(
+                    "echo === [%d/%d] ssa_frame_time [frag] ==="
+                    % (n, total))
+                lines.append('if exist "%s" ('
+                             % _q(_ft_frag_in))
+                _ft_frag_frac = float(self.cfg.get(
+                    'ssa_frame_end_frac', 0.97))
+                _ft_frag_ssa_full = series + '\\ssa\\' + base + '.ssa'
+                lines.append('    "%%PYTHON%%" '
+                             '"%%SSA_FRAME_TIME_HELPER%%" '
+                             'add-info --ssa "%s" --ts-path "%s" '
+                             '--fps %.6f --t-start-eff %.6f '
+                             '--time-correction %.6f '
+                             '--warn-sec %.1f --time-precision %s '
+                             '--frame-end-frac %g --frame-start-eff %d '
+                             '--ssa-full "%s"'
+                             % (_ft_frag_in, _ft_frag_ts_path,
+                                _ft_frag_fps,
+                                _ft_frag_t_start,
+                                _ft_frag_time_corr,
+                                _ft_frag_warn,
+                                _ft_frag_precision,
+                                _ft_frag_frac,
+                                int(frag.get('frame_start_eff', 0)),
+                                _ft_frag_ssa_full))
+                lines.append('    if errorlevel 1 '
+                             '(echo   [FAIL] ssa_frame_time [frag]) '
+                             'else (echo   [OK] ssa_frame_time [frag])')
+                lines.append(') else (')
+                lines.append('    echo   [SKIP] ssa_frame_time [frag] '
+                             '- .ssa not found')
+                lines.append(')')
+
+                n += 1
+                lines.append("")
+                lines.append(
+                    "echo === [%d/%d] ssa_frame_time_style [frag] ==="
+                    % (n, total))
+                lines.append('if exist "%s" ('
+                             % _q(_ft_frag_in))
+                lines.append('    "%%PYTHON%%" '
+                             '"%%SSA_FRAME_TIME_HELPER%%" '
+                             'apply-style --in "%s" --out "%s"'
+                             % (_ft_frag_in, _ft_frag_out))
+                lines.append('    if errorlevel 1 '
+                             '(echo   [FAIL] ssa_frame_time_style '
+                             '[frag]) '
+                             'else (echo   [OK] ssa_frame_time_style '
+                             '[frag])')
+                lines.append(') else (')
+                lines.append('    echo   [SKIP] ssa_frame_time_style '
+                             '[frag] - .ssa not found')
+                lines.append(')')
+
+            # [10] tsanalyze [frag]
+            if tool_tsanalyze:
+                n += 1
+                out = (series + '\\tsanalize\\' + frag_name
+                       + '_tsanalize.txt')
+                lines.append("")
+                lines.append("echo === [%d/%d] tsanalyze [frag] ==="
+                             % (n, total))
+                lines.append(frag_guard)
+                lines.append('    echo   [SKIP] fragment не создан — '
+                             'tsanalyze [frag]')
+                lines.append(frag_guard_end)
+                lines.append('    %s %s > %s'
+                             % (_q(tool_tsanalyze), _q(frag_ts_rel),
+                                _q(out)))
+                lines.append('    if errorlevel 1 '
+                             '(echo   [FAIL] tsanalyze [frag]) '
+                             'else (echo   [OK] tsanalyze [frag])')
+                lines.append(')')
+            # [11] MediaInfo [frag]
+            if tool_mediainfo:
+                n += 1
+                out = (series + '\\MediaInfo\\' + frag_name
+                       + '_MediaInfo.txt')
+                lines.append("")
+                lines.append("echo === [%d/%d] MediaInfo [frag] ==="
+                             % (n, total))
+                lines.append(frag_guard)
+                lines.append('    echo   [SKIP] fragment не создан — '
+                             'MediaInfo [frag]')
+                lines.append(frag_guard_end)
+                lines.append('    %s %s > %s'
+                             % (_q(tool_mediainfo), _q(frag_ts_rel),
+                                _q(out)))
+                lines.append('    if errorlevel 1 '
+                             '(echo   [FAIL] MediaInfo [frag]) '
+                             'else (echo   [OK] MediaInfo [frag])')
+                lines.append(')')
+            # [12] gpx [frag]
+            if has_gpx:
+                n += 1
+                out = series + '\\gpx\\' + frag_name + '.gpx'
+                lines.append("")
+                lines.append("echo === [%d/%d] GPX [frag] ==="
+                             % (n, total))
+                lines.append(frag_guard)
+                lines.append('    echo   [SKIP] fragment не создан — '
+                             'gpx [frag]')
+                lines.append(frag_guard_end)
+                lines.append('    exiftool -ee3 -p %s %s > %s'
+                             % (_q("gpx.fmt"), _q(frag_ts_rel), _q(out)))
+                lines.append('    if errorlevel 1 '
+                             '(echo   [FAIL] GPX [frag]) '
+                             'else (echo   [OK] GPX [frag])')
+                lines.append(')')
+
+        # [5] tsanalyze (full)
+        if tool_tsanalyze:
+            n += 1
+            out = series + '\\tsanalize\\' + ts_name + '_tsanalize.txt'
+            lines.append("")
+            lines.append("echo === [%d/%d] tsanalyze ===" % (n, total))
+            lines.append('%s %s > %s'
+                         % (_q(tool_tsanalyze), _q(ts_name), _q(out)))
+            lines.append('if errorlevel 1 (echo   [FAIL] tsanalyze) '
+                         'else (echo   [OK] tsanalyze)')
+
+        # [6] MediaInfo (full)
+        if tool_mediainfo:
+            n += 1
+            out = series + '\\MediaInfo\\' + ts_name + '_MediaInfo.txt'
+            lines.append("")
+            lines.append("echo === [%d/%d] MediaInfo ===" % (n, total))
+            lines.append('%s %s > %s'
+                         % (_q(tool_mediainfo), _q(ts_name), _q(out)))
+            lines.append('if errorlevel 1 (echo   [FAIL] MediaInfo) '
+                         'else (echo   [OK] MediaInfo)')
+
+        # [7] gpx (full)
+        if has_gpx:
+            n += 1
+            out = series + '\\gpx\\' + ts_name + '.gpx'
+            lines.append("")
+            lines.append("echo === [%d/%d] GPX ===" % (n, total))
+            lines.append('exiftool -ee3 -p %s %s > %s'
+                         % (_q("gpx.fmt"), _q(ts_name), _q(out)))
+            lines.append('if errorlevel 1 (echo   [FAIL] GPX) '
+                         'else (echo   [OK] GPX)')
+
+        lines.append("")
+        lines.append("echo.")
+        lines.append("echo === ГОТОВО ===")
+        lines.append("echo Отчёты в: %CD%\\" + series)
+        lines.append("")
+        lines.append("pause")
+        lines.append("")
+
+        content = "\r\n".join(lines)
+        try:
+            text_bytes = content.encode('cp866')
+        except UnicodeEncodeError as e:
+            bad = e.object[e.start:e.end]
+            print('ВНИМАНИЕ: символ %r не входит в CP866, заменён на ?'
+                  % bad, file=sys.stderr)
+            text_bytes = content.encode('cp866', errors='replace')
+        try:
+            with open(cmd_path, 'wb') as f:
+                f.write(text_bytes)
+            print("")
+            print("Make Disk .cmd: " + cmd_path + " (серия " + series + ")")
+            return cmd_path
+        except Exception as e:
+            print("Не удалось создать .cmd: " + str(e), file=sys.stderr)
+            return None
+
+
 
     def _btn_reset_time(self, _=None):
         """v0.56.3: обычное изменение — Apply по A."""
@@ -3731,6 +9104,794 @@ class AudioSpeedAnalyzer:
         """v0.56.3: обычное изменение — Apply по A."""
         self._reset_zoom()
 
+    def _btn_batch_complaint(self, _=None):
+        """Формирует две папки для подачи жалобы:
+        Госуслуги_жалоба/ и ЦАФАП_DVD/.
+        """
+        if (getattr(self, '_batch_running', False)
+                or getattr(self, '_make_disk_running', False)
+                or getattr(self, '_video_check_running', False)
+                or getattr(self, '_merge_running', False)):
+            print("Другая операция уже идёт", file=sys.stderr)
+            return
+
+        ts_file = os.path.abspath(self.filepath)
+        ts_name = os.path.basename(ts_file)
+        base = os.path.splitext(ts_name)[0]
+        ts_dir = os.path.dirname(ts_file)
+
+        if os.path.basename(ts_dir).lower() in ("2k", "4k"):
+            work_root = os.path.dirname(ts_dir)
+            series = os.path.basename(ts_dir).lower()
+        else:
+            work_root = ts_dir
+            series = "4k" if ts_name.upper().endswith("A.TS") else "2k"
+
+        spec_path = os.path.join(work_root, "complaint_" + base + ".json")
+        spec_created = False
+        if not os.path.isfile(spec_path):
+            try:
+                spec = self._batch_make_default_spec(ts_name, series)
+                with open(spec_path, "w", encoding="utf-8") as f:
+                    json.dump(spec, f, indent=2, ensure_ascii=False)
+                spec_created = True
+                print("[batch] создан шаблон: " + spec_path)
+            except Exception as e:
+                self._show_info_dialog(
+                    "Не удалось создать " + spec_path + ":\n" + str(e),
+                    title="Жалоба")
+                return
+
+        try:
+            with open(spec_path, "r", encoding="utf-8") as f:
+                spec = json.load(f)
+        except Exception as e:
+            self._show_info_dialog(
+                "Ошибка чтения " + spec_path + ":\n" + str(e),
+                title="Жалоба")
+            return
+
+        print("[batch] работа: " + spec_path)
+        print("        work_root: " + work_root)
+        print("        series: " + series)
+        sys.stdout.flush()
+
+        import threading
+        import time as _time
+        self._batch_running = True
+        result = {"done": False, "results": [], "error": None}
+
+        def _worker():
+            try:
+                result["results"] = self._batch_run(
+                    spec, work_root, series, ts_name)
+            except Exception as e:
+                import traceback
+                result["error"] = str(e) + "\n" + traceback.format_exc()
+            finally:
+                result["done"] = True
+
+        t = threading.Thread(target=_worker, daemon=True)
+        t.start()
+
+        busy = None
+        try:
+            busy = self.fig.text(
+                0.02, 0.115, "Формирование жалобы...",
+                fontsize=9, va="top", ha="left", color="#cc4400",
+                bbox=dict(boxstyle="round", fc="#fff4e0",
+                          alpha=0.92, edgecolor="#cc4400", lw=1.0))
+            self.fig.canvas.draw_idle()
+        except Exception:
+            busy = None
+
+        _dots = 0
+        try:
+            while not result["done"]:
+                try:
+                    _dots = (_dots + 1) % 4
+                    if busy is not None:
+                        busy.set_text("Формирование жалобы" + "." * _dots)
+                    self.fig.canvas.draw_idle()
+                    plt.pause(0.3)
+                except Exception:
+                    _time.sleep(0.3)
+        finally:
+            if busy is not None:
+                try:
+                    busy.remove()
+                except Exception:
+                    pass
+            self._batch_running = False
+            try:
+                self.update_status()
+                self.fig.canvas.draw_idle()
+            except Exception:
+                pass
+
+        if result["error"]:
+            self._show_info_dialog(
+                "Ошибка формирования:\n" + result["error"],
+                title="Жалоба")
+            return
+
+        txt = self._batch_summary_text(
+            result["results"], work_root, spec_created, spec_path)
+        self._show_info_dialog(txt, title="Жалоба")
+        print(txt)
+
+    def _batch_make_default_spec(self, ts_name, series):
+        """Дефолтный JSON-шаблон для complaint_<base>.json.
+
+        fragments:
+          "auto" — все <base>_*.XXXs.TS из <series>/
+          [список] — явный перечень basename без .TS
+
+        Dict-значение в structure:
+          {"pattern": str|list, "pick": "latest"|"oldest"|"all",
+           "skip": N, "count": M}
+
+        PNG формируются как <base>_spec_YYYYMMDD_HHMMSS.png —
+        overview.png/fragment.png НИКОГДА не будет. Поэтому:
+          "01_Обзор.png"   — самый свежий *_spec_*.png
+          "02_Фрагмент.png" — 2-й по свежести (skip:1)
+        """
+        return {
+            "version": 1,
+            "name": "Жалоба",
+            "ts": ts_name,
+            "series": series,
+            "fragments": "auto",
+            "bundles": {
+                "gosuslugi": {
+                    "folder": "Госуслуги_жалоба",
+                    "max_total_mb": 5,
+                    "max_files": 20,
+                    "allowed_ext": ["png", "jpg", "jpeg", "pdf",
+                                    "txt", "mp4"],
+                    "compress_mp4": True,
+                    "structure": {
+                        # [png-tag] обзор — новый *_overview_spec_*
+                        # (fallback: старые *_spec_* — largest)
+                        "01_Обзор.png": {
+                            "pattern": "*_overview_spec_*.png",
+                            "fallback_pattern": "*_spec_*.png",
+                            "pick": "latest", "skip": 0, "count": 1,
+                            "fallback_pick": "largest"
+                        },
+                        # [png-tag] по одному PNG на каждый фрагмент
+                        # (имя: <base>_<frag>_spec_...png)
+                        "02_Фрагмент{frag}.png": {
+                            "pattern": "*{frag}_spec_*.png",
+                            "pick": "latest", "skip": 0, "count": 1
+                        },
+                        "03_Скорость_algo2.txt": "speed_report_algo2.txt",
+                        "04_Скорость_algo3.txt": "speed_report_algo3.txt",
+                        "05_Скорость_algo4.txt": "speed_report_algo4.txt",
+                        "06_Скорость_algo5.txt": "speed_report_algo5.txt",
+                        "07_Скорость_algo6.txt": "speed_report_algo6.txt",
+                        "08_Целостность{frag}.txt": {
+                            "pattern": "*{frag}*_video_integrity.txt",
+                            "fallback_pattern": "*_video_integrity.txt",
+                            "pick": "latest",
+                            "fallback_pick": "latest"
+                        },
+                        "09_Видео{frag}.mp4": {
+                            "pattern": "mp4/" + series + "/*{frag}*.mp4",
+                            "pick": "latest"
+                        },
+                        "10_Консоль_скорость.txt": "rez.txt"
+                    }
+                },
+                "cafap": {
+                    "folder": "ЦАФАП_DVD",
+                    "structure": {
+                        "video/": [series + "/*.TS",
+                                   "mp4/" + series + "/*.mp4",
+                                   "mp4/4k/*.mp4",
+                                   "mp4/2k/*.mp4",
+                                   "video/*.mp4"],
+                        "ssa/": [series + "/ssa/*.ssa",
+                                 series + "/*.ssa"],
+                        "gpx/": [series + "/gpx/*.gpx"],
+                        "txt/": [series + "/txt/*.txt"],
+                        "graphs/": ["graphs/*.png", "*_spec_*.png"],
+                        "video_integrity/": [
+                            series + "/video_integrity/*.txt"],
+                        "MediaInfo/": [series + "/MediaInfo/*"],
+                        "tsanalize/": [series + "/tsanalize/*"],
+                        "reports/": ["speed_report_algo*.txt",
+                                     "*_speed_report_algo*.txt",
+                                     "*_gps_lag_diag.*"],
+                        "console/": ["rez.txt", "rez_err.txt",
+                                     "*_console.txt"]
+                    }
+                }
+            }
+        }
+
+    def _batch_find_fragments(self, frag_cfg, series_dir, base):
+        """Список суффиксов фрагментов.
+        "auto" -> все <base>_*.XXXs.TS в series_dir.
+        list   -> как есть.
+        """
+        if frag_cfg == "auto":
+            if not os.path.isdir(series_dir):
+                return []
+            out = []
+            import glob as _g
+            for p in _g.glob(os.path.join(
+                    series_dir, base + "_*s.TS")):
+                fn = os.path.basename(p)
+                if fn.upper().endswith(".TS"):
+                    stem = fn[:-3]
+                else:
+                    stem = fn
+                if stem.startswith(base):
+                    out.append(stem[len(base):])
+            out.sort()
+            return out
+        if isinstance(frag_cfg, list):
+            return [str(x) for x in frag_cfg]
+        return []
+
+    def _batch_pick(self, matches, pick="latest", count=1, skip=0):
+        """Сортирует по mtime или size, применяет skip/count.
+
+        pick:
+          "latest"   — свежие сверху (default)
+          "oldest"   — старые сверху
+          "largest"  — крупные сверху (по размеру файла)
+          "smallest" — мелкие сверху
+          "all"      — свежие сверху, count=0 -> все
+        """
+        if not matches:
+            return []
+        matches = list(matches)
+        if pick == "oldest":
+            matches.sort(key=os.path.getmtime)
+        elif pick == "largest":
+            matches.sort(key=os.path.getsize, reverse=True)
+        elif pick == "smallest":
+            matches.sort(key=os.path.getsize)
+        elif pick == "all":
+            matches.sort(key=os.path.getmtime, reverse=True)
+            if skip:
+                matches = matches[skip:]
+            if count and count > 0:
+                return matches[:count]
+            return matches
+        else:  # latest
+            matches.sort(key=os.path.getmtime, reverse=True)
+        if skip:
+            matches = matches[skip:]
+        if count and count > 0:
+            return matches[:count]
+        return matches
+
+    def _batch_compress_mp4(self, mp4_path, target_mb, log_cb=None):
+        """Сжимает mp4 через ffmpeg до target_mb МБ."""
+        if not os.path.isfile(mp4_path):
+            return False
+        size_mb = os.path.getsize(mp4_path) / 1024.0 / 1024.0
+        if size_mb <= target_mb:
+            return True
+
+        _ffmpeg = None
+        try:
+            from shutil import which as _which
+            _ffmpeg = _which("ffmpeg")
+        except Exception:
+            pass
+        if not _ffmpeg:
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            for c in (os.path.join(script_dir, "ffmpeg.exe"),
+                      os.path.join(script_dir, "ffmpeg"),
+                      os.path.join(script_dir, "bin", "ffmpeg.exe"),
+                      os.path.join(script_dir, "bin", "ffmpeg")):
+                if os.path.isfile(c):
+                    _ffmpeg = c
+                    break
+        if not _ffmpeg:
+            if log_cb:
+                log_cb("  [compress] ffmpeg не найден")
+            return False
+
+        target_kbps = max(200, int(target_mb * 8 * 1024 * 0.6))
+        tmp_out = mp4_path + ".compressed.mp4"
+        # [keep-subs] -map 0:s? + -c:s copy — сохраняем встроенный
+        # mov_text (встроенный .ssa). Иначе ffmpeg при -c:v/-c:a
+        # выкидывает subtitle-трек.
+        cmd = [
+            _ffmpeg, "-y", "-nostdin", "-hide_banner",
+            "-i", mp4_path,
+            "-map", "0:v:0",
+            "-map", "0:a?",
+            "-map", "0:s?",
+            "-c:v", "libx264", "-crf", "28",
+            "-b:v", "%dk" % target_kbps,
+            "-preset", "fast",
+            "-c:a", "aac", "-b:a", "64k",
+            "-c:s", "copy",
+            "-metadata:s:s:0", "language=rus",
+            "-disposition:s:0", "default",
+            "-movflags", "+faststart",
+            tmp_out,
+        ]
+        try:
+            r = subprocess.run(cmd, capture_output=True,
+                               timeout=600,
+                               encoding="utf-8",
+                               errors="replace")
+            if r.returncode != 0:
+                if log_cb:
+                    log_cb("  [compress] ffmpeg rc=%d: %s"
+                           % (r.returncode,
+                              (r.stderr or "")[:200]))
+                try:
+                    os.remove(tmp_out)
+                except OSError:
+                    pass
+                return False
+            new_size = os.path.getsize(tmp_out) / 1024.0 / 1024.0
+            if new_size < size_mb:
+                os.replace(tmp_out, mp4_path)
+                if log_cb:
+                    log_cb("  [compress] %.2f MB -> %.2f MB"
+                           % (size_mb, new_size))
+                return True
+            try:
+                os.remove(tmp_out)
+            except OSError:
+                pass
+            return False
+        except subprocess.TimeoutExpired:
+            if log_cb:
+                log_cb("  [compress] timeout")
+            try:
+                os.remove(tmp_out)
+            except OSError:
+                pass
+            return False
+        except Exception as e:
+            if log_cb:
+                log_cb("  [compress] err: " + str(e))
+            try:
+                os.remove(tmp_out)
+            except OSError:
+                pass
+            return False
+
+    def _batch_resolve_with_frag(self, structure, fragments):
+        """Разворачивает {frag} в structure по списку фрагментов.
+
+        Возвращает [(target, source), ...] (плоский список).
+        source может быть str, list или dict.
+        """
+        out = []
+        for target, source in structure.items():
+            if "{frag}" in target:
+                for fr in fragments:
+                    t = target.replace("{frag}", fr)
+                    if isinstance(source, list):
+                        s = [str(x).replace("{frag}", fr)
+                             for x in source]
+                    elif isinstance(source, dict):
+                        s = dict(source)
+                        pat = s.get("pattern")
+                        if isinstance(pat, list):
+                            s["pattern"] = [str(x).replace("{frag}", fr)
+                                            for x in pat]
+                        elif pat:
+                            s["pattern"] = str(pat).replace(
+                                "{frag}", fr)
+                    else:
+                        s = str(source).replace("{frag}", fr)
+                    out.append((t, s))
+            else:
+                if isinstance(source, str) and "{frag}" in source:
+                    for fr in fragments:
+                        out.append((target,
+                                    source.replace("{frag}", fr)))
+                elif isinstance(source, dict):
+                    pat = source.get("pattern")
+                    if ((isinstance(pat, str) and "{frag}" in pat)
+                            or (isinstance(pat, list)
+                                and any("{frag}" in str(x)
+                                        for x in pat))):
+                        for fr in fragments:
+                            s = dict(source)
+                            if isinstance(pat, list):
+                                s["pattern"] = [
+                                    str(x).replace("{frag}", fr)
+                                    for x in pat]
+                            else:
+                                s["pattern"] = str(pat).replace(
+                                    "{frag}", fr)
+                            out.append((target, s))
+                    else:
+                        out.append((target, source))
+                else:
+                    out.append((target, source))
+        return out
+
+    def _batch_expand(self, pattern, work_root, roots):
+        """Раскрывает glob-паттерн.
+
+        * dict {"pattern": str|list} — берём pattern/patterns.
+        * list — объединяем все.
+        * str — путь от work_root (если "/" или "\\"),
+          иначе ищем в roots.
+        * fallback: *<pattern> с <base>_ префиксом.
+        """
+        if isinstance(pattern, dict):
+            pat = pattern.get("pattern")
+            if pat is None:
+                pat = pattern.get("patterns", [])
+            return self._batch_expand(pat, work_root, roots)
+
+        if isinstance(pattern, list):
+            out = []
+            for p in pattern:
+                out.extend(self._batch_expand(p, work_root, roots))
+            seen = set()
+            uniq = []
+            for x in out:
+                if x not in seen:
+                    seen.add(x)
+                    uniq.append(x)
+            return uniq
+
+        pattern = str(pattern)
+        is_glob = ("*" in pattern or "?" in pattern)
+
+        if "/" in pattern or "\\" in pattern:
+            full = os.path.join(work_root,
+                                pattern.replace("\\", "/"))
+            if is_glob:
+                return glob.glob(full)
+            return [full] if os.path.isfile(full) else []
+
+        matches = []
+        for root in roots:
+            if not os.path.isdir(root):
+                continue
+            full = os.path.join(root, pattern)
+            if is_glob:
+                matches.extend(glob.glob(full))
+            else:
+                if os.path.isfile(full):
+                    matches.append(full)
+
+        if not matches and not is_glob:
+            for root in roots:
+                if not os.path.isdir(root):
+                    continue
+                matches.extend(glob.glob(
+                    os.path.join(root, "*" + pattern)))
+
+        seen = set()
+        uniq = []
+        for x in matches:
+            if x not in seen:
+                seen.add(x)
+                uniq.append(x)
+        return uniq
+
+    def _safe_copy2(self, src, dst, retries=5, delay=0.5):
+        """Копирование с retry и unlink. Возвращает (ok, msg)."""
+        import time as _t
+        for attempt in range(retries):
+            try:
+                if os.path.exists(dst):
+                    try:
+                        os.chmod(dst, 0o666)
+                    except OSError:
+                        pass
+                    try:
+                        os.remove(dst)
+                    except OSError:
+                        pass
+                shutil.copy2(src, dst)
+                return True, None
+            except PermissionError as e:
+                if attempt < retries - 1:
+                    _t.sleep(delay)
+                    continue
+                return False, ("Permission denied (%d попыток): %s"
+                               % (attempt + 1, os.path.basename(dst)))
+            except OSError as e:
+                if attempt < retries - 1:
+                    _t.sleep(delay)
+                    continue
+                return False, str(e)
+        return False, "unknown"
+
+    def _batch_run(self, spec, work_root, series, ts_name):
+        """Выполняет batch: fragments + resolve + pick + copy + compress."""
+        base = os.path.splitext(ts_name)[0]
+        series_dir = os.path.join(work_root, series)
+
+        frag_cfg = spec.get("fragments", "auto")
+        fragments = self._batch_find_fragments(
+            frag_cfg, series_dir, base)
+        print("[batch] fragments (%s): %r"
+              % (frag_cfg, fragments))
+
+        roots = [
+            os.getcwd(),
+            work_root,
+            os.path.join(work_root, "mp4"),
+            os.path.join(work_root, "mp4", "2k"),
+            os.path.join(work_root, "mp4", "4k"),
+            os.path.join(work_root, "graphs"),
+            os.path.join(work_root, "video"),
+            os.path.join(work_root, "2k"),
+            os.path.join(work_root, "4k"),
+            os.path.join(work_root, "2k", "ssa"),
+            os.path.join(work_root, "4k", "ssa"),
+            os.path.join(work_root, "2k", "txt"),
+            os.path.join(work_root, "4k", "txt"),
+            os.path.join(work_root, "2k", "gpx"),
+            os.path.join(work_root, "4k", "gpx"),
+            os.path.join(work_root, "2k", "video_integrity"),
+            os.path.join(work_root, "4k", "video_integrity"),
+            os.path.join(work_root, "2k", "MediaInfo"),
+            os.path.join(work_root, "4k", "MediaInfo"),
+            os.path.join(work_root, "2k", "tsanalize"),
+            os.path.join(work_root, "4k", "tsanalize"),
+            os.path.join(work_root, base + "_reports"),
+        ]
+
+        results = []
+        for bundle_name, bundle in spec.get("bundles", {}).items():
+            folder = bundle.get("folder")
+            if not folder:
+                continue
+            out_dir = os.path.join(work_root, folder)
+            if os.path.isdir(out_dir):
+                try:
+                    shutil.rmtree(out_dir)
+                except OSError:
+                    pass
+            try:
+                os.makedirs(out_dir, exist_ok=True)
+            except OSError as e:
+                results.append({
+                    "name": bundle_name,
+                    "folder": folder,
+                    "path": out_dir,
+                    "total_mb": 0.0,
+                    "count": 0,
+                    "copied": 0,
+                    "warnings": [],
+                    "errors": ["mkdir: " + str(e)],
+                })
+                continue
+
+            errors = []
+            warnings = []
+            copied = 0
+
+            structure = bundle.get("structure", {})
+            flat = self._batch_resolve_with_frag(
+                structure, fragments if fragments else [""])
+
+            for target, source in flat:
+                # dict: pick/skip/count
+                if isinstance(source, dict):
+                    pat = source.get("pattern")
+                    if pat is None:
+                        pat = source.get("patterns", [])
+                    pick = source.get("pick", "latest")
+                    skip = int(source.get("skip", 0) or 0)
+                    count = int(source.get("count", 1) or 1)
+
+                    matches = self._batch_expand(
+                        pat, work_root, roots)
+                    # [png-tag] fallback_pattern если основного нет
+                    if not matches:
+                        _fb = source.get("fallback_pattern")
+                        if _fb:
+                            matches = self._batch_expand(
+                                _fb, work_root, roots)
+                            if matches:
+                                pick = source.get(
+                                    "fallback_pick", pick)
+                                warnings.append(
+                                    "fallback: %s -> %s"
+                                    % (pat, _fb))
+                    if not matches:
+                        warnings.append(
+                            "not found: " + str(pat))
+                        continue
+                    chosen = self._batch_pick(
+                        matches, pick=pick,
+                        count=count, skip=skip)
+                    if not chosen:
+                        warnings.append(
+                            "pick empty: %s (matches=%d, "
+                            "skip=%d, count=%d)"
+                            % (pat, len(matches), skip, count))
+                        continue
+
+                    if target.endswith("/"):
+                        target_dir = os.path.join(out_dir, target)
+                        try:
+                            os.makedirs(target_dir, exist_ok=True)
+                        except OSError as e:
+                            errors.append(
+                                "mkdir " + target + ": " + str(e))
+                            continue
+                        for s in chosen:
+                            _ok, _m = self._safe_copy2(
+                                s, os.path.join(target_dir,
+                                                os.path.basename(s)))
+                            if _ok:
+                                copied += 1
+                            else:
+                                warnings.append(
+                                    "locked: %s (%s)"
+                                    % (os.path.basename(s), _m))
+                    else:
+                        if len(chosen) == 1:
+                            _ok, _m = self._safe_copy2(
+                                chosen[0],
+                                os.path.join(out_dir, target))
+                            if _ok:
+                                copied += 1
+                            else:
+                                warnings.append(
+                                    "locked: %s (%s)"
+                                    % (os.path.basename(target), _m))
+                        else:
+                            base_t, ext_t = os.path.splitext(target)
+                            for k, s in enumerate(chosen):
+                                nt = "%s_%d%s" % (base_t, k + 1, ext_t)
+                                _ok, _m = self._safe_copy2(
+                                    s, os.path.join(out_dir, nt))
+                                if _ok:
+                                    copied += 1
+                                else:
+                                    warnings.append(
+                                        "locked: %s (%s)"
+                                        % (os.path.basename(nt), _m))
+                    continue
+
+                # str/list
+                sources = self._batch_expand(source, work_root, roots)
+                if not sources:
+                    warnings.append("not found: " + str(source))
+                    continue
+
+                if target.endswith("/"):
+                    target_dir = os.path.join(out_dir, target)
+                    try:
+                        os.makedirs(target_dir, exist_ok=True)
+                    except OSError as e:
+                        errors.append("mkdir " + target + ": " + str(e))
+                        continue
+                    for s in sources:
+                        _ok, _m = self._safe_copy2(
+                            s, os.path.join(target_dir,
+                                            os.path.basename(s)))
+                        if _ok:
+                            copied += 1
+                        else:
+                            warnings.append(
+                                "locked: %s (%s)"
+                                % (os.path.basename(s), _m))
+                else:
+                    src = max(sources, key=os.path.getmtime)
+                    _ok, _m = self._safe_copy2(
+                        src, os.path.join(out_dir, target))
+                    if _ok:
+                        copied += 1
+                    else:
+                        warnings.append(
+                            "locked: %s (%s)"
+                            % (os.path.basename(target), _m))
+
+            total_bytes = 0
+            n_files = 0
+            for dp, _, fs in os.walk(out_dir):
+                for f in fs:
+                    fp = os.path.join(dp, f)
+                    try:
+                        total_bytes += os.path.getsize(fp)
+                        n_files += 1
+                    except OSError:
+                        pass
+            total_mb = total_bytes / 1024.0 / 1024.0
+
+            max_mb = bundle.get("max_total_mb")
+            max_files = bundle.get("max_files")
+            allowed = bundle.get("allowed_ext")
+            compress = bundle.get("compress_mp4", False)
+
+            if (max_mb and total_mb > max_mb and compress):
+                mp4s = []
+                for dp, _, fs in os.walk(out_dir):
+                    for f in fs:
+                        if f.lower().endswith(".mp4"):
+                            mp4s.append(os.path.join(dp, f))
+                if mp4s:
+                    target_each = max_mb / float(len(mp4s))
+                    print("[batch] compress: %d mp4, "
+                          "target %.2f MB each"
+                          % (len(mp4s), target_each))
+                    for mp in mp4s:
+                        self._batch_compress_mp4(
+                            mp, target_each,
+                            log_cb=lambda s: print(s))
+                    total_bytes = 0
+                    n_files = 0
+                    for dp, _, fs in os.walk(out_dir):
+                        for f in fs:
+                            fp = os.path.join(dp, f)
+                            try:
+                                total_bytes += os.path.getsize(fp)
+                                n_files += 1
+                            except OSError:
+                                pass
+                    total_mb = total_bytes / 1024.0 / 1024.0
+
+            if max_mb and total_mb > max_mb:
+                errors.append("размер %.2f MB > %s MB "
+                              "(сжатие не помогло)"
+                              % (total_mb, max_mb))
+            if max_files and n_files > max_files:
+                errors.append("файлов %d > %s" % (n_files, max_files))
+            if allowed:
+                for dp, _, fs in os.walk(out_dir):
+                    for f in fs:
+                        ext = ""
+                        if "." in f:
+                            ext = f.rsplit(".", 1)[-1].lower()
+                        if ext and ext not in allowed:
+                            errors.append(
+                                "расширение не разрешено: " + f)
+
+            results.append({
+                "name": bundle_name,
+                "folder": folder,
+                "path": out_dir,
+                "total_mb": total_mb,
+                "count": n_files,
+                "copied": copied,
+                "warnings": warnings,
+                "errors": errors,
+            })
+
+        return results
+
+    def _batch_summary_text(self, results, work_root,
+                             spec_created, spec_path):
+        lines = []
+        if spec_created:
+            lines.append("Создан шаблон: " + spec_path)
+            lines.append("Отредактируйте JSON и повторите нажатие.")
+            lines.append("")
+        for r in results:
+            lines.append("=== " + r["folder"] + " ===")
+            lines.append("  Путь:         " + r["path"])
+            lines.append("  Скопировано:  %d" % r["copied"])
+            lines.append("  Итого:        %d файлов, %.2f MB"
+                         % (r["count"], r["total_mb"]))
+            if r["warnings"]:
+                lines.append("  Не найдено (%d):"
+                             % len(r["warnings"]))
+                for w in r["warnings"][:10]:
+                    lines.append("    - " + w)
+            if r["errors"]:
+                lines.append("  ОШИБКИ (%d):" % len(r["errors"]))
+                for e in r["errors"][:10]:
+                    lines.append("    ! " + e)
+            else:
+                lines.append("  ОК")
+            lines.append("")
+        return "\n".join(lines)
+
     def _btn_exit(self, _=None):
         self._on_exit()
 
@@ -3749,6 +9910,7 @@ class AudioSpeedAnalyzer:
         self._draw_speed_overlay()
         self._draw_speed_labels()
         self._draw_speed_extremes()
+        self._update_range_msk_text()
         self.update_status()
         self.fig.canvas.draw_idle()
 
@@ -3769,8 +9931,11 @@ class AudioSpeedAnalyzer:
         fps = self.cfg['target_fps']
         t_sec = frame / fps
         freq = event.ydata
+        # [fix2/3] MSK под курсором
+        _msk = self._format_msk(t_sec)
         self.cursor_text.set_text(
-            f'кадр={frame} | t={t_sec:.3f}с | {freq:.0f} Гц')
+            f'кадр={frame} | t={t_sec:.3f}с | {freq:.0f} Гц\n'
+            f'MSK={_msk}')
         self.cursor_text.set_visible(True)
         if event.button == 1 and self.phase == self.PHASE_TIME \
                 and self._drag_start_frame is not None:
@@ -3814,6 +9979,17 @@ class AudioSpeedAnalyzer:
             self.tb_step.set_val(f"{float(self.cfg['time_step']):.3f}")
             self.tb_color.set_val(int(self.color_steps))
             self.tb_peak.set_val(float(self.peak_search_hz))
+
+            # v0.58.0: поле ΔGPS — ручное значение либо текущее авто.
+            if (self.gps_lag_manual
+                    and self._gps_lag_manual_input is not None):
+                _lag_show = self._gps_lag_manual_input
+            else:
+                _lag_show = self.gps_lag
+            self.tb_gps_lag.set_val(f"{float(_lag_show):+.3f}")
+            # fix2/3: коррекция MSK
+            _corr = float(self.cfg.get('ssa_time_correction_sec', 0.0))
+            self.tb_msk_corr.set_val(f"{_corr:+.3f}")
         finally:
             self._syncing_fields = False
 
@@ -3962,6 +10138,227 @@ class AudioSpeedAnalyzer:
         except ValueError:
             self._sync_fields()
 
+    def _on_field_gps_lag(self, text):
+        """v0.58.0: ручной ввод dGPS.
+        Пустая строка -> Авто; непустая -> Ручн с введённым значением.
+        """
+        if self._syncing_fields:
+            return
+        s = (text or '').strip().replace(',', '.')
+        if not s:
+            self.gps_lag_manual = False
+            # v0.58.1: НЕ обнуляем _gps_lag_manual_input —
+            # последнее ручное значение вернётся при повторном
+            # включении Ручн.
+            self.cfg['gps_lag_manual'] = False
+            self.cfg['gps_lag_override'] = None
+            self._update_gps_mode_button()
+            self._sync_fields()
+            if self._algo_run_done and self.harm_freqs:
+                self._on_run(None, self.last_algo)
+            return
+        try:
+            val = float(s)
+        except ValueError:
+            self._sync_fields()
+            return
+        self.gps_lag_manual = True
+        self._gps_lag_manual_input = val
+        self.cfg['gps_lag_manual'] = True
+        self.cfg['gps_lag_override'] = val
+        self._set_tb_silent('gps_lag', f"{val:.3f}")
+        self._update_gps_mode_button()
+        if self._algo_run_done and self.harm_freqs:
+            self._on_run(None, self.last_algo)
+
+    def _on_field_msk_corr(self, text):
+        """[msk-corr] Коррекция MSK: ssa_time_correction_sec.
+
+        Пустое поле — 0.0 (нет коррекции).
+        Применяется ТОЛЬКО при генерации .ssa, на спектрограмму
+        не влияет.
+        """
+        if self._syncing_fields:
+            return
+        s = (text or '').strip().replace(',', '.')
+        try:
+            val = float(s) if s else 0.0
+        except ValueError:
+            self._sync_fields()
+            return
+        self.cfg['ssa_time_correction_sec'] = val
+        self._set_tb_silent('msk_corr', f'{val:+.3f}')
+        # Спектрограмма и штамп MSK не перерисовываются —
+        # коррекция касается только .ssa.
+    def _get_video_start_time(self):
+        """Возвращает PTS первого пакета видео (v:0) в секундах."""
+        import subprocess
+        if not _FFPROBE_PATH:
+            return 0.0
+        try:
+            cmd = [_FFPROBE_PATH, '-v', 'error',
+                   '-select_streams', 'v:0',
+                   '-show_entries', 'stream=start_time',
+                   '-of', 'default=noprint_wrappers=1',
+                   self.filepath]
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=10, encoding='utf-8', errors='replace')
+            if r.returncode == 0:
+                for line in r.stdout.splitlines():
+                    if line.startswith('start_time='):
+                        return float(line.split('=')[1].strip())
+        except Exception:
+            pass
+        return 0.0
+
+    def _get_ssa_base_dt(self):
+        import re
+        """[msk-v3] База времени MSK для GUI.
+
+        Читает время из первого Dialogue .ssa (там MSK уже с
+        ssa_time_correction_sec) и ВЫЧИТАЕТ эту коррекцию, чтобы
+        GUI показывал исходное время кадра.
+
+        Fallback: имя файла + ffprobe video_start; затем mtime.
+        """
+        if getattr(self, '_ssa_base_dt', None) is not None:
+            return self._ssa_base_dt
+        _corr = float(self.cfg.get('ssa_time_correction_sec', 0.0))
+        try:
+            ts_dir = os.path.dirname(os.path.abspath(self.filepath))
+            ts_name = os.path.basename(self.filepath)
+            base = os.path.splitext(ts_name)[0]
+            for cand in (
+                os.path.join(ts_dir, 'ssa', ts_name + '.ssa'),
+                os.path.join(ts_dir, 'ssa', base + '.ssa'),
+                os.path.join(ts_dir, base + '.ssa'),
+            ):
+                if os.path.isfile(cand):
+                    _dt = self._parse_ssa_dt(cand)
+                    if _dt is not None:
+                        self._ssa_base_dt = _dt - datetime.timedelta(seconds=_corr)
+                        print('[msk-v3] base_dt из .ssa: %s - corr(%+.3f) = %s'
+                              % (_dt, _corr, self._ssa_base_dt), flush=True)
+                        return self._ssa_base_dt
+            _m = re.search(r'(\d{14})', ts_name)
+            if _m:
+                _s = _m.group(1)
+                _dt_name = datetime.datetime(
+                    int(_s[0:4]), int(_s[4:6]), int(_s[6:8]),
+                    int(_s[8:10]), int(_s[10:12]), int(_s[12:14]))
+                _v_start = 0.0
+                if _FFPROBE_PATH:
+                    try:
+                        _cmd = [_FFPROBE_PATH, '-v', 'error',
+                                '-select_streams', 'v:0',
+                                '-show_entries', 'stream=start_time',
+                                '-of', 'default=noprint_wrappers=1',
+                                self.filepath]
+                        _r = subprocess.run(_cmd, capture_output=True, text=True,
+                                            timeout=10, encoding='utf-8', errors='replace')
+                        if _r.returncode == 0:
+                            for _ln in _r.stdout.splitlines():
+                                if _ln.startswith('start_time='):
+                                    _v_start = float(_ln.split('=', 1)[1].strip())
+                                    break
+                    except Exception as _e:
+                        print('[msk-v3] ffprobe warn: %s' % _e, file=sys.stderr, flush=True)
+                self._ssa_base_dt = _dt_name + datetime.timedelta(seconds=_v_start)
+                print('[msk-v3] base_dt из имени + video_start(%.3f): %s'
+                      % (_v_start, self._ssa_base_dt), flush=True)
+                return self._ssa_base_dt
+            self._ssa_base_dt = datetime.datetime.fromtimestamp(os.path.getmtime(self.filepath))
+            print('[msk-v3] base_dt из mtime: %s' % self._ssa_base_dt, flush=True)
+            return self._ssa_base_dt
+        except Exception as _e:
+            print('[msk-v3] base_dt error: %s' % _e, file=sys.stderr, flush=True)
+            self._ssa_base_dt = None
+            return None
+
+    def _format_msk(self, t_sec):
+        """[msk-v3] MSK для времени t_sec от начала .ts (без _corr)."""
+        base_dt = self._get_ssa_base_dt()
+        if base_dt is None:
+            return '[-]'
+        dt = base_dt + datetime.timedelta(seconds=float(t_sec))
+        return (dt.strftime('%d.%m.%Y %H:%M:%S.')
+                + '%03d MSK' % (dt.microsecond // 1000))
+    def _update_range_msk_text(self):
+        """[fix2/3-v2] Штамп диапазона ФРАГМЕНТА (analyze_start/dur).
+
+        Две части:
+          слева  — «начало: кадр N, t s» + MSK первого кадра;
+          справа — «конец: кадр M, t s»  + MSK последнего кадра.
+
+        Без рамки. Перерисовывается при любом изменении
+        analyze_start/analyze_dur (из _update_time_span) и при
+        _redraw_all. Берём analyze_start/dur, а НЕ xlim — xlim
+        может быть уже/шире фрагмента (зум, панорама).
+        """
+        try:
+            fps = float(self.cfg['target_fps'])
+            f_start = max(0, int(round(self.analyze_start)))
+            f_end = max(f_start,
+                        f_start + max(1, int(round(self.analyze_dur))))
+            if self.n_frames > 0:
+                f_end = min(f_end, self.n_frames)
+            t0 = f_start / fps if fps > 0 else 0.0
+            t1 = f_end / fps if fps > 0 else 0.0
+            msk0 = self._format_msk(t0)
+            msk1 = self._format_msk(t1)
+            if getattr(self, '_range_start_text', None) is not None:
+                self._range_start_text.set_text(
+                    f'{msk0}')
+            if getattr(self, '_range_end_text', None) is not None:
+                self._range_end_text.set_text(
+                    f'{msk1}')
+        except Exception:
+            pass
+
+    def _btn_gps_mode_clicked(self):
+        """v0.58.1: переключение Авто <-> Ручн.
+
+        Ручное значение сохраняется при возврате в Авто и
+        восстанавливается при следующем включении Ручн.
+        """
+        if self.gps_lag_manual:
+            self.gps_lag_manual = False
+            # v0.58.1: значение не обнуляем — оно вернётся
+            # при следующем включении ручного режима.
+            self.cfg['gps_lag_manual'] = False
+            self.cfg['gps_lag_override'] = None
+            self._set_tb_silent('gps_lag', '')
+        else:
+            if self._gps_lag_manual_input is None:
+                # Первое включение Ручн: стартуем с текущего
+                # авто-значения. Дальше оно запомнится.
+                self._gps_lag_manual_input = float(self.gps_lag)
+            self.gps_lag_manual = True
+            self.cfg['gps_lag_manual'] = True
+            self.cfg['gps_lag_override'] = self._gps_lag_manual_input
+            self._set_tb_silent(
+                'gps_lag', f"{self._gps_lag_manual_input:.3f}")
+        self._update_gps_mode_button()
+        if self._algo_run_done and self.harm_freqs:
+            self._on_run(None, self.last_algo)
+
+    def _update_gps_mode_button(self):
+        """v0.58.0: цвет/надпись кнопки Авто/Ручн."""
+        if getattr(self, '_btn_gps_mode', None) is None:
+            return
+        if self.gps_lag_manual:
+            self._btn_gps_mode.label.set_text('GPS: Ручн')
+            self._btn_gps_mode.color = '#ffddaa'
+            self._btn_gps_mode.hovercolor = '#ffcc88'
+        else:
+            self._btn_gps_mode.label.set_text('GPS: Авто')
+            self._btn_gps_mode.color = '#ccffcc'
+            self._btn_gps_mode.hovercolor = '#aaddaa'
+        self._btn_gps_mode.ax.set_facecolor(self._btn_gps_mode.color)
+        try:
+            self._btn_gps_mode.ax.figure.canvas.draw_idle()
+        except Exception:
+            pass
+
     def _update_time_span(self):
         if self.time_span:
             try:
@@ -3972,6 +10369,11 @@ class AudioSpeedAnalyzer:
             self.analyze_start, self.analyze_start + self.analyze_dur,
             color='red', alpha=0.15, zorder=5
         )
+        # [fix2/3] диапазон анализа изменился — перерисовать штамп
+        try:
+            self._update_range_msk_text()
+        except Exception:
+            pass
 
     def _push_history(self, xlim=None, ylim=None,
                       analyze_start=None, analyze_dur=None,
@@ -4268,6 +10670,51 @@ class AudioSpeedAnalyzer:
         self._apply_history_entry(self.zoom_history[self.zoom_pointer])
         self.update_status()
 
+    def _history_jump_to(self, pos_1based, reason=''):
+        """[hist-jump] Прыжок на позицию pos_1based (1-based) в истории.
+
+        Если pos вне диапазона — прижимаем к границам.
+        Если есть неприменённые правки — спрашиваем через
+        _ask_apply_confirm. Если target == текущей позиции —
+        просто update_status без диалога.
+        """
+        if not self.zoom_history:
+            return
+        target = max(0, min(int(pos_1based) - 1, len(self.zoom_history) - 1))
+        if target == self.zoom_pointer:
+            self.update_status()
+            return
+        if self._is_dirty():
+            resp = self._ask_apply_confirm(reason or 'прыжок')
+            if resp is None:
+                return
+            if resp:
+                self._push_history(force=True)
+                target = min(target, len(self.zoom_history) - 1)
+        self.zoom_pointer = target
+        self._apply_history_entry(self.zoom_history[target])
+        print(f"История: позиция {target + 1}/{len(self.zoom_history)}",
+              file=sys.stderr)
+        self.update_status()
+
+    def _history_home(self):
+        """[hist-jump] Home -> первая позиция."""
+        if not self.zoom_history:
+            return
+        if self.zoom_pointer <= 0:
+            self.update_status()
+            return
+        self._history_jump_to(1, 'в начало')
+
+    def _history_end(self):
+        """[hist-jump] End -> последняя позиция."""
+        if not self.zoom_history:
+            return
+        if self.zoom_pointer >= len(self.zoom_history) - 1:
+            self.update_status()
+            return
+        self._history_jump_to(len(self.zoom_history), 'в конец')
+
     def _btn_back(self, event=None):
         self._step_back(event)
 
@@ -4376,8 +10823,46 @@ class AudioSpeedAnalyzer:
         self._sync_fields()
         self._redraw_all()
 
+    def _any_textbox_focused(self):
+        """v0.58.0: True, если хоть одно поле ввода держит клавиатуру."""
+        for tb in self._tb_list:
+            if getattr(tb, 'capturekeystrokes', False):
+                return True
+        try:
+            wl = self.fig.canvas.widgetlock
+            if wl.locked():
+                owner = getattr(wl, '_owner', None)
+                if owner is not None and owner in self._tb_list:
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def _unfocus_textboxes(self):
+        """v0.58.0: снимает фокус со всех полей ввода (Esc)."""
+        for tb in self._tb_list:
+            try:
+                tb.stop_typing()
+            except Exception:
+                pass
+            try:
+                if hasattr(self.fig.canvas, 'widgetlock'):
+                    self.fig.canvas.widgetlock.release(tb)
+            except Exception:
+                pass
+        self._tb_focused_idx = -1
+        self.fig.canvas.draw_idle()
+
     def _on_key(self, event):
         key = event.key
+
+        # v0.58.0: при фокусе в текстовом поле — все клавиши
+        # идут в поле, кроме Esc.
+        if self._any_textbox_focused():
+            if key == 'escape':
+                self._unfocus_textboxes()
+            return
+
         if key == 'tab':
             self._move_focus(1)
         elif key == 'shift+tab':
@@ -4401,23 +10886,20 @@ class AudioSpeedAnalyzer:
         elif key in ('p', 'P'):
             self._toolbar_save_png()
         elif key in ('a', 'A'):
-            tb_focused = False
-            for tb in self._tb_list:
-                if hasattr(self.fig.canvas, 'widgetlock') and \
-                        not self.fig.canvas.widgetlock.available(tb):
-                    tb_focused = True
-                    break
-            if not tb_focused:
-                self._btn_apply()
+            self._btn_apply()
+        elif key == 'home':
+            self._history_home()
+        elif key == 'end':
+            self._history_end()
+        elif key in ('ctrl+1', 'ctrl+2', 'ctrl+3', 'ctrl+4', 'ctrl+5',
+                     'ctrl+6', 'ctrl+7', 'ctrl+8', 'ctrl+9', 'ctrl+0'):
+            if key == 'ctrl+0':
+                self._history_jump_to(10, 'позиция 10')
+            else:
+                _n = int(key[5])
+                self._history_jump_to(_n, f'позиция {_n}')
         elif key in ('1', '2', '3', '4', '5', '6'):
-            tb_focused = False
-            for tb in self._tb_list:
-                if hasattr(self.fig.canvas, 'widgetlock') and \
-                        not self.fig.canvas.widgetlock.available(tb):
-                    tb_focused = True
-                    break
-            if not tb_focused:
-                self._on_run(None, int(key))
+            self._on_run(None, int(key))
 
     def _collect_sysinfo_lines(self):
         sep = "=" * 70
@@ -4453,7 +10935,12 @@ class AudioSpeedAnalyzer:
         except Exception as e:
             sections.append(("  СВЕДЕНИЯ О ДИСКЕ", [f"  Ошибка: {e}"]))
         try:
-            scr = get_script_info(VERSION, os.path.abspath(__file__))
+            # v0.56.4: в .exe читаем информацию о нём самом.
+            if getattr(sys, "frozen", False):
+                _target = os.path.abspath(sys.executable)
+            else:
+                _target = os.path.abspath(__file__)
+            scr = get_script_info(VERSION, _target)
             sections.append(("  СВЕДЕНИЯ О СКРИПТЕ", [
                 f"  Имя:             {scr['name']}",
                 f"  Путь:            {scr['path']}",
@@ -4478,6 +10965,21 @@ class AudioSpeedAnalyzer:
         self.cfg['overlay_mode'] = self.overlay_mode
         self.cfg['analyze_start'] = int(self.analyze_start)
         self.cfg['analyze_dur']   = int(self.analyze_dur)
+        # [fix2/3] коррекция MSK
+        try:
+            self.cfg['ssa_time_correction_sec'] = float(
+                self.cfg.get('ssa_time_correction_sec', 0.0))
+        except (ValueError, TypeError):
+            self.cfg['ssa_time_correction_sec'] = 0.0
+
+        # v0.58.1: ручной режим dGPS.
+        self.cfg['gps_lag_manual'] = bool(self.gps_lag_manual)
+        if (self.gps_lag_manual
+                and self._gps_lag_manual_input is not None):
+            self.cfg['gps_lag_override'] = float(
+                self._gps_lag_manual_input)
+        else:
+            self.cfg['gps_lag_override'] = None
 
         self.cfg['view_history'] = [
             {
@@ -4604,7 +11106,9 @@ class AudioSpeedAnalyzer:
             root.withdraw()
             base = os.path.splitext(os.path.basename(self.filepath))[0]
             now = datetime.datetime.now()
-            default_name = (f"{base}_spec_"
+            # [png-tag-v2] тег диапазона в default_name диалога
+            _tag = self._png_tag()
+            default_name = (f"{base}_{_tag}_spec_"
                             f"{now.strftime('%Y%m%d')}_"
                             f"{now.strftime('%H%M%S')}.png")
             png_dir = (self.cfg.get('last_png_dir', '')
@@ -4624,21 +11128,65 @@ class AudioSpeedAnalyzer:
         except Exception:
             self._save_png()
 
+    def _png_tag(self):
+        """[png-tag-v2] суффикс диапазона: overview / <dur>s.
+
+        overview — если analyze_dur=0 или >= n_frames*0.999
+        <dur>s   — analyze_dur/target_fps (совпадает с _<dur>s.TS)
+        """
+        _fps = float(self.cfg.get('target_fps', 30) or 30)
+        _nfr = int(self.n_frames or 0)
+        _adur = int(self.analyze_dur or 0)
+        if _nfr > 0 and (_adur <= 0 or _adur >= _nfr * 0.999):
+            return "overview"
+        return "%.3fs" % round(_adur / _fps, 3)
+
     def _save_png(self, custom_path=None):
         if not hasattr(self, '_png_list'):
             self._png_list = []
 
         if custom_path:
+            # [png-tag-v2] если в имени нет тега (overview / <dur>s) —
+            # вставляем его. Если пользователь ввёл своё имя с тегом —
+            # не дублируем.
             png_path = custom_path
             png_dir = os.path.dirname(png_path) or '.'
             png_name = os.path.basename(png_path)
+            _tag = self._png_tag()
+            _stem, _ext = os.path.splitext(png_name)
+            _has_tag = (("_overview_spec_" in _stem)
+                        or (_stem.endswith("_overview"))
+                        or ("_%ss_spec_" % _tag.strip("s")
+                            in _stem.replace("_spec_", "_XX_spec_"))
+                        or ("_" + _tag + "_" in _stem)
+                        or _stem.endswith("_" + _tag))
+            if not _has_tag:
+                # <base>_spec_<ts> -> <base>_<tag>_spec_<ts>
+                if "_spec_" in _stem:
+                    _b, _s = _stem.split("_spec_", 1)
+                    png_name = "%s_%s_spec_%s%s" % (
+                        _b, _tag, _s, _ext)
+                else:
+                    png_name = "%s_%s%s" % (_stem, _tag, _ext)
+                png_path = os.path.join(png_dir, png_name)
         else:
             png_dir = self.cfg.get('last_png_dir', '')
             if not png_dir or not os.path.isdir(png_dir):
                 png_dir = os.path.dirname(self.filepath) or '.'
             base = os.path.splitext(os.path.basename(self.filepath))[0]
             now = datetime.datetime.now()
-            png_name = (f"{base}_spec_"
+            # [png-tag] в имя вписываем диапазон:
+            #   overview — весь файл (analyze_dur=0 или =n_frames)
+            #   <dur>s   — фрагмент (совпадает с _<dur>s.TS)
+            _fps_png = float(self.cfg.get('target_fps', 30) or 30)
+            _nfr_png = int(self.n_frames or 0)
+            _adur_png = int(self.analyze_dur or 0)
+            if _nfr_png > 0 and (_adur_png <= 0
+                                  or _adur_png >= _nfr_png * 0.999):
+                _tag_png = "overview"
+            else:
+                _tag_png = "%.3fs" % round(_adur_png / _fps_png, 3)
+            png_name = (f"{base}_{_tag_png}_spec_"
                         f"{now.strftime('%Y%m%d')}_"
                         f"{now.strftime('%H%M%S')}.png")
             png_path = os.path.join(png_dir, png_name)
@@ -5026,16 +11574,36 @@ class AudioSpeedAnalyzer:
             if f_end_corr <= f_start_corr:
                 f_start_corr = f_start
                 f_end_corr = f_end
+
+            # v0.57.5: rolling-трекинг гармоник (см. _on_run).
+            cur_expected_h5 = self.h5
+            cur_expected_h4 = self.h4
+
+            for step_i_check in range(f_start, f_start_corr,
+                                       step_check):
+                if step_i_check >= self.n_frames:
+                    break
+                col = self.S_db[:, step_i_check]
+                cur_expected_h5 = find_peak_near(
+                    self.freqs, col, cur_expected_h5,
+                    peak_hz, f_lo5, f_hi5)
+                cur_expected_h4 = find_peak_near(
+                    self.freqs, col, cur_expected_h4,
+                    peak_hz, f_lo4, f_hi4)
+
             for step_i_check in range(f_start_corr, f_end_corr,
                                        step_check):
                 if step_i_check >= self.n_frames:
                     break
                 col = self.S_db[:, step_i_check]
-                h5_peak = find_peak_near(self.freqs, col, self.h5,
-                                          peak_hz, f_lo5, f_hi5)
-                h4_peak = find_peak_near(self.freqs, col, self.h4,
-                                          peak_hz, f_lo4, f_hi4)
-                _, _, _, v_tmp = self._calc_speed(h5_peak, h4_peak)
+                cur_expected_h5 = find_peak_near(
+                    self.freqs, col, cur_expected_h5,
+                    peak_hz, f_lo5, f_hi5)
+                cur_expected_h4 = find_peak_near(
+                    self.freqs, col, cur_expected_h4,
+                    peak_hz, f_lo4, f_hi4)
+                _, _, _, v_tmp = self._calc_speed(
+                    cur_expected_h5, cur_expected_h4)
                 audio_times_full.append(step_i_check / fps)
                 audio_speeds_full.append(v_tmp)
         except Exception as e:
@@ -5097,13 +11665,14 @@ class AudioSpeedAnalyzer:
     def _try_use_calibrated_gps_lag(self, f_start, f_end,
                                      f_lo5, f_hi5, f_lo4, f_hi4,
                                      peak_hz):
-        """v0.56.1: пытается применить dGPS, откалиброванный
-        по самому длинному интервалу из истории.
+        """v0.57.7: пытается применить dGPS, откалиброванный
+        по самому длинному интервалу из истории + текущему окну.
 
         Логика:
           * если H5/H4 не менялись и текущее окно НЕ длиннее,
             чем калиброванное — берём из кэша;
-          * иначе — пересчитываем на самом длинном интервале.
+          * иначе — пересчитываем на самом длинном интервале
+            (rolling-трекинг + min RMSE).
 
         Возвращает True, если self.gps_lag установлен,
         иначе False (вызывающий код использует fallback).
@@ -5111,6 +11680,13 @@ class AudioSpeedAnalyzer:
         if not self.gps_points or len(self.gps_points) < 3:
             return False
 
+        # v0.57.7: history-калибровка ВОССТАНОВЛЕНА.
+        # В v0.57.0 была отключена как временная мера, пока
+        # корреляционный сигнал строился с фиксированной
+        # привязкой к self.h5/self.h4 (формы кривых не совпадали).
+        # В v0.57.5 rolling-трекинг в корреляции + в v0.57.6
+        # критерий min RMSE сделали калибровку по длинному окну
+        # надёжной.
         longest = self._find_longest_history_entry(f_start, f_end)
         if longest is None:
             return False
@@ -5263,9 +11839,14 @@ class AudioSpeedAnalyzer:
         if self.gps_points and len(self.gps_points) >= 3:
             gps_times = [p[0] for p in self.gps_points]
             gps_speeds = [p[1] for p in self.gps_points]
-            override = self.cfg.get('gps_lag_override')
-            if override is not None:
-                self.gps_lag = float(override)
+            if (self.gps_lag_manual
+                    and self._gps_lag_manual_input is not None):
+                self.gps_lag = float(self._gps_lag_manual_input)
+                self.gps_corr = 0.0
+                print(f"  GPS запаздывание: {self.gps_lag:+.3f} сек "
+                      f"(ручной режим)")
+            elif self.cfg.get('gps_lag_override') is not None:
+                self.gps_lag = float(self.cfg['gps_lag_override'])
                 self.gps_corr = 0.0
                 print(f"  GPS запаздывание: {self.gps_lag:.3f} сек "
                       f"(ручной ввод)")
@@ -5282,8 +11863,7 @@ class AudioSpeedAnalyzer:
                 audio_speeds_full = []
                 try:
                     # v0.54.0: строим аудио-сигнал только
-                    # внутри окна анализа [f_start, f_end],
-                    # а не по всему файлу.
+                    # внутри окна анализа [f_start, f_end].
                     step_check = 3
                     # v0.55.0: обрезаем края FFT.
                     edge_frames = 0
@@ -5298,17 +11878,45 @@ class AudioSpeedAnalyzer:
                     if f_end_corr <= f_start_corr:
                         f_start_corr = f_start
                         f_end_corr = f_end
+
+                    # v0.57.5: ROLLING-трекинг гармоник, как в цикле
+                    # шагов. Раньше h5_peak/h4_peak искались вокруг
+                    # ФИКСИРОВАННЫХ self.h5/self.h4 — при дрейфе
+                    # гармоники (504 -> 525 Гц) реальный пик выходит
+                    # за пределы +-peak_hz, и корреляция шла по
+                    # "чужому" локальному максимуму.
+                    cur_expected_h5 = self.h5
+                    cur_expected_h4 = self.h4
+
+                    # Прогрев: прокрутить трекинг от f_start до
+                    # f_start_corr, чтобы состояние соответствовало
+                    # началу корреляционного окна.
+                    for step_i_check in range(f_start, f_start_corr,
+                                              step_check):
+                        if step_i_check >= self.n_frames:
+                            break
+                        col = self.S_db[:, step_i_check]
+                        cur_expected_h5 = find_peak_near(
+                            self.freqs, col, cur_expected_h5,
+                            peak_hz, f_lo5, f_hi5)
+                        cur_expected_h4 = find_peak_near(
+                            self.freqs, col, cur_expected_h4,
+                            peak_hz, f_lo4, f_hi4)
+
                     for step_i_check in range(f_start_corr,
                                               f_end_corr,
                                               step_check):
                         if step_i_check >= self.n_frames:
                             break
                         col = self.S_db[:, step_i_check]
-                        h5_peak = find_peak_near(self.freqs, col, self.h5,
-                                                 peak_hz, f_lo5, f_hi5)
-                        h4_peak = find_peak_near(self.freqs, col, self.h4,
-                                                 peak_hz, f_lo4, f_hi4)
-                        _, _, _, v_tmp = self._calc_speed(h5_peak, h4_peak)
+                        cur_expected_h5 = find_peak_near(
+                            self.freqs, col, cur_expected_h5,
+                            peak_hz, f_lo5, f_hi5)
+                        cur_expected_h4 = find_peak_near(
+                            self.freqs, col, cur_expected_h4,
+                            peak_hz, f_lo4, f_hi4)
+                        _, _, _, v_tmp = self._calc_speed(
+                            cur_expected_h5, cur_expected_h4)
                         audio_times_full.append(step_i_check / fps)
                         audio_speeds_full.append(v_tmp)
                     if len(audio_times_full) >= 10:
@@ -5347,11 +11955,50 @@ class AudioSpeedAnalyzer:
                               f"{min(gps_speeds):.2f}.."
                               f"{max(gps_speeds):.2f} км/ч "
                               f"(std={np.std(gps_speeds):.3f})")
-                        self.gps_lag, self.gps_corr, lag_results = \
-                            find_gps_lag(arr_t.tolist(),
-                                         arr_v_sm.tolist(),
-                                         gps_times,
-                                         gps_v_sm.tolist())
+                        # v0.56.5: зоны недоверия + маска
+                        self.gps_doubt_zones = find_doubt_zones(
+                            list(zip(gps_times, gps_speeds)),
+                            self.cfg)
+                        if self.gps_doubt_zones:
+                            print("  Зоны недоверия (%d): " 
+                                  % len(self.gps_doubt_zones),
+                                  file=sys.stderr)
+                            for z0, z1, rsn in self.gps_doubt_zones[:5]:
+                                print("    [%.2f, %.2f] %s" 
+                                      % (z0, z1, rsn),
+                                      file=sys.stderr)
+                        _pts = list(zip(gps_times, gps_speeds))
+                        self.gps_weights = mask_gps_points(
+                            _pts, self.gps_doubt_zones)
+                        _n_valid = sum(self.gps_weights)
+                        _n_total = len(self.gps_weights)
+                        if _n_valid < _n_total:
+                            print("  В корреляции: %d из %d точек " 
+                                  "(исключено %d)" 
+                                  % (_n_valid, _n_total,
+                                     _n_total - _n_valid),
+                                  file=sys.stderr)
+
+                        # v0.56.5: проверка порога минимума
+                        _min_pts = int(self.cfg.get(
+                            "doubt_min_points", 15))
+                        if _n_valid < _min_pts:
+                            print("  [WARN] Точек для корреляции "
+                                  "мало (%d < %d). Лаг = 0.0, "
+                                  "задайте gps_lag_override "
+                                  "в конфиге." 
+                                  % (_n_valid, _min_pts),
+                                  file=sys.stderr)
+                            self.gps_lag = 0.0
+                            self.gps_corr = 0.0
+                            lag_results = []
+                        else:
+                            self.gps_lag, self.gps_corr, lag_results = \
+                                find_gps_lag(arr_t.tolist(),
+                                             arr_v_sm.tolist(),
+                                             gps_times,
+                                             gps_v_sm.tolist(),
+                                             point_weights=self.gps_weights)
                         # DEBUG: [GPS-lag-set]
                         print(f"[GPS-lag-set] correlation -> "
                               f"lag={self.gps_lag:+.4f}s, "
@@ -5380,11 +12027,19 @@ class AudioSpeedAnalyzer:
                                   f"({_e})",
                                   file=sys.stderr)
                         if lag_results:
-                            print("  Топ-5 лагов по корреляции:")
-                            for l, c, nn in lag_results[:5]:
+                            print("  Топ-5 лагов по RMSE "
+                                  "(меньше — лучше):")
+                            for row in lag_results[:5]:
+                                if len(row) == 4:
+                                    l, c, rm, nn = row
+                                else:
+                                    l, c, nn = row
+                                    rm = float('nan')
                                 marker = (" <==" if abs(l - self.gps_lag)
                                           < 1e-9 else "")
-                                print(f"    {l:+.1f}с  corr={c:+.3f}  "
+                                print(f"    {l:+.1f}с  "
+                                      f"rmse={rm:7.3f}  "
+                                      f"corr={c:+.3f}  "
                                       f"n={nn}{marker}")
                         print(f"  GPS запаздывание: {self.gps_lag:+.3f} сек "
                               f"(корреляция: {self.gps_corr:+.3f})")
@@ -5544,7 +12199,8 @@ class AudioSpeedAnalyzer:
         dv_min = dv_max = dv_avg = 0.0
         n_min_v = n_max_v = 0
         f0_avg = 0.0
-        Rk_v = (0.85 * self.cfg['tire_width'] * self.cfg['tire_profile']
+        _c_def = float(self.cfg.get('tire_deflection_coeff', 0.84))
+        Rk_v = (_c_def * self.cfg['tire_width'] * self.cfg['tire_profile']
                 / 100000.0 + 0.0127 * self.cfg['rim_diameter'])
 
         print(f"\n{'='*70}")
@@ -5691,28 +12347,8 @@ class AudioSpeedAnalyzer:
         elif self.phase == self.PHASE_H4:
             parts.append("Кликните мышью по 4-й гармонике")
         elif self.phase == self.PHASE_DONE:
-            # --- Диапазон анализа (кадры и секунды) ---
-            try:
-                fps_status = float(self.cfg['target_fps'])
-                f_s = int(round(self.analyze_start))
-                f_d = int(round(self.analyze_dur))
-                if f_d < 1:
-                    f_d = 1
-                f_e = min(f_s + f_d, self.n_frames)
-                if f_e <= f_s:
-                    f_e = min(f_s + 1, self.n_frames)
-                if fps_status > 0:
-                    t0 = f_s / fps_status
-                    t1 = f_e / fps_status
-                    parts.append(
-                        f"Диап: кадры {f_s}-{f_e} "
-                        f"({t0:.3f}-{t1:.3f}с)"
-                    )
-                else:
-                    parts.append(f"Диап: кадры {f_s}-{f_e}")
-            except Exception:
-                pass
-
+            # [fix2/3-v2g] Блок «Диап: кадры A-B (t-t)» убран:
+            # дублирует крайние тики графика и штамп MSK.
             if not self._algo_run_done:
                 parts.append("Выберите алгоритм: 1.dB ... 6.RMS")
                 if self.h5 is not None:
@@ -5748,20 +12384,25 @@ class AudioSpeedAnalyzer:
                     # (как в отчёте). Если активен gps_lag_override из
                     # JSON — помечаем «(OVR)».
                     gps_dt_used = self.gps_lag
-                    _override = self.cfg.get('gps_lag_override')
                     ovr_flag = False
-                    if _override is not None:
-                        try:
-                            gps_dt_used = float(_override)
-                            ovr_flag = True
-                        except (ValueError, TypeError):
-                            pass
+                    if (self.gps_lag_manual
+                            and self._gps_lag_manual_input is not None):
+                        gps_dt_used = float(self._gps_lag_manual_input)
+                        ovr_flag = True
+                    else:
+                        _override = self.cfg.get('gps_lag_override')
+                        if _override is not None:
+                            try:
+                                gps_dt_used = float(_override)
+                                ovr_flag = True
+                            except (ValueError, TypeError):
+                                pass
                     # v0.56.1: маркер (H) — dGPS применён из
                     # калибровки по длинному интервалу из истории.
                     _calib_flag = (not ovr_flag
                                     and self.gps_lag_calib_info
                                     is not None)
-                    _mark = (" (OVR)" if ovr_flag
+                    _mark = (" (Ручн)" if ovr_flag
                              else (" (H)" if _calib_flag else ""))
                     parts.append(f"Δgps={gps_dt_used:+.3f}с" + _mark)
 
@@ -5827,6 +12468,7 @@ def prompt_car_params(config, config_path):
         ('rim_diameter',  'Диаметр диска', int),
         ('final_drive',   'Главная пара',  float),
         ('gear_ratio',    'Передача КПП',  float),
+        ('accel_0_100_sec', 'Разгон 0-100 км/ч', float),
     ]
 
     print("\nПАРАМЕТРЫ АВТОМОБИЛЯ (из config):", file=sys.stderr)
@@ -5839,6 +12481,9 @@ def prompt_car_params(config, config_path):
           f"R{config['rim_diameter']}", file=sys.stderr)
     print(f"  ГП:            {config['final_drive']}", file=sys.stderr)
     print(f"  КПП:           {config['gear_ratio']}", file=sys.stderr)
+    if "accel_0_100_sec" in config:
+        print(f"  0-100 км/ч:    {config['accel_0_100_sec']} с",
+              file=sys.stderr)
     print("Согласны? (Enter=да / n=ввести новые):",
           file=sys.stderr, flush=True)
 
