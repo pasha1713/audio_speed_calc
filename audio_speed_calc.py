@@ -19,6 +19,7 @@ audio_speed_calc.py v0.53
     пустого analyze_dur и от исключений при пересчёте.
 """
 
+import re
 import os
 import sys
 import json
@@ -1298,11 +1299,18 @@ DEFAULT_CONFIG = {
     "ssa_gps_speed_enabled": True,
     # v0.58.10.6: расщеплять каждый Dialogue на N кадров
     # (1 Dialogue на 1/fps с). False — 1 Dialogue на GPS-пакет.
-    "ssa_split_per_frame": False,
+    "ssa_split_per_frame": True,
     # v0.58.13
     "ssa_time_correction_sec": 0.0,
+    # v1.1 (patch_correction_modes): режим коррекции.
+    #   "current"  — коррекция накапливается (старая + дельта)
+    #   "original" — коррекция перезаписывается от исходного базового
+    "msk_correction_mode": "current",
+    "gps_correction_mode": "current",
+    # v1.1: писать дополнительный <base>_zero.ssa (0 коррекций)
+    "ssa_write_zero_offset_copy": False,
     # v0.58.13-fix5: .3f в Start/End SSA (иначе .cc).
-    "ssa_time_precision_ms": True,
+    "ssa_time_precision_ms": False,
     # v0.58.13-fix11: доля от исходной длительности Dialogue
     # в SPLIT и FULL .ssa (одинаковая формула).
     #   dur_ms = round((1000/fps) * N * frac)
@@ -2619,6 +2627,7 @@ HELP_LEFT_LINES = [
     "МЫШЬ:",
     "  Drag — выбор диапазона + масштаб",
     "  Клик — выбор гармоники H5/H4",
+    "  Правый клик — коррекция MSK и GPS",
     "",
     "СОСТОЯНИЕ (статусная строка):",
     "  [N/5]    — текущий шаг",
@@ -2648,8 +2657,7 @@ HELP_LEFT_LINES = [
     "  Цвет         — градаций (1-255)",
     "  Пик,Гц       — поиск пика (1-30)",
     "  ΔGPS,с       — ручной сдвиг GPS",
-    "  МСК,с        — поправка времени",
-    "                 ТОЛЬКО для .ssa",
+    "  GPS: Авто/Ручн — режим dGPS",
     "",
     "dGPS-КАЛИБРОВКА:",
     "  Авто по самому длинному интервалу",
@@ -2657,12 +2665,19 @@ HELP_LEFT_LINES = [
     "  Отключить: gps_lag_from_history=false",
 ]
 
-HELP_RIGHT_LINES = [
+HELP_MID_LINES = [
     "ОВЕРЛЕЙ:",
     "  Прям. — линии H5/H4 min/max",
     "  Факт. — кривые по шагам",
     "  Оба   — и линии, и кривые",
     "  Выкл  — ничего",
+    "",
+    "КОРРЕКЦИЯ MSK И GPS:",
+    "  Правый клик мыши по спектрограмме",
+    "  открывает окно ручной коррекции",
+    "  времени (MSK) и координат (GPS)",
+    "  для выбранного кадра.",
+    "  Сохраняется в JSON-конфиг.",
     "",
     "НАВИГАЦИЯ ПО ИСТОРИИ:",
     "  Назад / Вперед — по позициям",
@@ -2685,7 +2700,9 @@ HELP_RIGHT_LINES = [
     "  Жалоба   — сборка папок для подачи",
     "             (Госуслуги / ЦАФАП)",
     "  Выход    — закрыть программу",
-    "",
+]
+
+HELP_RIGHT_LINES = [
     "КЛАВИШИ:",
     "  ? — помощь      Q — выход",
     "  S — сохр. конфиг + PNG",
@@ -4055,28 +4072,24 @@ def _read_text_auto(path):
     return raw.decode('latin-1', errors='replace')
 
 
-def _parse_ssa_dt(ssa_path):
-    if not ssa_path or not os.path.isfile(ssa_path):
+    def _parse_ssa_dt(self, ssa_path):
+        """Возвращает datetime из первого Dialogue .ssa, где есть Дата/Время."""
+        import re
+        if not ssa_path or not os.path.isfile(ssa_path):
+            return None
+        try:
+            with open(ssa_path, 'r', encoding='utf-8', errors='replace') as f:
+                for line in f:
+                    if 'Дата/Время:' not in line:
+                        continue
+                    m = re.search(
+                        r'Дата/Время:\s*(\d{4})-(\d{2})-(\d{2})\s+'
+                        r'(\d{2}):(\d{2}):(\d{2})', line)
+                    if m:
+                        return datetime.datetime(*map(int, m.groups()))
+        except Exception:
+            return None
         return None
-    text = _read_text_auto(ssa_path)
-    if text is None:
-        return None
-    for line in text.splitlines():
-        if not line.startswith('Dialogue:'):
-            continue
-        m = re.search(
-            r'Дата/Время:\s*'
-            r'(\d{4})-(\d{2})-(\d{2})\s+'
-            r'(\d{2}):(\d{2}):(\d{2})', line)
-        if m:
-            try:
-                return datetime(*map(int, m.groups()))
-            except Exception:
-                return None
-        break
-    return None
-
-
 def resolve_base_dt(ssa_path, mtime_path, warn_sec):
     mt = None
     if mtime_path and os.path.isfile(mtime_path):
@@ -5343,6 +5356,7 @@ class AudioSpeedAnalyzer:
                 _current_first_epoch = None
                 if gps_valid:
                     _current_first_epoch = min(p[0] for p in gps_valid)
+                self.gps_first_epoch = _current_first_epoch
                 self.gps_points_full = gps_to_relative_time(
                     merged_epoch, _current_first_epoch)
                 # Для обратной совместимости: gps_points — это
@@ -5626,7 +5640,6 @@ class AudioSpeedAnalyzer:
             ('width', 'Шир'), ('step', 'Шаг'), ('color', 'Цвет'),
             ('peak', 'Пик'),
             ('gps_lag', 'ΔGPS,с'),   # v0.58.0: ручная коррекция
-            ('msk_corr', 'МСК,с'),   # fix2/3: коррекция MSK
         ]
         for i, (name, label) in enumerate(_tb_defs):
             _init_val = ''
@@ -5647,7 +5660,6 @@ class AudioSpeedAnalyzer:
             self.tb_y_min, self.tb_y_max,
             self.tb_width, self.tb_step, self.tb_color, self.tb_peak,
             self.tb_gps_lag,
-            self.tb_msk_corr,        # fix2/3
         ]
 
         # v0.58.0: переключатель GPS: Авто/Ручн.
@@ -9987,9 +9999,6 @@ class AudioSpeedAnalyzer:
             else:
                 _lag_show = self.gps_lag
             self.tb_gps_lag.set_val(f"{float(_lag_show):+.3f}")
-            # fix2/3: коррекция MSK
-            _corr = float(self.cfg.get('ssa_time_correction_sec', 0.0))
-            self.tb_msk_corr.set_val(f"{_corr:+.3f}")
         finally:
             self._syncing_fields = False
 
@@ -10211,77 +10220,146 @@ class AudioSpeedAnalyzer:
         return 0.0
 
     def _get_ssa_base_dt(self):
-        import re
-        """[msk-v3] База времени MSK для GUI.
+        """[msk-v8] OSD-база времени = filename(14 цифр) + video_start (ffprobe v:0).
 
-        Читает время из первого Dialogue .ssa (там MSK уже с
-        ssa_time_correction_sec) и ВЫЧИТАЕТ эту коррекцию, чтобы
-        GUI показывал исходное время кадра.
+        Именно эту базу использует make_disk_py.split_ssa_to_frames:
+            MSK(N) = base_dt_video + N/fps + ssa_time_correction_sec
 
-        Fallback: имя файла + ffprobe video_start; затем mtime.
+        Прежняя версия (msk-v7) брала «Дата/Время:» из .ssa и вычитала
+        ssa_time_correction_sec. В .ssa лежит GPS-время (на +1..+4с сдвинутое
+        относительно OSD), поэтому base_dt уезжал, и панель «Коррекция MSK
+        и GPS» показывала не то, что реально писалось в .ssa.
         """
         if getattr(self, '_ssa_base_dt', None) is not None:
             return self._ssa_base_dt
+
+        try:
+            ts_name = os.path.basename(self.filepath)
+            _m = re.search(r'(\d{14})', ts_name)
+            if not _m:
+                raise ValueError("в имени нет 14 цифр даты/времени")
+            _s = _m.group(1)
+            _dt_name = datetime.datetime(
+                int(_s[0:4]), int(_s[4:6]), int(_s[6:8]),
+                int(_s[8:10]), int(_s[10:12]), int(_s[12:14]))
+
+            _v_start = 0.0
+            if _FFPROBE_PATH:
+                try:
+                    _cmd = [_FFPROBE_PATH, '-v', 'error',
+                            '-select_streams', 'v:0',
+                            '-show_entries', 'stream=start_time',
+                            '-of', 'default=noprint_wrappers=1',
+                            self.filepath]
+                    _r = subprocess.run(
+                        _cmd, capture_output=True, text=True, timeout=10,
+                        encoding='utf-8', errors='replace')
+                    if _r.returncode == 0:
+                        for _ln in _r.stdout.splitlines():
+                            if _ln.startswith('start_time='):
+                                try:
+                                    _v_start = float(
+                                        _ln.split('=', 1)[1].strip())
+                                except ValueError:
+                                    pass
+                                break
+                except Exception:
+                    pass
+
+            self._ssa_base_dt = _dt_name + datetime.timedelta(
+                seconds=_v_start)
+            self._ssa_base_dt_source_path = (
+                "Имя файла + video_start (%.3fs)" % _v_start)
+            print('[msk-v8] base_dt = %s  (filename + video_start %.3fs)'
+                  % (self._ssa_base_dt, _v_start), flush=True)
+            return self._ssa_base_dt
+        except Exception as _e:
+            print('[msk-v8] base_dt: filename+video_start не удалось '
+                  '(%s), fallback на .ssa (msk-v7)' % _e,
+                  file=sys.stderr, flush=True)
+            return self._get_ssa_base_dt_from_ssa()
+
+    def _get_ssa_base_dt_from_ssa(self):
+        """[msk-v8] Старое поведение msk-v7: GPS-время из .ssa минус corr.
+        Используется только если filename+video_start невозможны
+        (например, имя .ts не содержит 14 цифр)."""
+        if getattr(self, '_ssa_base_dt', None) is not None:
+            return self._ssa_base_dt
+
         _corr = float(self.cfg.get('ssa_time_correction_sec', 0.0))
         try:
             ts_dir = os.path.dirname(os.path.abspath(self.filepath))
             ts_name = os.path.basename(self.filepath)
             base = os.path.splitext(ts_name)[0]
-            for cand in (
-                os.path.join(ts_dir, 'ssa', ts_name + '.ssa'),
-                os.path.join(ts_dir, 'ssa', base + '.ssa'),
+            parent_dir = os.path.dirname(ts_dir)
+            series = '4k' if ts_name.upper().endswith('A.TS') else '2k'
+
+            cands = [
                 os.path.join(ts_dir, base + '.ssa'),
-            ):
+                os.path.join(ts_dir, 'ssa', base + '.ssa'),
+                os.path.join(ts_dir, 'ssa', ts_name + '.ssa'),
+                os.path.join(ts_dir, series, base + '.ssa'),
+                os.path.join(ts_dir, series, 'ssa', base + '.ssa'),
+                os.path.join(ts_dir, series, 'ssa', ts_name + '.ssa'),
+                os.path.join(ts_dir, '2k', base + '.ssa'),
+                os.path.join(ts_dir, '2k', 'ssa', base + '.ssa'),
+                os.path.join(ts_dir, '4k', base + '.ssa'),
+                os.path.join(ts_dir, '4k', 'ssa', base + '.ssa'),
+                os.path.join(parent_dir, base + '.ssa'),
+                os.path.join(parent_dir, 'ssa', base + '.ssa'),
+                os.path.join(parent_dir, series, base + '.ssa'),
+                os.path.join(parent_dir, series, 'ssa', base + '.ssa'),
+                os.path.join(parent_dir, '2k', base + '.ssa'),
+                os.path.join(parent_dir, '2k', 'ssa', base + '.ssa'),
+                os.path.join(parent_dir, '4k', base + '.ssa'),
+                os.path.join(parent_dir, '4k', 'ssa', base + '.ssa'),
+            ]
+            seen = set()
+            for cand in cands:
+                if cand in seen:
+                    continue
+                seen.add(cand)
                 if os.path.isfile(cand):
                     _dt = self._parse_ssa_dt(cand)
                     if _dt is not None:
-                        self._ssa_base_dt = _dt - datetime.timedelta(seconds=_corr)
-                        print('[msk-v3] base_dt из .ssa: %s - corr(%+.3f) = %s'
-                              % (_dt, _corr, self._ssa_base_dt), flush=True)
+                        self._ssa_base_dt = _dt - datetime.timedelta(
+                            seconds=_corr)
+                        self._ssa_base_dt_source_path = cand
+                        print('[msk-v8/legacy] base_dt из .ssa: %s'
+                              % cand, flush=True)
                         return self._ssa_base_dt
-            _m = re.search(r'(\d{14})', ts_name)
-            if _m:
-                _s = _m.group(1)
-                _dt_name = datetime.datetime(
-                    int(_s[0:4]), int(_s[4:6]), int(_s[6:8]),
-                    int(_s[8:10]), int(_s[10:12]), int(_s[12:14]))
-                _v_start = 0.0
-                if _FFPROBE_PATH:
-                    try:
-                        _cmd = [_FFPROBE_PATH, '-v', 'error',
-                                '-select_streams', 'v:0',
-                                '-show_entries', 'stream=start_time',
-                                '-of', 'default=noprint_wrappers=1',
-                                self.filepath]
-                        _r = subprocess.run(_cmd, capture_output=True, text=True,
-                                            timeout=10, encoding='utf-8', errors='replace')
-                        if _r.returncode == 0:
-                            for _ln in _r.stdout.splitlines():
-                                if _ln.startswith('start_time='):
-                                    _v_start = float(_ln.split('=', 1)[1].strip())
-                                    break
-                    except Exception as _e:
-                        print('[msk-v3] ffprobe warn: %s' % _e, file=sys.stderr, flush=True)
-                self._ssa_base_dt = _dt_name + datetime.timedelta(seconds=_v_start)
-                print('[msk-v3] base_dt из имени + video_start(%.3f): %s'
-                      % (_v_start, self._ssa_base_dt), flush=True)
+
+            try:
+                self._ssa_base_dt = datetime.datetime.fromtimestamp(
+                    os.path.getmtime(self.filepath))
+                self._ssa_base_dt_source_path = "mtime файла (нет .ssa)"
                 return self._ssa_base_dt
-            self._ssa_base_dt = datetime.datetime.fromtimestamp(os.path.getmtime(self.filepath))
-            print('[msk-v3] base_dt из mtime: %s' % self._ssa_base_dt, flush=True)
-            return self._ssa_base_dt
-        except Exception as _e:
-            print('[msk-v3] base_dt error: %s' % _e, file=sys.stderr, flush=True)
-            self._ssa_base_dt = None
-            return None
+            except Exception:
+                pass
+        except Exception as _e2:
+            print('[msk-v8/legacy] base_dt error: %s' % _e2,
+                  file=sys.stderr, flush=True)
+
+        self._ssa_base_dt = None
+        self._ssa_base_dt_source_path = "Не найден"
+        return None
 
     def _format_msk(self, t_sec):
-        """[msk-v3] MSK для времени t_sec от начала .ts (без _corr)."""
+        """[msk-v8] MSK = base_dt(OSD) + t_sec + ssa_time_correction_sec.
+
+        Совпадает с тем, что split_ssa_to_frames пишет в .ssa
+        (и с тем, что под курсором мыши, и с штампом диапазона).
+        Раньше _corr не учитывался — штамп расходился с .ssa.
+        """
         base_dt = self._get_ssa_base_dt()
         if base_dt is None:
             return '[-]'
-        dt = base_dt + datetime.timedelta(seconds=float(t_sec))
+        _corr = float(self.cfg.get('ssa_time_correction_sec', 0.0))
+        dt = base_dt + datetime.timedelta(
+            seconds=float(t_sec) + _corr)
         return (dt.strftime('%d.%m.%Y %H:%M:%S.')
                 + '%03d MSK' % (dt.microsecond // 1000))
+
     def _update_range_msk_text(self):
         """[fix2/3-v2] Штамп диапазона ФРАГМЕНТА (analyze_start/dur).
 
@@ -10773,6 +10851,7 @@ class AudioSpeedAnalyzer:
     def _on_close(self, event):
         if getattr(self, '_closing', False):
             return
+        self._hide_help()
         self._closing = True
         self._save_view()
         # v0.56.0: автосохранение конфига убрано.
@@ -10781,6 +10860,7 @@ class AudioSpeedAnalyzer:
     def _on_exit(self, _=None):
         if getattr(self, '_closing', False):
             return
+        self._hide_help()
         self._closing = True
         self._save_view()
         # v0.56.0: автосохранение конфига убрано.
@@ -10828,6 +10908,10 @@ class AudioSpeedAnalyzer:
         for tb in self._tb_list:
             if getattr(tb, 'capturekeystrokes', False):
                 return True
+        if getattr(self, '_gps_corr_visible', False):
+            for tb in getattr(self, '_gps_corr_tbs', []):
+                if getattr(tb, 'capturekeystrokes', False):
+                    return True
         try:
             wl = self.fig.canvas.widgetlock
             if wl.locked():
@@ -10872,6 +10956,7 @@ class AudioSpeedAnalyzer:
         elif key == 'escape':
             self._hide_help()
             self._hide_algo_help()
+            self._hide_gps_corr_menu()
             self._set_phase(self.PHASE_TIME)
         elif key in ('q', 'Q'):
             self._on_exit()
@@ -11249,10 +11334,989 @@ class AudioSpeedAnalyzer:
         # v0.56.0: last_png_dir обновляется только в памяти.
         self.cfg['last_png_dir'] = png_dir
 
+    def _decimal_to_dms(self, val, is_lat=True):
+        if val is None:
+            return ""
+        direction = ('N' if val >= 0 else 'S') if is_lat else ('E' if val >= 0 else 'W')
+        val = abs(val)
+        d = int(val)
+        m_float = (val - d) * 60
+        m = int(m_float)
+        s = int(round((m_float - m) * 60))
+        if s >= 60:
+            s -= 60
+            m += 1
+        return f"{d}°{m:02d}'{s:02d}\" {direction}"
+
+    def _parse_dms(self, text):
+        import re
+        text = text.strip().upper()
+        if not text:
+            return None
+        direction = 1
+        if 'S' in text or 'W' in text:
+            direction = -1
+            text = text.replace('S', '').replace('W', '')
+        text = text.replace('N', '').replace('E', '')
+        
+        nums = re.findall(r'[-+]?\d*\.?\d+', text)
+        if len(nums) >= 3:
+            d = float(nums[0])
+            m = float(nums[1])
+            s = float(nums[2])
+            return direction * (d + m/60.0 + s/3600.0)
+        elif len(nums) == 1:
+            return direction * float(nums[0])
+        return None
+
+    def _toggle_gps_corr_menu(self, event):
+        if getattr(self, '_gps_corr_visible', False):
+            self._hide_gps_corr_menu()
+            return
+
+        if event.xdata is None or event.ydata is None:
+            return
+
+        self._gps_corr_visible = True
+        self._gps_corr_objs = []
+        self._gps_corr_axes = []
+        self._gps_corr_tbs = []
+
+        frame = int(event.xdata)
+        fps = self.cfg['target_fps']
+        
+        saved_frame = self.cfg.get('ssa_corr_frame')
+        # v3: всегда восстанавливаем сохранённые данные (frame+msk+lat+lon),
+        # клик по графику НЕ сбрасывает сохранённое состояние.
+        if saved_frame is not None:
+            frame = saved_frame
+            self._gps_corr_frame = frame
+            msk_str = self.cfg.get('ssa_corr_msk_text', '')
+            lat_str = self.cfg.get('ssa_corr_lat_text', '')
+            lon_str = self.cfg.get('ssa_corr_lon_text', '')
+            print(f"[GPS-CORR] Восстановлены данные для кадра {frame}")
+        else:
+            self._gps_corr_frame = frame
+            t_sec = frame / fps
+            base_dt = self._get_ssa_base_dt()
+            _corr = self.cfg.get('ssa_time_correction_sec', 0.0)
+            
+            if base_dt:
+                cur_dt = base_dt + datetime.timedelta(seconds=t_sec + _corr)
+                msk_str = cur_dt.strftime("%Y-%m-%d %H:%M:%S")
+            else:
+                msk_str = ""
+
+            lat_str = ""
+            lon_str = ""
+            if self.gps_points:
+                nearest = min(self.gps_points, key=lambda p: abs(p[0] - t_sec))
+                lat_str = self._decimal_to_dms(nearest[2], is_lat=True)
+                lon_str = self._decimal_to_dms(nearest[3], is_lat=False)
+
+        # v4: base_dt всегда определён (нужен для _base_str ниже).
+        # _get_ssa_base_dt() кэширует self._ssa_base_dt — повторный
+        # вызов дешёвый. В ветке восстановления (saved_frame is not None)
+        # base_dt раньше не определялся -> UnboundLocalError.
+        base_dt = self._get_ssa_base_dt()
+
+        import matplotlib.patches as mpatches
+        rect = mpatches.Rectangle((0.05, 0.02), 0.9, 0.90, transform=self.fig.transFigure,
+                                  facecolor='#f0f4f9', edgecolor='#1a3a6c', linewidth=2, alpha=0.95, zorder=100)
+        self.fig.add_artist(rect)
+        self._gps_corr_objs.append(rect)
+
+        title = self.fig.text(0.5, 0.88, "Коррекция MSK и GPS", ha='center', va='center',
+                              fontsize=12, fontweight='bold', color='#1a3a6c', zorder=101)
+        self._gps_corr_objs.append(title)
+
+        _src_path = getattr(self, '_ssa_base_dt_source_path', 'Не найден')
+        _base_str = base_dt.strftime("%Y-%m-%d %H:%M:%S") if base_dt else "Не найдено"
+        if len(_src_path) > 70:
+            _parts = _src_path.split(os.sep)
+            _mid = len(_parts) // 2
+            _display_src = os.sep.join(_parts[:_mid]) + "\n" + os.sep.join(_parts[_mid:])
+        else:
+            _display_src = _src_path
+        info_text = f"SSA-файл: {_display_src}\nБазовая дата: {_base_str}"
+        self._corr_info_text = self.fig.text(0.5, 0.80, info_text, ha='center', va='center',
+                                             fontsize=9, color='#333', zorder=101, 
+                                             bbox=dict(boxstyle='round,pad=0.4', fc='#fff', ec='#888'))
+        self._gps_corr_objs.append(self._corr_info_text)
+
+        lbl_frame = self.fig.text(0.15, 0.68, "Кадр:", fontsize=10, zorder=101)
+        self._gps_corr_objs.append(lbl_frame)
+        ax_frame = self.fig.add_axes([0.30, 0.66, 0.15, 0.04], zorder=101)
+        tb_frame = TextBox(ax_frame, '', initial=str(frame))
+        tb_frame.on_submit(self._on_corr_frame_submit)
+        self._gps_corr_objs.append(tb_frame)
+        self._gps_corr_axes.append(ax_frame)
+
+        lbl_msk = self.fig.text(0.15, 0.58, "MSK:", fontsize=10, zorder=101)
+        self._gps_corr_objs.append(lbl_msk)
+        ax_msk = self.fig.add_axes([0.30, 0.56, 0.45, 0.04], zorder=101)
+        tb_msk = TextBox(ax_msk, '', initial=msk_str)
+        tb_msk.on_submit(self._on_corr_apply)
+        self._gps_corr_objs.append(tb_msk)
+        self._gps_corr_axes.append(ax_msk)
+
+        lbl_lat = self.fig.text(0.15, 0.48, "Широта:", fontsize=10, zorder=101)
+        self._gps_corr_objs.append(lbl_lat)
+        ax_lat = self.fig.add_axes([0.30, 0.46, 0.20, 0.04], zorder=101)
+        tb_lat = TextBox(ax_lat, '', initial=lat_str)
+        tb_lat.on_submit(self._on_corr_apply)
+        self._gps_corr_objs.append(tb_lat)
+        self._gps_corr_axes.append(ax_lat)
+
+        lbl_lon = self.fig.text(0.55, 0.48, "Долгота:", fontsize=10, zorder=101)
+        self._gps_corr_objs.append(lbl_lon)
+        ax_lon = self.fig.add_axes([0.70, 0.46, 0.20, 0.04], zorder=101)
+        tb_lon = TextBox(ax_lon, '', initial=lon_str)
+        tb_lon.on_submit(self._on_corr_apply)
+        self._gps_corr_objs.append(tb_lon)
+        self._gps_corr_axes.append(ax_lon)
+
+        ax_btn = self.fig.add_axes([0.30, 0.34, 0.15, 0.05], zorder=101)
+        btn = Button(ax_btn, 'Рассчитать')
+        btn.on_clicked(self._on_corr_apply)
+        self._gps_corr_objs.append(btn)
+        self._gps_corr_axes.append(ax_btn)
+
+        ax_btn_close = self.fig.add_axes([0.55, 0.34, 0.15, 0.05], zorder=101)
+        btn_close = Button(ax_btn_close, 'Закрыть')
+        btn_close.on_clicked(self._hide_gps_corr_menu)
+        self._gps_corr_objs.append(btn_close)
+        self._gps_corr_axes.append(ax_btn_close)
+        
+        # Режимы коррекции: MSK и GPS — раздельные кнопки
+        ax_msk_mode = self.fig.add_axes([0.30, 0.40, 0.18, 0.04], zorder=101)
+        self._btn_msk_corr_mode = Button(
+            ax_msk_mode, self._msk_corr_mode_label())
+        self._btn_msk_corr_mode.label.set_fontsize(8)
+        self._btn_msk_corr_mode.on_clicked(self._toggle_msk_corr_mode)
+        self._gps_corr_objs.append(self._btn_msk_corr_mode)
+        self._gps_corr_axes.append(ax_msk_mode)
+        
+        ax_gps_mode = self.fig.add_axes([0.55, 0.40, 0.18, 0.04], zorder=101)
+        self._btn_gps_corr_mode = Button(
+            ax_gps_mode, self._gps_corr_mode_label())
+        self._btn_gps_corr_mode.label.set_fontsize(8)
+        self._btn_gps_corr_mode.on_clicked(self._toggle_gps_corr_mode)
+        self._gps_corr_objs.append(self._btn_gps_corr_mode)
+        self._gps_corr_axes.append(ax_gps_mode)
+
+        self._corr_before_text = self.fig.text(0.5, 0.30, "", ha='center', va='center',
+                                            fontsize=9, fontfamily='monospace', color='#333', zorder=101,
+                                            bbox=dict(boxstyle='round', fc='#eef', ec='#888'))
+        self._corr_after_text = self.fig.text(0.5, 0.27, "", ha='center', va='center',
+                                            fontsize=9, fontfamily='monospace', color='#004488', zorder=101,
+                                            bbox=dict(boxstyle='round', fc='#e6f7ff', ec='#004488'))
+        
+        self._corr_msk_delta_text = self.fig.text(0.5, 0.24, "", ha='center', va='center',
+                                            fontsize=9, color='#cc4400', zorder=101, fontweight='bold')
+        self._corr_gps_delta_text = self.fig.text(0.5, 0.21, "", ha='center', va='center',
+                                            fontsize=9, color='#006600', zorder=101, fontweight='bold')
+
+        # PATCH-PLAN-GPS-CORR-v2: читаемая сводка + кнопка «Детали»
+        self._corr_plan_short_text = self.fig.text(
+            0.5, 0.02, "", ha='center', va='bottom',
+            fontsize=9, family='monospace', color='#222', zorder=101,
+            bbox=dict(boxstyle='round,pad=0.4', fc='#f8f8e0', ec='#666'),
+            linespacing=1.15)
+        try:
+            _ax_btn_det = self.fig.add_axes(
+                [0.72, 0.34, 0.20, 0.05], zorder=101)
+            self._btn_plan_details = Button(
+                _ax_btn_det, 'Детали плана…')
+            self._btn_plan_details.label.set_fontsize(8)
+            self._btn_plan_details.on_clicked(
+                self._show_gps_plan_window)
+            self._gps_corr_objs.append(self._btn_plan_details)
+            self._gps_corr_axes.append(_ax_btn_det)
+        except Exception as _btn_e:
+            print("[plan-details] кнопка не создана: %s"
+                  % _btn_e, file=sys.stderr)
+
+        # PATCH-PLAN-GPS-CORR-v3: безопасный extend
+        self._gps_corr_objs.extend([
+            _o for _o in (
+                self._corr_before_text,
+                self._corr_after_text,
+                self._corr_msk_delta_text,
+                self._corr_gps_delta_text,
+                getattr(self, '_corr_plan_short_text', None),
+                getattr(self, '_corr_plan_text', None),
+            ) if _o is not None])
+
+        self._gps_corr_tbs = [tb_frame, tb_msk, tb_lat, tb_lon]
+        self._on_corr_apply()
+    def _hide_gps_corr_menu(self, event=None):
+        if not getattr(self, '_gps_corr_visible', False):
+            return
+        self._gps_corr_visible = False
+
+        # 1. Отключаем TextBox-ы от событий
+        for tb in getattr(self, '_gps_corr_tbs', []):
+            try:
+                tb.disconnect_events()
+            except Exception:
+                pass
+
+        # 2. Удаляем оси
+        for ax in getattr(self, '_gps_corr_axes', []):
+            try:
+                self.fig.delaxes(ax)
+            except Exception:
+                pass
+
+        # 3. Удаляем все объекты (текст, кнопки, рамку)
+        for obj in getattr(self, '_gps_corr_objs', []):
+            try:
+                obj.remove()
+            except Exception:
+                pass
+
+        # 4. Принудительно чистим список патчей фигуры от рамки, если она там осталась
+        if hasattr(self.fig, 'patches'):
+            self.fig.patches = [p for p in self.fig.patches if p not in getattr(self, '_gps_corr_objs', [])]
+
+        self._gps_corr_objs = []
+        self._gps_corr_axes = []
+        self._gps_corr_tbs = []
+
+        # 5. Полная перерисовка
+        self.fig.canvas.draw()
+    def _on_corr_frame_submit(self, text):
+        try:
+            frame = int(text)
+            self._gps_corr_frame = frame
+            fps = self.cfg['target_fps']
+            t_sec = frame / fps
+            
+            base_dt = self._get_ssa_base_dt()
+            _corr = self.cfg.get('ssa_time_correction_sec', 0.0)
+            if base_dt:
+                cur_dt = base_dt + datetime.timedelta(seconds=t_sec + _corr)
+                self._gps_corr_tbs[1].set_val(cur_dt.strftime("%Y-%m-%d %H:%M:%S"))
+            
+            if self.gps_points:
+                nearest = min(self.gps_points, key=lambda p: abs(p[0] - t_sec))
+                self._gps_corr_tbs[2].set_val(self._decimal_to_dms(nearest[2], is_lat=True))
+                self._gps_corr_tbs[3].set_val(self._decimal_to_dms(nearest[3], is_lat=False))
+                
+            self._on_corr_apply()
+        except ValueError:
+            pass
+    def _msk_corr_mode_label(self):
+        return ("MSK: от исх." if self.cfg.get(
+            'msk_correction_mode', 'current') == 'original'
+            else "MSK: от тек.")
+
+    def _gps_corr_mode_label(self):
+        return ("GPS: от исх." if self.cfg.get(
+            'gps_correction_mode', 'current') == 'original'
+            else "GPS: от тек.")
+
+    def _toggle_msk_corr_mode(self, _=None):
+        cur = self.cfg.get('msk_correction_mode', 'current')
+        self.cfg['msk_correction_mode'] = (
+            'original' if cur == 'current' else 'current')
+        if getattr(self, '_gps_corr_visible', False) and \
+                getattr(self, '_btn_msk_corr_mode', None) is not None:
+            self._btn_msk_corr_mode.label.set_text(
+                self._msk_corr_mode_label())
+            self.fig.canvas.draw_idle()
+            # v3: пересчитать состояние под новый режим
+            if getattr(self, '_gps_corr_tbs', None):
+                self._on_corr_apply()
+
+    def _toggle_gps_corr_mode(self, _=None):
+        cur = self.cfg.get('gps_correction_mode', 'current')
+        self.cfg['gps_correction_mode'] = (
+            'original' if cur == 'current' else 'current')
+        if getattr(self, '_gps_corr_visible', False) and \
+                getattr(self, '_btn_gps_corr_mode', None) is not None:
+            self._btn_gps_corr_mode.label.set_text(
+                self._gps_corr_mode_label())
+            self.fig.canvas.draw_idle()
+            # v3: пересчитать состояние под новый режим
+            if getattr(self, '_gps_corr_tbs', None):
+                self._on_corr_apply()
+
+    def _on_corr_apply(self, event=None):
+        if not getattr(self, '_gps_corr_visible', False):
+            return
+
+        try:
+            frame = int(self._gps_corr_tbs[0].text)
+        except ValueError:
+            self._corr_before_text.set_text(
+                "Ошибка: кадр должен быть числом")
+            return
+
+        msk_text = self._gps_corr_tbs[1].text.strip()
+        lat_text = self._gps_corr_tbs[2].text.strip()
+        lon_text = self._gps_corr_tbs[3].text.strip()
+
+        fps = self.cfg['target_fps']
+        t_sec = frame / fps
+
+        base_dt = self._get_ssa_base_dt()
+        _corr = float(self.cfg.get('ssa_time_correction_sec', 0.0))
+        _msk_mode = self.cfg.get('msk_correction_mode', 'current')
+        _gps_mode = self.cfg.get('gps_correction_mode', 'current')
+
+        # [msk-v8] base_dt — это OSD (filename + video_start).
+        # «MSK сейчас» в .ssa = base_dt + t_sec + _corr.
+        if base_dt is not None:
+            cur_dt = base_dt + datetime.timedelta(seconds=t_sec + _corr)
+            msk_before = cur_dt.strftime("%H:%M:%S")
+        else:
+            cur_dt = None
+            msk_before = "--:--:--"
+
+        lat_before = None
+        lon_before = None
+        if self.gps_points:
+            nearest = min(self.gps_points,
+                          key=lambda p: abs(p[0] - t_sec))
+            lat_before = nearest[2]
+            lon_before = nearest[3]
+            lat_before_str = self._decimal_to_dms(lat_before, is_lat=True)
+            lon_before_str = self._decimal_to_dms(lon_before, is_lat=False)
+        else:
+            lat_before_str = "--"
+            lon_before_str = "--"
+
+        before_full = ("MSK: %s | Lat: %s | Lon: %s"
+                       % (msk_before, lat_before_str, lon_before_str))
+        self._corr_before_text.set_text("В .ssa сейчас:   " + before_full)
+
+        msk_after_str = msk_before
+        dt_after = None
+
+        if msk_text:
+            for fmt in ("%Y-%m-%d %H:%M:%S", "%d.%m.%Y %H:%M:%S"):
+                try:
+                    dt_after = datetime.datetime.strptime(
+                        msk_text, fmt)
+                    break
+                except ValueError:
+                    continue
+            if dt_after is None:
+                try:
+                    dt_after = datetime.datetime.strptime(
+                        msk_text, "%H:%M:%S")
+                    if cur_dt:
+                        dt_after = dt_after.replace(
+                            year=cur_dt.year, month=cur_dt.month,
+                            day=cur_dt.day)
+                except ValueError:
+                    pass
+
+        if dt_after and base_dt is not None:
+            if _msk_mode == 'original':
+                # [msk-v8] base_dt — «сырая» OSD-база, без _corr.
+                # new_corr = dt_after - (OSD + t_sec) — это и есть
+                # коррекция ОТ ИСХОДНОЙ базы. Раньше использовалась
+                # actual_base (=base_dt+_corr), из-за чего new_corr
+                # получался на _corr меньше — и в original-режиме
+                # «сдвиг не реплицировался» (оставался прежним).
+                _orig_msk = base_dt + datetime.timedelta(seconds=t_sec)
+                new_corr = (dt_after - _orig_msk).total_seconds()
+            else:  # 'current'
+                if cur_dt is None:
+                    cur_dt = (base_dt + datetime.timedelta(
+                        seconds=t_sec + _corr))
+                new_corr = _corr + (dt_after - cur_dt).total_seconds()
+            self.cfg['ssa_time_correction_sec'] = new_corr
+            self._ssa_base_dt = None
+            msk_after_str = dt_after.strftime("%H:%M:%S")
+            self._corr_msk_delta_text.set_text(
+                "Сдвиг MSK: %+.3f с [%s] (сохранено)"
+                % (new_corr, _msk_mode))
+        else:
+            self._corr_msk_delta_text.set_text(
+                "Сдвиг MSK: %+.3f с [%s] (без изменений)"
+                % (_corr, _msk_mode))
+
+        lat_after_str = lat_before_str
+        lon_after_str = lon_before_str
+        _existing_gps_corr = float(
+            self.cfg.get('ssa_gps_time_correction_sec', 0.0))
+
+        lat_in = self._parse_dms(lat_text)
+        lon_in = self._parse_dms(lon_text)
+
+        # PATCH-LOG-GPS-CORR: подробный лог расчёта.
+        _log_lines = []
+        _log_lines.append("=" * 70)
+        _log_lines.append(
+            "Правый клик -> Рассчитать: %s"
+            % datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        _log_lines.append(
+            "frame=%d  t_sec=%.6f  fps=%.3f"
+            % (frame, t_sec, fps))
+        _log_lines.append(
+            "lat_in=%r -> %r   lon_in=%r -> %r"
+            % (lat_text, lat_in, lon_text, lon_in))
+        _log_lines.append(
+            "msk_text_field=%r  _corr=%.6f  _gps_mode=%r"
+            % (msk_text, _corr, _gps_mode))
+        try:
+            _base_str = (base_dt.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+                         if base_dt is not None else "None")
+        except Exception:
+            _base_str = "Exception"
+        _log_lines.append("base_dt=%s" % _base_str)
+        _log_lines.append(
+            "gps_points_total=%d"
+            % (len(self.gps_points) if self.gps_points else 0))
+
+        if lat_in is not None and lon_in is not None and self.gps_points:
+            import math as _m_log
+            _cos_lat = _m_log.cos(_m_log.radians(lat_in))
+            _cand = []
+            for _p in self.gps_points:
+                _dlat = _p[2] - lat_in
+                _dlon = _p[3] - lon_in
+                _d_deg = (_dlat * _dlat + _dlon * _dlon) ** 0.5
+                _d_m = (((_dlat * 111320.0) ** 2
+                         + (_dlon * 111320.0 * _cos_lat) ** 2) ** 0.5)
+                _cand.append((_d_deg, _d_m, _p[0], _p[2], _p[3]))
+            _cand.sort(key=lambda x: x[0])
+            _log_lines.append(
+                "Топ-15 по dist_deg (как в текущем min):")
+            _log_lines.append(
+                "  %2s  %12s  %14s  %14s  %10s  %10s"
+                % ("#", "t_gps", "lat", "lon", "dist_deg", "dist_m"))
+            for _i, _c in enumerate(_cand[:15]):
+                _log_lines.append(
+                    "  %2d  %+12.4f  %+14.7f  %+14.7f  %10.6f  %10.1f"
+                    % (_i, _c[2], _c[3], _c[4], _c[0], _c[1]))
+            _cand.sort(key=lambda x: x[1])
+            _log_lines.append(
+                "Топ-5 по dist_m (cos-lat) - что min должен выбрать:")
+            for _i, _c in enumerate(_cand[:5]):
+                _log_lines.append(
+                    "  %2d  %+12.4f  %+14.7f  %+14.7f  %10.6f  %10.1f"
+                    % (_i, _c[2], _c[3], _c[4], _c[0], _c[1]))
+
+            best_pt = min(
+                self.gps_points,
+                key=lambda p: ((p[2] - lat_in) ** 2
+                               + (p[3] - lon_in) ** 2))
+            t_gps = best_pt[0]
+
+            _dlat_sel = best_pt[2] - lat_in
+            _dlon_sel = best_pt[3] - lon_in
+            _d_deg_sel = (_dlat_sel * _dlat_sel
+                          + _dlon_sel * _dlon_sel) ** 0.5
+            _d_m_sel = (((_dlat_sel * 111320.0) ** 2
+                         + (_dlon_sel * 111320.0 * _cos_lat) ** 2) ** 0.5)
+            _log_lines.append(
+                "ВЫБРАНО min: t_gps=%+.4f  lat=%+.7f  lon=%+.7f  "
+                "dist_deg=%.6f  dist_m=%.1f"
+                % (t_gps, best_pt[2], best_pt[3],
+                   _d_deg_sel, _d_m_sel))
+            _log_lines.append(
+                "  (t_gps*fps = %d кадр)"
+                % int(round(t_gps * fps)))
+
+            _eff_lag = self._effective_lag()
+            _eff_lag_actual = _eff_lag
+            # PATCH-FIX-EFF-LAG: аудио-GPS сдвиг к .ssa
+            # не относится. Правильный сдвиг = t_sec - t_gps.
+            _eff_lag = 0.0
+            _log_lines.append(
+                "_eff_lag=%+.6f (actual=%+.6f, не применяется)"
+                % (_eff_lag, _eff_lag_actual))
+
+            if _gps_mode == "original":
+                t_gps_base = t_gps - _eff_lag
+                new_gps_corr = t_sec - t_gps_base
+                _log_lines.append(
+                    "calc (original): t_gps_base=%.6f  "
+                    "new_gps_corr = t_sec - t_gps_base = "
+                    "%.6f - %.6f = %+.6f"
+                    % (t_gps_base, t_sec, t_gps_base,
+                       new_gps_corr))
+            else:
+                new_gps_corr = _existing_gps_corr + (t_sec - t_gps)
+                _log_lines.append(
+                    "calc (current): _existing=%.6f  "
+                    "delta=%.6f  new=%+.6f"
+                    % (_existing_gps_corr, t_sec - t_gps,
+                       new_gps_corr))
+            _log_lines.append(
+                "  K = round(new_gps_corr*fps) = %d"
+                % int(round(new_gps_corr * fps)))
+        else:
+            best_pt = None
+            t_gps = None
+            _log_lines.append(
+                "поиск не выполнен: lat_in=%r lon_in=%r "
+                "gps_points=%d"
+                % (lat_in, lon_in,
+                   len(self.gps_points)
+                   if self.gps_points else 0))
+
+        try:
+            _ts_dir = os.path.dirname(
+                os.path.abspath(self.filepath))
+            _ts_base = os.path.splitext(
+                os.path.basename(self.filepath))[0]
+            _log_path = os.path.join(
+                _ts_dir, _ts_base + "_gps_corr_calc.log")
+            with open(_log_path, "a", encoding="utf-8") as _lf:
+                _lf.write("\n".join(_log_lines) + "\n")
+            print("[GPS-CORR] лог: %s" % _log_path,
+                  file=sys.stderr, flush=True)
+        except Exception as _le:
+            print("[GPS-CORR] лог не записан: %s" % _le,
+                  file=sys.stderr, flush=True)
+
+        if lat_in is not None and lon_in is not None and self.gps_points:
+            _eff_lag = 0.0  # PATCH-EFF-LAG-ZERO (SAVE)
+
+            if _gps_mode == 'original':
+                t_gps_base = t_gps - _eff_lag
+                new_gps_corr = t_sec - t_gps_base
+            else:
+                new_gps_corr = _existing_gps_corr + (t_sec - t_gps)
+
+            self.cfg['ssa_gps_time_correction_sec'] = new_gps_corr
+            lat_after_str = lat_text
+            lon_after_str = lon_text
+            gps_frame = int(round(t_gps * fps))
+            self._corr_gps_delta_text.set_text(
+                "Сдвиг GPS: %+.3f с [%s] "
+                "(Точка в кадре %d, сохранено)"
+                % (new_gps_corr, _gps_mode, gps_frame))
+        else:
+            self._corr_gps_delta_text.set_text(
+                "Сдвиг GPS: %+.3f с [%s] (без изменений)"
+                % (_existing_gps_corr, _gps_mode))
+
+        after_full = ("MSK: %s | Lat: %s | Lon: %s"
+                      % (msk_after_str, lat_after_str, lon_after_str))
+        self._corr_after_text.set_text("Станет в .ssa:   " + after_full)
+
+        self.cfg['ssa_corr_frame'] = frame
+        self.cfg['ssa_corr_msk_text'] = msk_text
+        self.cfg['ssa_corr_lat_text'] = lat_text
+        self.cfg['ssa_corr_lon_text'] = lon_text
+
+        try:
+            save_config(self.cfg, self.config_path)
+        except Exception:
+            pass
+
+        # PATCH-PLAN-GPS-CORR-v2: полный план -> в сводку
+        # сохраняем, короткий -> на панель.
+        try:
+            _plan_str = self._build_gps_plan(
+                frame=frame, t_sec=t_sec, fps=fps,
+                lat_in=lat_in, lon_in=lon_in,
+                gps_points=self.gps_points,
+                gps_mode=_gps_mode,
+                existing_gps_corr=_existing_gps_corr)
+            self._last_plan_str = _plan_str
+            # PATCH-PLAN-SAVE-TXT: сохраняем в файл.
+            self._save_gps_plan_txt(_plan_str)
+            _short_str = self._build_gps_plan_short(
+                frame=frame, t_sec=t_sec, fps=fps,
+                lat_in=lat_in, lon_in=lon_in,
+                gps_points=self.gps_points,
+                gps_mode=_gps_mode,
+                existing_gps_corr=_existing_gps_corr)
+            _short_obj = getattr(
+                self, '_corr_plan_short_text', None)
+            if _short_obj is None:
+                _short_obj = getattr(
+                    self, '_corr_plan_text', None)
+            if _short_obj is not None:
+                _short_obj.set_text(_short_str)
+        except Exception as _pl_e:
+            _short_obj = (getattr(
+                self, '_corr_plan_short_text', None)
+                or getattr(self, '_corr_plan_text', None))
+            if _short_obj is not None:
+                try:
+                    _short_obj.set_text(
+                        "Ошибка плана: %s" % _pl_e)
+                except Exception:
+                    pass
+
+        self.fig.canvas.draw()
+
+    def _build_gps_plan(self, frame, t_sec, fps, lat_in, lon_in,
+                        gps_points, gps_mode, existing_gps_corr):
+        """PATCH-PLAN-GPS-CORR: пошаговый план GPS-сдвига."""
+        import math as _mm
+
+        def _dms_f(deg, is_lat):
+            if deg is None:
+                return "-"
+            a = abs(deg)
+            d = int(a)
+            mf = (a - d) * 60.0
+            m = int(mf)
+            s = (mf - m) * 60.0
+            h = ('N' if deg >= 0 else 'S') if is_lat else \
+                ('E' if deg >= 0 else 'W')
+            return "%d\u00b0%02d'%05.2f\"%s" % (d, m, s, h)
+
+        out = []
+        out.append("План GPS-сдвига (кадры и секунды):")
+        out.append("")
+
+        if lat_in is None or lon_in is None or not gps_points:
+            out.append("GPS-сдвиг НЕ рассчитывается:")
+            out.append("  lat/lon не введены или GPS-точек нет")
+            out.append("  lat_in=%r  lon_in=%r  pts=%d"
+                       % (lat_in, lon_in,
+                          len(gps_points) if gps_points else 0))
+            return "\n".join(out)
+
+        cos_lat = _mm.cos(_mm.radians(lat_in))
+        cand_m = []
+        for p in gps_points:
+            dlat = p[2] - lat_in
+            dlon = p[3] - lon_in
+            dm = (((dlat * 111320.0) ** 2
+                   + (dlon * 111320.0 * cos_lat) ** 2) ** 0.5)
+            cand_m.append((dm, p[0], p[2], p[3]))
+        cand_m.sort(key=lambda x: x[0])
+
+        best_pt = min(
+            gps_points,
+            key=lambda p: ((p[2] - lat_in) ** 2
+                           + (p[3] - lon_in) ** 2))
+        t_gps = best_pt[0]
+        tg_frame = int(round(t_gps * fps))
+        eff_lag = 0.0  # PATCH-EFF-LAG-ZERO (plan)
+
+        out.append("1. Введено (lat/lon):")
+        out.append("   %s  %s"
+                   % (_dms_f(lat_in, True), _dms_f(lon_in, False)))
+        out.append("   = десятичное: %.8f, %.8f" % (lat_in, lon_in))
+        out.append("")
+
+        out.append("2. Поиск GPS-точки (топ-3 по dist_m):")
+        for i, c in enumerate(cand_m[:3]):
+            cf = int(round(c[1] * fps))
+            out.append(
+                "   #%d кадр %d t=%.3f\u0441 d=%.1f\u043c  %s %s"
+                % (i + 1, cf, c[1], c[0],
+                   _dms_f(c[2], True), _dms_f(c[3], False)))
+        out.append(
+            "   ВЫБРАНО min dist_deg: кадр %d t=%.3f\u0441"
+            % (tg_frame, t_gps))
+        out.append(
+            "     %s %s"
+            % (_dms_f(best_pt[2], True), _dms_f(best_pt[3], False)))
+        out.append("")
+
+        out.append("3. Целевой кадр (поле «Кадр»): %d" % frame)
+        out.append("   t_sec = %d/%.0f = %.3f\u0441"
+                   % (frame, fps, t_sec))
+        out.append("")
+
+        k_no_lag = frame - tg_frame
+        sec_no_lag = k_no_lag / fps
+        out.append("4. Перестановка: кадр %d \u2192 на кадр %d"
+                   % (tg_frame, frame))
+        out.append("   K_без_lag = %+d кадров = %+.3f\u0441"
+                   % (k_no_lag, sec_no_lag))
+        out.append("")
+
+        if gps_mode == "original":
+            t_base = t_gps - eff_lag
+            new_corr = t_sec - t_base
+            out.append("5. С _eff_lag=%+.6f\u0441 (original):"
+                       % eff_lag)
+            out.append("   t_gps_base = %.3f \u2212 (%.6f) = %.3f\u0441"
+                       % (t_gps, eff_lag, t_base))
+            out.append("   new_gps_corr = %.3f \u2212 %.3f = %+.6f\u0441"
+                       % (t_sec, t_base, new_corr))
+        else:
+            new_corr = existing_gps_corr + (t_sec - t_gps)
+            out.append("5. С _existing_gps_corr=%.6f\u0441 (current):"
+                       % existing_gps_corr)
+            out.append(
+                "   new_gps_corr = %.6f + (%.3f \u2212 %.3f) = %+.6f\u0441"
+                % (existing_gps_corr, t_sec, t_gps, new_corr))
+
+        k_final = int(round(new_corr * fps))
+        src_final = frame - k_final
+        out.append(
+            "   K_final = round(%+.6f\u00b7%.1f) = %+d кадров"
+            % (new_corr, fps, k_final))
+        out.append("")
+
+        out.append("6. Результат: make_disk применит")
+        out.append(
+            "   gps_part[%d] = gps_part_old[%d \u2212 (%+d)] = old[%d]"
+            % (frame, frame, k_final, src_final))
+        out.append(
+            "   old[%d] \u2192 блок %d (t_gps=%.1f\u0441)"
+            % (src_final, src_final // 30, src_final // 30 * 1.0))
+
+        return "\n".join(out)
+
+    def _build_gps_plan_short(self, frame, t_sec, fps, lat_in, lon_in,
+                               gps_points, gps_mode, existing_gps_corr):
+        """PATCH-PLAN-GPS-CORR-v3: 2-строчная сводка."""
+        import math as _mm
+
+        if lat_in is None or lon_in is None or not gps_points:
+            return ("GPS-сдвиг не рассчитан: "
+                    "нет lat/lon или GPS-точек")
+
+        cos_lat = _mm.cos(_mm.radians(lat_in))
+        best_pt = min(
+            gps_points,
+            key=lambda p: ((p[2] - lat_in) ** 2
+                           + (p[3] - lon_in) ** 2))
+        t_gps = best_pt[0]
+        tg_frame = int(round(t_gps * fps))
+        eff_lag = 0.0  # PATCH-EFF-LAG-ZERO (short)
+
+        if gps_mode == "original":
+            t_base = t_gps - eff_lag
+            new_corr = t_sec - t_base
+        else:
+            new_corr = existing_gps_corr + (t_sec - t_gps)
+        k_final = int(round(new_corr * fps))
+        src_final = frame - k_final
+
+        dlat_sel = best_pt[2] - lat_in
+        dlon_sel = best_pt[3] - lon_in
+        d_m_best = (((dlat_sel * 111320.0) ** 2
+                     + (dlon_sel * 111320.0 * cos_lat) ** 2) ** 0.5)
+
+        block = src_final // 30
+        t_block = block * 1.0
+
+        line1 = ("K=%+d кадров (%+.3f\u0441) \u2192 old[%d] \u2192 "
+                 "блок %d (t=%.1f\u0441)"
+                 % (k_final, k_final / fps, src_final,
+                    block, t_block))
+        line2 = ("Выбор: кадр %d (d=%.1f\u043c) | "
+                 "_eff_lag=%+.3f\u0441 | target=кадр %d"
+                 % (tg_frame, d_m_best, eff_lag, frame))
+        return line1 + "\n" + line2
+
+    def _show_gps_plan_window(self, _=None):
+        """PATCH-PLAN-GPS-CORR-v3: отдельное окно с полным планом."""
+        try:
+            import tkinter as tk
+            from tkinter import scrolledtext
+        except ImportError as e:
+            print("[plan-details] tkinter недоступен: %s" % e,
+                  file=sys.stderr)
+            return
+        plan = getattr(self, '_last_plan_str', '')
+        if not plan:
+            plan = "(план пуст — нажмите «Рассчитать» сначала)"
+        # PATCH-PLAN-SAVE-TXT: сохраняем при открытии.
+        _save_path = self._save_gps_plan_txt(plan)
+        if _save_path:
+            plan = (plan + "\n\n---\n"
+                    + "Сохранено: " + _save_path + "\n")
+        try:
+            top = tk.Toplevel()
+            top.title("План GPS-сдвига — детали")
+            top.minsize(600, 400)
+            _maximized = False
+            try:
+                top.state('zoomed')
+                _maximized = True
+            except Exception:
+                pass
+            if not _maximized:
+                try:
+                    top.attributes('-zoomed', True)
+                    _maximized = True
+                except Exception:
+                    pass
+            if not _maximized:
+                try:
+                    sw = top.winfo_screenwidth()
+                    sh = top.winfo_screenheight()
+                    top.geometry("%dx%d+0+0" % (sw, sh))
+                except Exception:
+                    pass
+            btn_frame = tk.Frame(top)
+            btn_frame.pack(side=tk.BOTTOM, fill=tk.X,
+                           padx=6, pady=6)
+            tk.Button(
+                btn_frame, text="Закрыть (Esc)",
+                command=top.destroy,
+                font=("Consolas", 11),
+            ).pack(side=tk.RIGHT)
+            txt = scrolledtext.ScrolledText(
+                top, wrap=tk.WORD,
+                font=("Consolas", 11))
+            txt.pack(side=tk.TOP, fill=tk.BOTH,
+                     expand=True, padx=6, pady=6)
+            txt.insert(tk.END, plan)
+            txt.configure(state='disabled')
+            top.bind('<Escape>', lambda e: top.destroy())
+            top.bind('<Control-w>', lambda e: top.destroy())
+            txt.see('1.0')
+            try:
+                top.focus_force()
+            except Exception:
+                pass
+        except Exception as e:
+            print("[plan-details] ошибка окна: %s" % e,
+                  file=sys.stderr)
+
+    def _build_gps_plan(self, frame, t_sec, fps, lat_in, lon_in,
+                        gps_points, gps_mode, existing_gps_corr):
+        """PATCH-PLAN-GPS-CORR: пошаговый план GPS-сдвига."""
+        import math as _mm
+
+        def _dms_f(deg, is_lat):
+            if deg is None:
+                return "-"
+            a = abs(deg)
+            d = int(a)
+            mf = (a - d) * 60.0
+            m = int(mf)
+            s = (mf - m) * 60.0
+            h = ('N' if deg >= 0 else 'S') if is_lat else \
+                ('E' if deg >= 0 else 'W')
+            return "%d\u00b0%02d'%05.2f\"%s" % (d, m, s, h)
+
+        out = []
+        out.append("План GPS-сдвига (кадры и секунды):")
+        out.append("")
+        if lat_in is None or lon_in is None or not gps_points:
+            out.append("GPS-сдвиг НЕ рассчитывается:")
+            out.append("  lat/lon не введены или GPS-точек нет")
+            out.append("  lat_in=%r  lon_in=%r  pts=%d"
+                       % (lat_in, lon_in,
+                          len(gps_points) if gps_points else 0))
+            return "\n".join(out)
+
+        cos_lat = _mm.cos(_mm.radians(lat_in))
+        cand_m = []
+        for p in gps_points:
+            dlat = p[2] - lat_in
+            dlon = p[3] - lon_in
+            dm = (((dlat * 111320.0) ** 2
+                   + (dlon * 111320.0 * cos_lat) ** 2) ** 0.5)
+            cand_m.append((dm, p[0], p[2], p[3]))
+        cand_m.sort(key=lambda x: x[0])
+
+        best_pt = min(
+            gps_points,
+            key=lambda p: ((p[2] - lat_in) ** 2
+                           + (p[3] - lon_in) ** 2))
+        t_gps = best_pt[0]
+        tg_frame = int(round(t_gps * fps))
+        eff_lag = 0.0  # PATCH-EFF-LAG-ZERO (plan)
+
+        out.append("1. Введено (lat/lon):")
+        out.append("   %s  %s"
+                   % (_dms_f(lat_in, True), _dms_f(lon_in, False)))
+        out.append("   = десятичное: %.8f, %.8f" % (lat_in, lon_in))
+        out.append("")
+        out.append("2. Поиск GPS-точки (топ-3 по dist_m):")
+        for i, c in enumerate(cand_m[:3]):
+            cf = int(round(c[1] * fps))
+            out.append(
+                "   #%d кадр %d t=%.3f\u0441 d=%.1f\u043c  %s %s"
+                % (i + 1, cf, c[1], c[0],
+                   _dms_f(c[2], True), _dms_f(c[3], False)))
+        out.append(
+            "   ВЫБРАНО min dist_deg: кадр %d t=%.3f\u0441"
+            % (tg_frame, t_gps))
+        out.append(
+            "     %s %s"
+            % (_dms_f(best_pt[2], True), _dms_f(best_pt[3], False)))
+        out.append("")
+        out.append("3. Целевой кадр (поле «Кадр»): %d" % frame)
+        out.append("   t_sec = %d/%.0f = %.3f\u0441"
+                   % (frame, fps, t_sec))
+        out.append("")
+        k_no_lag = frame - tg_frame
+        sec_no_lag = k_no_lag / fps
+        out.append("4. Перестановка: кадр %d \u2192 на кадр %d"
+                   % (tg_frame, frame))
+        out.append("   K_без_lag = %+d кадров = %+.3f\u0441"
+                   % (k_no_lag, sec_no_lag))
+        out.append("")
+        if gps_mode == "original":
+            t_base = t_gps - eff_lag
+            new_corr = t_sec - t_base
+            out.append("5. С _eff_lag=%+.6f\u0441 (original):"
+                       % eff_lag)
+            out.append("   t_gps_base = %.3f \u2212 (%.6f) = %.3f\u0441"
+                       % (t_gps, eff_lag, t_base))
+            out.append("   new_gps_corr = %.3f \u2212 %.3f = %+.6f\u0441"
+                       % (t_sec, t_base, new_corr))
+        else:
+            new_corr = existing_gps_corr + (t_sec - t_gps)
+            out.append("5. С _existing_gps_corr=%.6f\u0441 (current):"
+                       % existing_gps_corr)
+            out.append(
+                "   new_gps_corr = %.6f + (%.3f \u2212 %.3f) = %+.6f\u0441"
+                % (existing_gps_corr, t_sec, t_gps, new_corr))
+        k_final = int(round(new_corr * fps))
+        src_final = frame - k_final
+        out.append(
+            "   K_final = round(%+.6f\u00b7%.1f) = %+d кадров"
+            % (new_corr, fps, k_final))
+        out.append("")
+        out.append("6. Результат: make_disk применит")
+        out.append(
+            "   gps_part[%d] = gps_part_old[%d \u2212 (%+d)] = old[%d]"
+            % (frame, frame, k_final, src_final))
+        out.append(
+            "   old[%d] \u2192 блок %d (t_gps=%.1f\u0441)"
+            % (src_final, src_final // 30, src_final // 30 * 1.0))
+        return "\n".join(out)
+
+    def _save_gps_plan_txt(self, plan):
+        """PATCH-PLAN-SAVE-TXT: сохранить план в файл
+        «Детали плана.txt» рядом с .ts. Не поднимает исключений."""
+        try:
+            ts_dir = os.path.dirname(
+                os.path.abspath(self.filepath)) or "."
+            save_path = os.path.join(ts_dir, "Детали плана.txt")
+            with open(save_path, "w", encoding="utf-8") as f:
+                f.write(plan)
+                if not plan.endswith("\n"):
+                    f.write("\n")
+            print("[plan-details] сохранено: %s" % save_path,
+                  file=sys.stderr)
+            return save_path
+        except Exception as e:
+            print("[plan-details] файл не записан: %s" % e,
+                  file=sys.stderr)
+            return None
+
     def _on_click(self, event):
         if event.xdata is None or event.ydata is None:
             return
+        if getattr(self, '_gps_corr_visible', False):
+            if event.inaxes in getattr(self, '_gps_corr_axes', []):
+                return
+        if getattr(self, '_gps_corr_visible', False):
+            if event.inaxes in getattr(self, '_gps_corr_axes', []):
+                return
+        if getattr(self, '_gps_corr_visible', False):
+            if event.inaxes in getattr(self, '_gps_corr_axes', []):
+                return
         if event.inaxes != self.ax_spec:
+            return
+
+        if event.button == 3:
+            self._toggle_gps_corr_menu(event)
             return
 
         self._drag_start_frame = int(event.xdata)
@@ -12416,39 +13480,158 @@ class AudioSpeedAnalyzer:
             self._show_help()
 
     def _show_help(self):
-        left_lines = list(HELP_LEFT_LINES)
-        right_lines = list(HELP_RIGHT_LINES)
-        maxw_l = max(len(l) for l in left_lines)
-        maxw_r = max(len(l) for l in right_lines)
-        while len(right_lines) < len(left_lines):
-            right_lines.append("")
-        while len(left_lines) < len(right_lines):
-            left_lines.append("")
-        combined = []
-        for l, r in zip(left_lines, right_lines):
-            combined.append(l.ljust(maxw_l) + "  |  " + r.ljust(maxw_r))
-        txt = '\n'.join(combined)
-        self.help_obj = self.fig.text(
-            0.5, 0.5, txt,
-            transform=self.fig.transFigure,
-            fontsize=8, va='center', ha='center',
-            family='monospace', color='white',
-            bbox=dict(boxstyle='round,pad=0.8', facecolor='#1a1a2e',
-                      alpha=0.95, edgecolor='#e0e0e0', lw=1.5),
-            zorder=100
-        )
+        """[v0.58.14] Полноценное окно справки в 3 колонки (Tkinter)."""
+        if getattr(self, 'help_visible', False) and \
+                getattr(self, 'help_window', None) is not None:
+            return
+
+        try:
+            import tkinter as tk
+            from tkinter import scrolledtext
+        except ImportError as e:
+            print(f"[help] tkinter недоступен: {e}", file=sys.stderr)
+            print("=" * 70, file=sys.stderr)
+            for line in HELP_LEFT_LINES:
+                print(line, file=sys.stderr)
+            print("=" * 70, file=sys.stderr)
+            for line in HELP_MID_LINES:
+                print(line, file=sys.stderr)
+            print("=" * 70, file=sys.stderr)
+            for line in HELP_RIGHT_LINES:
+                print(line, file=sys.stderr)
+            print("=" * 70, file=sys.stderr)
+            return
+
+        parent = None
+        try:
+            parent = self.fig.canvas.manager.window
+            if not hasattr(parent, 'tk'):
+                parent = None
+        except Exception:
+            parent = None
+
+        try:
+            top = (tk.Toplevel(parent)
+                   if parent is not None else tk.Toplevel())
+        except Exception as e:
+            print(f"[help] не удалось создать окно: {e}",
+                  file=sys.stderr)
+            return
+
+        top.title("Справка — audio_speed_calc")
+        try:
+            top.minsize(900, 600)
+        except Exception:
+            pass
+
+        maximized = False
+        try:
+            top.state('zoomed')
+            maximized = True
+        except Exception:
+            pass
+        if not maximized:
+            try:
+                top.attributes('-zoomed', True)
+                maximized = True
+            except Exception:
+                pass
+        if not maximized:
+            try:
+                sw = top.winfo_screenwidth()
+                sh = top.winfo_screenheight()
+                top.geometry("%dx%d+0+0" % (sw, sh))
+            except Exception:
+                top.geometry("1400x800")
+
+        top.protocol("WM_DELETE_WINDOW", self._hide_help)
+
+        header = tk.Frame(top, bg='#1a1a2e')
+        header.pack(side=tk.TOP, fill=tk.X)
+        tk.Label(
+            header, text="СПРАВКА — audio_speed_calc",
+            font=("Consolas", 12, "bold"),
+            fg='white', bg='#1a1a2e', pady=6
+        ).pack()
+
+        main_frame = tk.Frame(top, bg='#f0f0f0')
+        main_frame.pack(fill=tk.BOTH, expand=True,
+                        padx=4, pady=4)
+        font_spec = ("Consolas", 9)
+
+        def _make_col(parent_w, lines, title, color, width):
+            col = tk.LabelFrame(
+                parent_w, text=title,
+                font=("Consolas", 10, "bold"),
+                fg='white', bg=color, bd=2)
+            col.pack(side=tk.LEFT, fill=tk.BOTH, expand=True,
+                     padx=4, pady=4)
+            txt = scrolledtext.ScrolledText(
+                col, wrap=tk.NONE, font=font_spec,
+                width=width, height=40, bd=0, bg='#f8f8f0')
+            txt.pack(fill=tk.BOTH, expand=True)
+            txt.insert(tk.END, '\n'.join(lines))
+            txt.configure(state='disabled')
+            return txt
+
+        _make_col(main_frame, HELP_LEFT_LINES,
+                  "1. Основное",       '#2c5f2d', width=40)
+        _make_col(main_frame, HELP_MID_LINES,
+                  "2. Управление",     '#8b5a00', width=36)
+        _make_col(main_frame, HELP_RIGHT_LINES,
+                  "3. Справочная",     '#1a3a6c', width=38)
+
+        bottom = tk.Frame(top)
+        bottom.pack(side=tk.BOTTOM, fill=tk.X, padx=6, pady=6)
+        tk.Button(
+            bottom, text="Закрыть (Esc)",
+            command=self._hide_help,
+            font=("Consolas", 11),
+            bg='#e0e0e0', padx=20, pady=4
+        ).pack(side=tk.RIGHT)
+        tk.Label(
+            bottom,
+            text="Прокрутка: колёсико мыши. Esc — закрыть.",
+            font=("Consolas", 9), fg='gray'
+        ).pack(side=tk.LEFT)
+
+        top.bind('<Escape>', lambda e: self._hide_help())
+        top.bind('<Control-w>', lambda e: self._hide_help())
+
+        self.help_window = top
         self.help_visible = True
-        self.fig.canvas.draw_idle()
+        try:
+            top.focus_force()
+        except Exception:
+            pass
+        print("[help] окно справки открыто (3 колонки, Toplevel)",
+              file=sys.stderr)
 
     def _hide_help(self):
-        if self.help_visible and hasattr(self, 'help_obj'):
+        """[v0.58.14] Закрывает окно справки (Toplevel)."""
+        win = getattr(self, 'help_window', None)
+        if win is not None:
+            try:
+                win.destroy()
+            except Exception:
+                pass
+            self.help_window = None
+            print("[help] окно справки закрыто", file=sys.stderr)
+        if getattr(self, 'help_obj', None) is not None:
             try:
                 self.help_obj.remove()
             except Exception:
                 pass
             self.help_obj = None
-            self.help_visible = False
+        self.help_visible = False
+        try:
             self.fig.canvas.draw_idle()
+        except Exception:
+            pass
+        try:
+            self.fig.canvas.manager.window.focus_force()
+        except Exception:
+            pass
 
 
 def prompt_car_params(config, config_path):

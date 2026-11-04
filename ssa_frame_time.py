@@ -76,28 +76,24 @@ def _read_text_auto(path):
     return raw.decode('latin-1', errors='replace')
 
 
-def _parse_ssa_dt(ssa_path):
-    if not ssa_path or not os.path.isfile(ssa_path):
+    def _parse_ssa_dt(self, ssa_path):
+        """Возвращает datetime из первого Dialogue .ssa, где есть Дата/Время."""
+        import re
+        if not ssa_path or not os.path.isfile(ssa_path):
+            return None
+        try:
+            with open(ssa_path, 'r', encoding='utf-8', errors='replace') as f:
+                for line in f:
+                    if 'Дата/Время:' not in line:
+                        continue
+                    m = re.search(
+                        r'Дата/Время:\s*(\d{4})-(\d{2})-(\d{2})\s+'
+                        r'(\d{2}):(\d{2}):(\d{2})', line)
+                    if m:
+                        return datetime.datetime(*map(int, m.groups()))
+        except Exception:
+            return None
         return None
-    text = _read_text_auto(ssa_path)
-    if text is None:
-        return None
-    for line in text.splitlines():
-        if not line.startswith('Dialogue:'):
-            continue
-        m = re.search(
-            r'Дата/Время:\s*'
-            r'(\d{4})-(\d{2})-(\d{2})\s+'
-            r'(\d{2}):(\d{2}):(\d{2})', line)
-        if m:
-            try:
-                return datetime(*map(int, m.groups()))
-            except Exception:
-                return None
-        break
-    return None
-
-
 def resolve_base_dt(ssa_path, mtime_path, warn_sec):
     mt = None
     if mtime_path and os.path.isfile(mtime_path):

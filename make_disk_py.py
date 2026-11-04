@@ -891,6 +891,34 @@ def _compute_fragment_info(ts_file, cfg, fps_used, has_b,
 # ==============================================================
 # MAIN run
 # ==============================================================
+
+def _patch_ssa_gps_time(ssa_path, lag_sec):
+    """Сдвигает Датa/Время GPS внутри .ssa на lag_sec."""
+    import re
+    from datetime import datetime, timedelta
+    if not os.path.isfile(ssa_path) or abs(lag_sec) < 0.01:
+        return
+    try:
+        with open(ssa_path, 'r', encoding='utf-8', errors='replace') as f:
+            text = f.read()
+            
+        def repl(m):
+            dt_str = m.group(0)
+            try:
+                dt = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
+                dt_new = dt + timedelta(seconds=lag_sec)
+                return dt_new.strftime("%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                return dt_str
+
+        text = re.sub(r'\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}', repl, text)
+        
+        with open(ssa_path, 'w', encoding='utf-8', newline='') as f:
+            f.write(text)
+        print(f"  [GPS-TIME] .ssa GPS-время сдвинуто на {lag_sec:+.3f}с: {os.path.basename(ssa_path)}")
+    except Exception as e:
+        print(f"  [GPS-TIME] Ошибка сдвига .ssa: {e}", file=sys.stderr)
+
 def make_disk_run(ts_file, cfg, log_path=None, script_dir=None,
                    base_dt_override_iso=None, only_ssa=False):
     ts_file = os.path.abspath(ts_file)
@@ -978,6 +1006,10 @@ def make_disk_run(ts_file, cfg, log_path=None, script_dir=None,
         base_dt_offset_sec=_bd_off,
     )
     _log(f"[base] base_dt_video = {base_dt_video} (source: {src})")
+    _log(f"[base] msk_base_dt_override = "
+         f"{cfg.get('msk_base_dt_override')}")
+    _log(f"[base] modes: msk={cfg.get('msk_correction_mode', 'current')} "
+         f"gps={cfg.get('gps_correction_mode', 'current')}")
     if base_dt_video is None:
         _log(f"[base] base_dt_video НЕ НАЙДЕН — MSK не будет", "W")
 
@@ -1063,6 +1095,32 @@ def make_disk_run(ts_file, cfg, log_path=None, script_dir=None,
              "I" if ok else "E")
         results.append(("otchet_full", 0 if ok else 1))
         ssa_full_ok = ssa_full if ok else None
+        # v6: сохранить _ssa_pre_split ДО GPS-коррекции (чистая база
+        # для _zero.ssa). Сохраняем один раз, в [3], до [5-pre].
+        if ssa_full_ok and cfg.get("ssa_write_zero_offset_copy", False):
+            if not locals().get('_ssa_pre_split'):
+                try:
+                    _ssa_pre_split = ssa_full_ok + ".presplit"
+                    shutil.copy2(ssa_full_ok, _ssa_pre_split)
+                    _log("[3-pre] saved _ssa_pre_split (before GPS corr)")
+                except OSError as _e:
+                    _log(f"[3-pre] WARN: {_e}", "W")
+
+        # [GPS-TIME] Применяем GPS-лаг к .ssa (full)
+        # v5: текстовый сдвиг ОТКЛЮЧЁН — содержимое
+        # переставляется кадрами в [5.5] на
+        # K = round(ssa_gps_time_correction_sec * fps).
+        # Двойного сдвига нет.
+        if ssa_full_ok:
+            _gps_sec = float(cfg.get(
+                "ssa_gps_time_correction_sec", 0.0))
+            if abs(_gps_sec) > 0.001:
+                _log(f"[GPS] text-patch SKIP — "
+                     f"содержимое переставится в [5.5] "
+                     f"(gps_sec={_gps_sec:+.4f}, "
+                     f"K={int(round(_gps_sec * fps_used))})")
+            else:
+                _log("[GPS] skip/full (gps_sec=0)")
     else:
         _log(f"[3] otchet SKIP", "S")
 
@@ -1083,11 +1141,26 @@ def make_disk_run(ts_file, cfg, log_path=None, script_dir=None,
         except OSError:
             pass
 
+    # v6: _ssa_pre_split сохранён ранее, в [3], ДО GPS-коррекции.
+    # Здесь только проверяем, что переменная существует.
+    try:
+        _ = _ssa_pre_split
+    except NameError:
+        _ssa_pre_split = None
+
     # ============ [5] split full .ssa -> кадры ============
     if ssa_full_ok and base_dt_video is not None and not only_ssa:
-        time_corr = float(cfg.get("ssa_time_correction_sec", 0.0))
-        msk_off = float(cfg.get("msk_manual_offset_sec", 0.0))
-        precision = ("ms" if cfg.get("ssa_time_precision_ms", True)
+        _msk_mode = cfg.get('msk_correction_mode', 'current')
+        if _msk_mode == 'skip':
+            time_corr = 0.0
+            msk_off = 0.0
+        else:
+            time_corr = float(cfg.get("ssa_time_correction_sec", 0.0))
+            msk_off = float(cfg.get("msk_manual_offset_sec", 0.0))
+        print(f"[DIAG] MSK mode={_msk_mode} time_corr={time_corr:+.4f} "
+              f"msk_off={msk_off:+.4f} base_dt_video={base_dt_video}",
+              file=sys.stderr, flush=True)
+        precision = ("ms" if cfg.get("ssa_time_precision_ms", False)
                      else "cc")
         tmp = ssa_full_ok + ".split"
         res = split_ssa_to_frames(
@@ -1111,6 +1184,82 @@ def make_disk_run(ts_file, cfg, log_path=None, script_dir=None,
         else:
             _log(f"[5] split full FAIL", "E")
             results.append(("split_full", 1))
+
+    # ============ [5z] zero-offset .ssa ============
+    if (_ssa_pre_split and os.path.isfile(_ssa_pre_split)
+            and base_dt_video is not None):
+        _zero_out = os.path.join(series_dir, base + "_zero.ssa")
+        _precision0 = ("ms" if cfg.get("ssa_time_precision_ms", False)
+                       else "cc")
+        _res_z = split_ssa_to_frames(
+            _ssa_pre_split, _zero_out, fps_used, base_dt_video,
+            frame_start_in_full=0, speeds=speeds,
+            time_offset_for_speeds=0.0,
+            time_corr=0.0, msk_offset=0.0,
+            precision=_precision0)
+        if _res_z:
+            _log(f"[5z] zero-offset .ssa: {os.path.basename(_zero_out)} "
+                 f"({_res_z[0]} -> {_res_z[1]} dialogues)")
+            results.append(("zero_offset_ssa", 0))
+        else:
+            _log("[5z] zero-offset .ssa FAIL", "E")
+            results.append(("zero_offset_ssa", 1))
+        try:
+            os.remove(_ssa_pre_split)
+        except OSError:
+            pass
+
+    # ============ [5.5] gps_shift full ============
+    if (ssa_full_ok and not only_ssa
+            and cfg.get("ssa_gps_shift_frames", 0)):
+        gps_shift_helper = os.path.join(script_dir,
+                                        "ssa_shift_gps_content.py")
+        if os.path.isfile(gps_shift_helper):
+            _k = int(cfg.get("ssa_gps_shift_frames", 0))
+            rc, _, _ = _run(
+                [py_exe, gps_shift_helper,
+                 "--ssa", ssa_full_ok,
+                 "--shift-frames", str(_k)],
+                log_prefix="gps_shift full")
+            _log(f"[5.5] gps_shift full K={_k} "
+                 f"{'OK' if rc == 0 else 'FAIL'}",
+                 "I" if rc == 0 else "E")
+            results.append(("gps_shift_full", rc))
+            sidecar = os.path.join(series_dir, base + ".ssa")
+            try:
+                shutil.copy2(ssa_full_ok, sidecar)
+            except OSError:
+                pass
+        else:
+            _log("[5.5] gps_shift SKIP — helper не найден", "W")
+
+    # ============ [5.5] gps_content_shift full ============
+    # K = round(ssa_gps_time_correction_sec * fps)
+    # (ssa_gps_time_correction_sec — из GUI правой кнопкой)
+    _gps_sec_full = float(cfg.get(
+        "ssa_gps_time_correction_sec", 0.0))
+    _k_full = int(round(_gps_sec_full * fps_used))
+    if (ssa_full_ok and not only_ssa and _k_full != 0):
+        gps_shift_helper = os.path.join(script_dir,
+                                        "ssa_shift_gps_content.py")
+        if os.path.isfile(gps_shift_helper):
+            rc, _, _ = _run(
+                [py_exe, gps_shift_helper,
+                 "--ssa", ssa_full_ok,
+                 "--shift-frames", str(_k_full)],
+                log_prefix="gps_shift full")
+            _log(f"[5.5] gps_shift full K={_k_full} "
+                 f"(gps_sec={_gps_sec_full:+.4f}, fps={fps_used}) "
+                 f"{'OK' if rc == 0 else 'FAIL'}",
+                 "I" if rc == 0 else "E")
+            results.append(("gps_shift_full", rc))
+            sidecar = os.path.join(series_dir, base + ".ssa")
+            try:
+                shutil.copy2(ssa_full_ok, sidecar)
+            except OSError:
+                pass
+        else:
+            _log("[5.5] gps_shift SKIP — helper не найден", "W")
 
     # ============ [6] apply-style ============
     # py12: apply-style ОТКЛЮЧЁН по умолчанию.
@@ -1238,6 +1387,17 @@ def make_disk_run(ts_file, cfg, log_path=None, script_dir=None,
                  "I" if ok else "E")
             results.append(("otchet_frag", 0 if ok else 1))
             ssa_frag_ok = ssa_frag if ok else None
+        # [GPS-TIME] Применяем GPS-лаг к .ssa (frag)
+        # v5: текстовый сдвиг ОТКЛЮЧЁН — см. [5.5].
+        if ssa_frag_ok:
+            _gps_sec_f = float(cfg.get(
+                "ssa_gps_time_correction_sec", 0.0))
+            if abs(_gps_sec_f) > 0.001:
+                _log(f"[GPS] text-patch [frag] SKIP — "
+                     f"содержимое переставится в [12.5] "
+                     f"(gps_sec={_gps_sec_f:+.4f})")
+            else:
+                _log("[GPS] skip/frag (gps_sec=0)")
 
         # [10b] py9: fallback если frag .ssa пустой
         # (в 0.8с фрагменте может не быть пакета 0x0300)
@@ -1251,7 +1411,7 @@ def make_disk_run(ts_file, cfg, log_path=None, script_dir=None,
                  "полного .ssa", "W")
             time_corr = float(cfg.get("ssa_time_correction_sec", 0.0))
             msk_off = float(cfg.get("msk_manual_offset_sec", 0.0))
-            precision = ("ms" if cfg.get("ssa_time_precision_ms", True)
+            precision = ("ms" if cfg.get("ssa_time_precision_ms", False)
                          else "cc")
             # py13: offset_frames (default -1) — tsp захватывает
             # 1 видео-пакет преролла; реальный кадр 0 в .TS на 1 меньше.
@@ -1300,7 +1460,7 @@ def make_disk_run(ts_file, cfg, log_path=None, script_dir=None,
                 and base_dt_video is not None):
             time_corr = float(cfg.get("ssa_time_correction_sec", 0.0))
             msk_off = float(cfg.get("msk_manual_offset_sec", 0.0))
-            precision = ("ms" if cfg.get("ssa_time_precision_ms", True)
+            precision = ("ms" if cfg.get("ssa_time_precision_ms", False)
                          else "cc")
             first_frame = max(0, int(frag["frame_start_eff"]))
             tmp = ssa_frag_ok + ".split"
@@ -1321,6 +1481,49 @@ def make_disk_run(ts_file, cfg, log_path=None, script_dir=None,
             else:
                 _log(f"[12] split frag FAIL", "E")
                 results.append(("split_frag", 1))
+
+        # [12.5] gps_shift frag
+        if (not _fallback_used and ssa_frag_ok
+                and cfg.get("ssa_gps_shift_frames", 0)):
+            gps_shift_helper = os.path.join(
+                script_dir, "ssa_shift_gps_content.py")
+            if os.path.isfile(gps_shift_helper):
+                _k = int(cfg.get("ssa_gps_shift_frames", 0))
+                rc, _, _ = _run(
+                    [py_exe, gps_shift_helper,
+                     "--ssa", ssa_frag_ok,
+                     "--shift-frames", str(_k)],
+                    log_prefix="gps_shift frag")
+                _log(f"[12.5] gps_shift frag K={_k} "
+                     f"{'OK' if rc == 0 else 'FAIL'}",
+                     "I" if rc == 0 else "E")
+                results.append(("gps_shift_frag", rc))
+            else:
+                _log("[12.5] gps_shift [frag] SKIP — "
+                     "helper не найден", "W")
+
+        # [12.5] gps_content_shift frag
+        _gps_sec_frag = float(cfg.get(
+            "ssa_gps_time_correction_sec", 0.0))
+        _k_frag = int(round(_gps_sec_frag * fps_used))
+        if (not _fallback_used and ssa_frag_ok
+                and _k_frag != 0):
+            gps_shift_helper = os.path.join(
+                script_dir, "ssa_shift_gps_content.py")
+            if os.path.isfile(gps_shift_helper):
+                rc, _, _ = _run(
+                    [py_exe, gps_shift_helper,
+                     "--ssa", ssa_frag_ok,
+                     "--shift-frames", str(_k_frag)],
+                    log_prefix="gps_shift frag")
+                _log(f"[12.5] gps_shift frag K={_k_frag} "
+                     f"(gps_sec={_gps_sec_frag:+.4f}) "
+                     f"{'OK' if rc == 0 else 'FAIL'}",
+                     "I" if rc == 0 else "E")
+                results.append(("gps_shift_frag", rc))
+            else:
+                _log("[12.5] gps_shift [frag] SKIP — "
+                     "helper не найден", "W")
 
         # sidecar копируем ВСЕГДА (и после fallback, и после split)
         if ssa_frag_ok:
